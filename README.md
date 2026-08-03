@@ -20,7 +20,7 @@ npm run build
 在目标代码仓库中运行（默认执行器为 `codebuddy`）：
 
 ```powershell
-node C:\path\to\codebuddy-orchestrator\dist\src\cli.js run `
+node C:\path\to\cbx-orch\dist\src\cli.js run `
   --workspace . `
   --task "实现用户登录功能" `
   --test "npm test" `
@@ -136,7 +136,7 @@ node dist/src/cli.js run --ci --workspace . --task "实现某功能" --test "npm
 最小 MCP stdio 适配器，不依赖 MCP SDK：
 
 ```powershell
-node C:\path\to\codebuddy-orchestrator\dist\src\mcp-server.js
+node C:\path\to\cbx-orch\dist\src\mcp-server.js
 ```
 
 提供的工具：`cbx_start`、`cbx_status`、`cbx_review`、`cbx_continue`、`cbx_cancel`、`cbx_approve`、`cbx_list`、`cbx_logs`、`cbx_result`、`cbx_queue`、`cbx_queue_pause`、`cbx_queue_resume`、`cbx_retry`。

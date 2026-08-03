@@ -59,7 +59,7 @@ test("MCP initialize, tools, resources and errors preserve request ids", async (
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   });
   try {
-    assert.equal(((await call(1, "initialize")).result as { serverInfo: { name: string } }).serverInfo.name, "cbx-orchestrator");
+    assert.equal(((await call(1, "initialize")).result as { serverInfo: { name: string } }).serverInfo.name, "cbx-orch");
     assert.ok(((await call(2, "tools/list")).result as { tools: unknown[] }).tools.length > 5);
     const status = await call(3, "tools/call", { name: "cbx_status", arguments: { workspace, job_id: job.jobId } });
     assert.equal((((status.result as { structuredContent: { jobId: string } }).structuredContent).jobId), job.jobId);
@@ -71,6 +71,18 @@ test("MCP initialize, tools, resources and errors preserve request ids", async (
     const error = await call(73, "unknown/method");
     assert.equal(error.id, 73);
     assert.match(String((error.error as { message: string }).message), /未知方法/);
+    // Per JSON-RPC 2.0: a notification (no id) must not receive a response.
+    // Send initialized notification, then a real request and assert it still works.
+    const collected: string[] = [];
+    const collectListener = (chunk: Buffer) => { collected.push(chunk.toString("utf8")); };
+    child.stdout.on("data", collectListener);
+    try {
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+      await new Promise(resolve => setTimeout(resolve, 150));
+      const check = await call(74, "ping");
+      assert.deepEqual((check.result as Record<string, unknown>), {});
+      assert.equal(collected.some(line => line.includes("notifications/initialized") || line.includes('"id":null')), false, "notification 不应产生响应");
+    } finally { child.stdout.off("data", collectListener); }
   } finally { child.kill(); }
 });
 

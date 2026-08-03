@@ -3,7 +3,7 @@ import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { approveJob, cancelJob, createJob, jobDir, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, startBackground } from "./core.js";
 
-const serverInfo = { name: "cbx-orchestrator", version: "0.8.0" };
+const serverInfo = { name: "cbx-orch", version: "0.8.0" };
 function send(id: unknown, result?: unknown, error?: unknown): void {
   const response: Record<string, unknown> = { jsonrpc: "2.0", id };
   if (error !== undefined) response.error = error; else response.result = result;
@@ -67,6 +67,9 @@ input.on("line", async (line) => {
   try {
     const request = JSON.parse(line) as { id?: unknown; method?: string; params?: Record<string, unknown> };
     requestId = request.id ?? null;
+    // Per JSON-RPC 2.0, a request without an id is a notification and must not receive a response.
+    const isNotification = request.id === undefined || request.id === null;
+    if (isNotification && request.method && request.method !== "ping") return;
     if (request.method === "initialize") send(request.id, { protocolVersion: "2024-11-05", capabilities: { tools: {}, resources: { subscribe: false, listChanged: false } }, serverInfo });
     else if (request.method === "ping") send(request.id, {});
     else if (request.method === "tools/list") send(request.id, { tools });

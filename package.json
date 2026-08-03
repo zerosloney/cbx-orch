@@ -1,5 +1,5 @@
 {
-  "name": "codebuddy-orchestrator",
+  "name": "cbx-orch",
   "version": "0.8.0",
   "private": true,
   "type": "module",
