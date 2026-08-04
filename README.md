@@ -48,18 +48,21 @@ node dist\src\cli.js clean JOB_ID
 
 ## 执行器
 
-`executor` 决定编排器实际调用哪个编码 CLI。内置 3 个适配器，也可指向自定义 ESM 插件。
+`executor` 决定编排器实际调用哪个编码 CLI。内置 4 个适配器，也可指向自定义 ESM 插件。
 
-| 执行器 | 注册名 / 别名 | 二进制 | 一次性调用 | 安装 | 覆盖 env |
-|---|---|---|---|---|---|
-| CodeBuddy | `codebuddy` / `cbc` | `codebuddy` | `-p "<prompt>" --output-format stream-json --max-turns N --permission-mode M` | `npm i -g @tencent-ai/codebuddy-code` | `CBX_CODEBUDDY` |
-| OpenCode | `opencode` | `opencode` | `run "<prompt>" --format json [--auto]` | `npm i -g opencode-ai` | `CBX_OPENCODE` |
-| Pi | `pi` / `oh-my-pi` | `pi` | `-p "<prompt>" --mode json [-a]` | `npm i -g @earendil-works/pi-coding-agent` | `CBX_PI` |
+| 执行器    | 注册名 / 别名          | 二进制      | 一次性调用                                                                    | 安装                                       | 覆盖 env        |
+| --------- | ---------------------- | ----------- | ----------------------------------------------------------------------------- | ------------------------------------------ | --------------- |
+| CodeBuddy | `codebuddy` / `cbc`    | `codebuddy` | `-p "<prompt>" --output-format stream-json --max-turns N --permission-mode M` | `npm i -g @tencent-ai/codebuddy-code`      | `CBX_CODEBUDDY` |
+| OpenCode  | `opencode`             | `opencode`  | `run "<prompt>" --format json [--auto]`                                       | `npm i -g opencode-ai`                     | `CBX_OPENCODE`  |
+| Pi        | `pi` / `oh-my-pi`      | `pi`        | `-p "<prompt>" --mode json [-a]`                                              | `npm i -g @earendil-works/pi-coding-agent` | `CBX_PI`        |
+| omp       | `omp` / `oh-my-pi-omp` | `omp`       | `-p "<prompt>" --mode json`                                                   | `npm i -g @oh-my-pi/pi-coding-agent`       | `CBX_OMP`       |
 
 说明：
-- `oh-my-pi` 是 Pi 的扩展框架，本身不是独立二进制，因此作为 `pi` 的别名。
+
+- `oh-my-pi` 是 Pi 的扩展框架，本身不是独立二进制，因此作为 `pi` 的别名；`omp` 是独立产品（`@oh-my-pi/pi-coding-agent`），与 `pi` 不共享二进制。
 - `--auto`（OpenCode）/ `-a`（Pi）仅在 `permissionMode` 为 `auto` 或 `dontAsk` 时追加；`default`/`acceptEdits`/`plan` 不追加，让 CLI 自行按默认权限行事。
-- 三个 CLI 都没有 `--max-turns`：OpenCode/Pi 靠 `--timeout-ms` 兜底；CodeBuddy 保留该 flag。
+- omp 的 CLI 文档未公开权限/放行 flag，因此当前不追加任何权限参数，由 omp 非交互 `-p` 默认行为决定；待其暴露后补齐。
+- 四个 CLI 中只有 CodeBuddy 保留 `--max-turns`；其余靠 `--timeout-ms` 兜底。
 - 通过对应的 env 变量可覆盖二进制路径，常用于测试或指向自定义脚本。
 - 自定义插件：`executor` 指向一个 ESM 模块路径，模块导出 `run(request)`，返回 `{ code, output, timedOut }`。示例见 `plugins/example-executor.mjs`。
 
@@ -84,13 +87,21 @@ node dist\src\cli.js clean JOB_ID
     "autoCommit": true,
     "commitMessage": "chore: apply task"
   },
+  "execution": { "trustMode": "trusted" },
   "notifications": {
-    "webhook": "https://example.test/cbx-events"
+    "webhook": "https://example.test/cbx-events",
+    "timeoutMs": 3000,
+    "maxRetries": 2,
+    "retryBaseMs": 100
   },
   "telemetry": {
     "enabled": true,
     "endpoint": "http://localhost:4318/v1/traces",
     "serviceName": "cbx-orchestrator"
+  },
+  "governance": {
+    "retentionDays": 30,
+    "redactFields": ["token", "password", "authorization"]
   }
 }
 ```
@@ -115,21 +126,54 @@ node dist/src/cli.js tui --workspace .
 
 # CI 模式：任务失败时返回非 0 退出码
 node dist/src/cli.js run --ci --workspace . --task "实现某功能" --test "npm test"
+
+# 单次调度：回收死 worker 并启动排队任务
+node dist/src/cli.js dispatch --workspace .
+
+# 常驻调度器：启动时回收死 worker，随后按间隔调度；SIGINT/SIGTERM 会停止调度器
+node dist/src/cli.js serve --workspace . --interval-ms 30000
+
+# 不含任务正文的健康与运行指标
+node dist/src/cli.js health --workspace .
 ```
+
+`continue` 默认将任务重新入队（后台执行）。加 `--foreground` 走前台同步语义（阻塞至完成）。
 
 配置了 `approval.beforeRun` 后，任务会先进入 `awaiting_approval`，批准后才启动执行器。
 
 `git.autoCommit` 要求 `isolated` 为 `true`，完成后会在 `cbx/<job-id>` 分支提交修改。
 
-`notifications.webhook` 接收任务状态事件；事件同时会写入 `.cbx/events.ndjson`。启用 `telemetry` 后，任务 span 会写入 `.cbx/telemetry.ndjson`，并按 OTLP/HTTP JSON 发送到配置的 endpoint。
+后台 worker 是 detached 进程。可使用常驻 `serve` 监护队列；它启动时会回收死 worker，仍可用 `dispatch` 供 cron/计划任务执行。
+
+`notifications.webhook` 接收任务状态事件；事件同时会写入 `.cbx/events.ndjson`。webhook 和 OTLP 都支持 `timeoutMs`、`maxRetries`、`retryBaseMs`，非 2xx 会失败并有限指数退避；最终失败会落到 `.cbx/delivery-failures.ndjson`，不会无限阻塞状态写入。启用 `telemetry` 后，任务 span 会写入 `.cbx/telemetry.ndjson`，并按 OTLP/HTTP JSON 发送到配置的 endpoint。
+
+任务状态、队列和通知死信的权威数据存储在 `.cbx/state.sqlite`（WAL 模式、版本化 migration）；首次访问会无损导入旧的 `.cbx/jobs/*/state.json`、`queue.json` 和 `delivery-failures.ndjson`。这些 JSON/NDJSON artifact 会继续保留以便人工查看，但不再作为调度一致性的依据；worker 终态与对应队列条目、以及 retry 的状态重置与重新入队，均在同一 SQLite transaction 提交。常驻 `serve` 使用工作区单实例租约，发现另一个存活实例会拒绝启动。`/healthz` 与 `/api/metrics`、以及 `cbx health` 返回队列深度、任务状态计数、失败/重试与死信计数，且不包含任务正文。
 
 ## Executor 插件
 
-`executor` 可以指向一个 ESM 模块。模块导出 `run(request)`，返回 `{ code, output, timedOut }`。示例见 `plugins/example-executor.mjs`：
+`executor` 可以指向一个 ESM 模块。插件应导出版本化 `manifest` 和 `run(request)`；manifest 使用 `cbx.executor/v1`，包含 `name`、`version` 和最小能力声明（例如 `execute`）。示例见 `plugins/example-executor.mjs`：
 
 ```json
 { "executor": "./plugins/example-executor.mjs" }
 ```
+
+默认兼容历史的仅 `run` 插件。生产环境可启用严格治理：`plugins.enforce=true` 时必须为插件配置 `allowPaths` 或 `allowSha256`，并且每个已配置的 allowlist 都必须匹配；缺少 manifest、未批准路径或摘要都会被拒绝。任务事件只记录内置适配器来源/版本，或插件名称、版本、能力和 SHA-256，不记录环境变量值。
+
+```json
+{
+  "plugins": {
+    "enforce": true,
+    "allowPaths": ["./plugins/example-executor.mjs"],
+    "allowSha256": ["replace-with-64-hex-character-sha256"]
+  }
+}
+```
+
+## 质量与发布
+
+`npm run check` 执行类型 lint、格式检查和测试；`npm run coverage` 运行 Node 测试覆盖率；`npm run audit` 检查高危依赖问题；`npm run sbom` 生成 CycloneDX SBOM。CI 在 Node 20、22 和 24 上执行这些确定性检查并上传测试、覆盖率和 SBOM 工件。
+
+发布遵循 Semantic Versioning；`package.json.files` 明确限定发布内容。当前包保持 `private`，在准备公开发布前应移除该标记、更新版本和 `CHANGELOG.md`。
 
 ## MCP
 
@@ -146,8 +190,11 @@ MCP 还提供 `resources/list` 和 `resources/read`，可直接读取任务的 `
 ## 安全说明
 
 - 默认权限模式 `auto`。可通过 `--permission-mode` 或配置覆盖；`dontAsk` 需显式 `--dangerously-skip-permissions`。
-- 测试命令由用户提供，会在目标工作区执行；不要把不可信输入直接作为测试命令。
-- `--isolated` 会创建 Git worktree，避免直接污染主工作区。
+- 测试命令由用户提供，会在目标工作区执行。cbx 只做有限黑名单过滤（正则可被变体绕过），**不保证命令安全**。建议始终用 `--isolated` 让测试在 worktree 内跑；非隔离时 cbx 会输出告警。
+- Web UI / TUI 仅绑定本机回环（127.0.0.1/::1），**不提供任何鉴权**。本机其他进程或浏览器仍可访问。远程共享必须放在带认证的反向代理之后。
+- `--isolated` 会创建 Git worktree，避免直接污染主工作区；**它不是 OS 安全沙箱**，不会隔离网络、凭据、宿主机文件或进程。
+- 默认 `execution.trustMode` 是 `trusted`。`untrusted` 任务需要 OS 容器沙箱；当前 cbx 没有内置容器 runner，因此会明确拒绝启动该模式。可通过 `--trust-mode trusted|untrusted` 覆盖配置。
+- `.cbx.json` 是严格 schema：未知字段、错误类型和越界值会拒绝加载，避免策略拼写错误静默失效。`governance.redactFields` 会递归脱敏事件、webhook 和死信中的同名字段；`governance.retentionDays` 会在状态更新和健康检查时原子压缩 `.cbx/delivery-failures.ndjson`，并同步清理过期 SQLite 死信记录。
 - `--timeout-ms` 限制执行器和测试命令的单次执行时间。
 - `--max-retries` 控制失败后的自动重试次数，默认 1 次。
 - 默认任务完成或失败后清理 isolated worktree；使用 `--keep-worktree` 保留。

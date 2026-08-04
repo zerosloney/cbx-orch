@@ -4,9 +4,9 @@ import { appendFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { finishSpan, publishEvent, startSpan } from "./observability.js";
-import type { ExecutorResult, ExecutorRequest } from "./executor.js";
+import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from "./executor.js";
 import { findExecutable, resolveExecutor } from "./executors/builtin.js";
-import { loadJson, now, saveJson, withFileLock } from "./storage.js";
+import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, withFileLock, type RuntimeConfig } from "./storage.js";
 import { runProcess, runShell, type ProcessResult } from "./process-runner.js";
 import { cleanupRecordedWorktree, collectDiff, commitWorktree, gitRoot, prepareWorktree, snapshotDiff } from "./git-ops.js";
 import * as queue from "./queue.js";
@@ -16,22 +16,7 @@ export type { QueueEntry, QueueEntryStatus, QueueFile } from "./queue.js";
 export type Json = Record<string, unknown>;
 export type JobStatus = "queued" | "running" | "awaiting_approval" | "needs_fix" | "review_failed" | "failed" | "done" | "cancelled";
 
-export interface CbxConfig {
-  testCommand?: string;
-  review?: boolean;
-  isolated?: boolean;
-  timeoutMs?: number;
-  maxRetries?: number;
-  maxTurns?: number;
-  keepWorktree?: boolean;
-  permissionMode?: string;
-  reviewRules?: string;
-  approval?: { beforeRun?: boolean };
-  maxConcurrent?: number;
-  git?: { autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string };
-  ci?: { failOnReview?: boolean };
-  executor?: string;
-}
+export type CbxConfig = RuntimeConfig;
 
 export interface JobContext {
   appVersion: string;
@@ -52,6 +37,7 @@ export interface JobContext {
   autoCommit: boolean;
   commitMessage: string;
   executor: string;
+  trustMode: "trusted" | "untrusted";
   gitRoot?: string;
 }
 
@@ -69,6 +55,13 @@ export interface JobState {
 
 const APP_VERSION = "0.8.0";
 
+/** 把降级路径的失败原因落到 job 事件流，避免裸吞导致排障无据。 */
+function logJobEvent(workspace: string, jobId: string, event: string, detail: Record<string, unknown> = {}): void {
+  try {
+    appendFileSync(path.join(jobDir(workspace, jobId), "events.ndjson"), JSON.stringify({ event, jobId, ...detail, at: now() }) + "\n", "utf8");
+  } catch { /* events file itself unreachable — nothing more we can do */ }
+}
+
 function assertJobId(jobId: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(jobId) || jobId === "." || jobId === "..") throw new Error(`无效的任务 ID：${jobId}`);
 }
@@ -79,21 +72,17 @@ export function jobDir(workspace: string, jobId: string): string {
 }
 
 export async function loadState(workspace: string, jobId: string): Promise<JobState> {
-  const value = await loadJson<JobState | undefined>(path.join(jobDir(workspace, jobId), "state.json"));
+  jobDir(workspace, jobId);
+  const value = await loadPersistedState<JobState>(workspace, jobId);
   if (!value || typeof value !== "object") throw new Error(`任务不存在或状态文件损坏：${jobId}`);
   return value;
 }
 
 export async function loadConfig(workspaceInput: string): Promise<CbxConfig> {
-  const workspace = path.resolve(workspaceInput);
-  const file = path.join(workspace, ".cbx.json");
-  if (!existsSync(file)) return {};
-  const value = await loadJson<CbxConfig>(file);
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(".cbx.json 必须是 JSON 对象。");
-  return value;
+  return loadRuntimeConfig(workspaceInput);
 }
 
-export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & { approvalBeforeRun?: boolean; autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string }): Required<Pick<CbxConfig, "review" | "isolated" | "timeoutMs" | "maxRetries" | "maxTurns" | "keepWorktree" | "permissionMode" | "maxConcurrent">> & Pick<CbxConfig, "testCommand" | "reviewRules" | "executor"> & { approvalBeforeRun: boolean; autoBranch: boolean; autoCommit: boolean; commitMessage: string } {
+export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & { approvalBeforeRun?: boolean; autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string; trustMode?: "trusted" | "untrusted" }): Required<Pick<CbxConfig, "review" | "isolated" | "timeoutMs" | "maxRetries" | "maxTurns" | "keepWorktree" | "permissionMode" | "maxConcurrent">> & Pick<CbxConfig, "testCommand" | "reviewRules" | "executor"> & { approvalBeforeRun: boolean; autoBranch: boolean; autoCommit: boolean; commitMessage: string; trustMode: "trusted" | "untrusted" } {
   return {
     testCommand: overrides.testCommand ?? config.testCommand,
     review: overrides.review ?? config.review ?? false,
@@ -108,16 +97,28 @@ export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & {
     maxConcurrent: overrides.maxConcurrent ?? config.maxConcurrent ?? 2,
     autoBranch: overrides.autoBranch ?? config.git?.autoBranch ?? false,
     autoCommit: overrides.autoCommit ?? config.git?.autoCommit ?? false,
-    commitMessage: overrides.commitMessage ?? config.git?.commitMessage ?? "chore(cbx): apply CodeBuddy task",
+    commitMessage: overrides.commitMessage ?? config.git?.commitMessage ?? "chore(cbx): apply task",
     executor: overrides.executor ?? config.executor ?? "codebuddy",
+    trustMode: overrides.trustMode ?? config.execution?.trustMode ?? "trusted",
   };
 }
 
-export async function writeState(workspace: string, jobId: string, updates: Json): Promise<JobState> {
+function assertExecutionPolicy(trustMode: string, isolated: boolean): asserts trustMode is "trusted" | "untrusted" {
+  if (trustMode !== "trusted" && trustMode !== "untrusted") throw new Error(`不支持的 trustMode：${trustMode}`);
+  if (trustMode === "untrusted") {
+    if (!isolated) throw new Error("untrusted 任务必须设置 isolated=true；Git worktree 不是安全沙箱。");
+    throw new Error("当前 cbx 未提供 OS 容器沙箱，拒绝启用 untrusted 模式；请使用受控的外部容器 runner。");
+  }
+}
+
+export async function writeState(workspace: string, jobId: string, updates: Json, queueEntryId?: string): Promise<JobState> {
   const state = await loadState(workspace, jobId);
   const previousStatus = state.status;
   Object.assign(state, updates, { updatedAt: now() });
+  if (queueEntryId) await savePersistedStateAndFinishQueue(workspace, jobId, state, queueEntryId);
+  else await savePersistedState(workspace, jobId, state);
   await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
+  await prunePersistedData(workspace, (await loadConfig(workspace)).governance?.retentionDays);
   try { await publishEvent(workspace, "job.state_changed", { jobId, previousStatus, status: state.status, phase: state.phase, attempt: state.attempt }); }
   catch { /* event delivery must not mask the durable state change */ }
   return state;
@@ -165,16 +166,22 @@ export async function createJob(options: {
   autoCommit?: boolean;
   commitMessage?: string;
   executor?: string;
+  trustMode?: "trusted" | "untrusted";
   jobId?: string;
 }): Promise<{ jobId: string; directory: string }> {
   const workspace = path.resolve(options.workspace);
   validateWorkspace(workspace);
   validateTestCommand(options.testCommand);
   validatePermissionMode(options.permissionMode, options.allowUnsafePermissions);
+  assertExecutionPolicy(options.trustMode ?? "trusted", options.isolated);
   if (!Number.isFinite(options.maxTurns) || options.maxTurns < 1) throw new Error("maxTurns 必须是正整数。");
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 100)) throw new Error("timeoutMs 必须不小于 100ms。");
   if (options.maxRetries !== undefined && (!Number.isInteger(options.maxRetries) || options.maxRetries < 0)) throw new Error("maxRetries 必须是非负整数。");
   if (options.autoCommit && !options.isolated) throw new Error("autoCommit 要求 isolated=true，避免提交主工作区中的无关修改。");
+  // 测试命令黑名单是软防线（正则可被变体绕过）。非隔离时强警告：cbx 不保证命令安全，应运行在受控环境。
+  if (options.testCommand && !options.isolated) {
+    console.error(`cbx 警告：测试命令将在主工作区执行（isolated=false），cbx 不保证其安全性：${options.testCommand}`);
+  }
   const jobId = normalizeJobId(options.jobId);
   const directory = jobDir(workspace, jobId);
   if (existsSync(directory)) throw new Error(`任务已存在：${jobId}`);
@@ -188,8 +195,9 @@ export async function createJob(options: {
     maxRetries: options.maxRetries ?? 1, keepWorktree: options.keepWorktree ?? false,
     reviewRules: options.reviewRules, approvalBeforeRun: options.approvalBeforeRun ?? false,
     autoBranch: options.autoBranch ?? false, autoCommit: options.autoCommit ?? false,
-    commitMessage: options.commitMessage ?? "chore(cbx): apply CodeBuddy task",
+    commitMessage: options.commitMessage ?? "chore(cbx): apply task",
     executor: options.executor ?? "codebuddy",
+    trustMode: options.trustMode ?? "trusted",
     gitRoot: gitRoot(workspace),
   };
   await saveJson(path.join(directory, "context.json"), context);
@@ -197,6 +205,7 @@ export async function createJob(options: {
     jobId, status: "queued", phase: "queued", workspace, jobDir: directory,
     createdAt: now(), updatedAt: now(), attempt: 0,
   };
+  await savePersistedState(workspace, jobId, state);
   await saveJson(path.join(directory, "state.json"), state);
   return { jobId, directory };
 }
@@ -217,6 +226,7 @@ async function invokeBuiltin(spec: ReturnType<typeof resolveExecutor> & {}, dire
   const command = executable[0];
   const eventsFile = path.join(directory, "events.ndjson");
   const outputLog = path.join(directory, "agent.log");
+  appendFileSync(eventsFile, JSON.stringify({ event: "executor_metadata", source: "builtin", name: spec.name, version: APP_VERSION, at: now() }) + "\n", "utf8");
   appendFileSync(eventsFile, JSON.stringify({ event: "process_started", command: [command, ...args], cwd: workdir, at: now() }) + "\n", "utf8");
   const result = await runProcess(command, args, workdir, timeoutMs, outputLog, path.join(directory, "active.pid"));
   appendFileSync(eventsFile, JSON.stringify({ event: "process_finished", returncode: result.code, timedOut: result.timedOut, at: now() }) + "\n", "utf8");
@@ -226,8 +236,11 @@ async function invokeBuiltin(spec: ReturnType<typeof resolveExecutor> & {}, dire
 async function invokeExecutor(executor: string, workspace: string, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number): Promise<ProcessResult> {
   const builtin = resolveExecutor(executor);
   if (builtin) return invokeBuiltin(builtin, directory, workdir, prompt, permissionMode, maxTurns, timeoutMs);
-  const request: ExecutorRequest = { directory, workdir, prompt, permissionMode, maxTurns, timeoutMs, executor };
-  appendFileSync(path.join(directory, "events.ndjson"), JSON.stringify({ event: "plugin_started", executor, at: now() }) + "\n", "utf8");
+  const config = await loadConfig(workspace);
+  const identity = await inspectExecutorPlugin(executor, workspace, config.plugins);
+  const request: ExecutorRequest = { directory, workdir, prompt, permissionMode, maxTurns, timeoutMs, executor, plugin: { policy: config.plugins, sha256: identity.sha256 } };
+  appendFileSync(path.join(directory, "events.ndjson"), JSON.stringify({ event: "executor_metadata", source: identity.source, name: identity.name, version: identity.version, apiVersion: identity.apiVersion, capabilities: identity.capabilities, sha256: identity.sha256, at: now() }) + "\n", "utf8");
+  appendFileSync(path.join(directory, "events.ndjson"), JSON.stringify({ event: "plugin_started", executor: identity.name, at: now() }) + "\n", "utf8");
   const requestFile = path.join(directory, "plugin-request.json");
   await saveJson(requestFile, request);
   const host = path.join(path.dirname(fileURLToPath(import.meta.url)), "plugin-host.js");
@@ -255,15 +268,16 @@ const ARTIFACTS = new Set(["request.md", "context.json", "state.json", "events.n
 
 export async function listJobs(workspaceInput: string): Promise<JobState[]> {
   const workspace = path.resolve(workspaceInput);
-  const root = path.join(workspace, ".cbx", "jobs");
-  if (!existsSync(root)) return [];
-  const entries = await readdir(root, { withFileTypes: true });
-  const jobs: JobState[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    try { jobs.push(await loadState(workspace, entry.name)); } catch { /* ignore incomplete job directories */ }
-  }
-  return jobs.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  return listPersistedStates<JobState>(workspace);
+}
+
+async function saveStateAndQueue(workspace: string, jobId: string, state: Record<string, unknown>, queueFile: QueueFile): Promise<void> {
+  const previousStatus = (await loadState(workspace, jobId)).status;
+  await savePersistedStateAndQueue(workspace, jobId, state, queueFile);
+  await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
+  await prunePersistedData(workspace, (await loadConfig(workspace)).governance?.retentionDays);
+  try { await publishEvent(workspace, "job.state_changed", { jobId, previousStatus, status: state.status, phase: state.phase, attempt: state.attempt }); }
+  catch { /* durable state and queue transaction must not depend on delivery */ }
 }
 
 export async function readArtifact(workspaceInput: string, jobId: string, artifact: string): Promise<string> {
@@ -277,17 +291,25 @@ async function writeResult(workspace: string, jobId: string, state: JobState): P
   for (const file of ARTIFACTS) if (existsSync(path.join(directory, file))) files.push(file);
   await saveJson(path.join(directory, "result.json"), {
     jobId, status: state.status, phase: state.phase, attempt: state.attempt,
-    error: state.error ?? null, codebuddyExitCode: state.codebuddyExitCode ?? null,
+    error: state.error ?? null, executorExitCode: state.executorExitCode ?? state.codebuddyExitCode ?? null,
     testExitCode: state.testExitCode ?? null, reviewVerdict: state.reviewVerdict ?? null,
     files, updatedAt: now(),
   });
 }
 
-async function executeJobLocked(workspace: string, jobId: string, extra = ""): Promise<JobState> {
+async function executeJobLocked(workspace: string, jobId: string, extra = "", queueEntryId?: string): Promise<JobState> {
   const directory = jobDir(workspace, jobId);
   const initial = await loadState(workspace, jobId);
   const context = await loadJson<JobContext>(path.join(directory, "context.json"));
+  // intentional-simple: 只比对主版本。旧 job 跨版本续跑时告警但不硬阻断——context schema 向后兼容。
+  const jobMajor = String(context.appVersion ?? "").split(".")[0];
+  if (jobMajor && jobMajor !== APP_VERSION.split(".")[0]) {
+    const warning = `任务由 cbx v${context.appVersion} 创建，当前运行 v${APP_VERSION}；context schema 可能不兼容。`;
+    logJobEvent(workspace, jobId, "version_mismatch", { jobVersion: context.appVersion, runtimeVersion: APP_VERSION, warning });
+    console.error(`cbx: ${warning}`);
+  }
   const label = resolveExecutor(context.executor)?.label ?? "编码代理";
+  assertExecutionPolicy(context.trustMode ?? "trusted", context.isolated);
   if (context.approvalBeforeRun && initial.approved !== true) {
     return writeState(workspace, jobId, { status: "awaiting_approval", phase: "before_run", approvalRequired: true });
   }
@@ -310,7 +332,7 @@ async function executeJobLocked(workspace: string, jobId: string, extra = ""): P
         finalUpdates = { status: "failed", phase: "git_commit", error: String(error), gitCommit: null };
       }
     }
-    const result = await writeState(workspace, jobId, finalUpdates);
+    const result = await writeState(workspace, jobId, finalUpdates, queueEntryId);
     if (!context.keepWorktree && ["done", "failed", "needs_fix", "review_failed"].includes(String(result.status))) {
       try { await cleanupWorktree(workspace, jobId); await writeState(workspace, jobId, { worktreeCleaned: true }); }
       catch (error) { await writeState(workspace, jobId, { cleanupError: String(error) }); }
@@ -321,7 +343,7 @@ async function executeJobLocked(workspace: string, jobId: string, extra = ""): P
   };
   const finishCancelled = async (): Promise<JobState> => {
     try { await cleanupWorktree(workspace, jobId); } catch (error) { await writeState(workspace, jobId, { cleanupError: String(error) }); }
-    const finalState = await writeState(workspace, jobId, { status: "cancelled", phase: "cancelled", cancelledAt: now() });
+    const finalState = await writeState(workspace, jobId, { status: "cancelled", phase: "cancelled", cancelledAt: now() }, queueEntryId);
     await writeResult(workspace, jobId, finalState);
     return finalState;
   };
@@ -341,10 +363,10 @@ async function executeJobLocked(workspace: string, jobId: string, extra = ""): P
     await collectDiff(directory, workdir);
     if (agent.code !== 0 || agent.timedOut) {
       lastError = agent.timedOut ? `${label} 超时（${context.timeoutMs}ms）` : `${label} 执行失败`;
-      if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", retryReason: lastError, codebuddyExitCode: agent.code }); continue; }
-      return finish({ status: "failed", phase: "executing", codebuddyExitCode: agent.code, timedOut: agent.timedOut, error: lastError });
+      if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", retryReason: lastError, executorExitCode: agent.code }); continue; }
+      return finish({ status: "failed", phase: "executing", executorExitCode: agent.code, timedOut: agent.timedOut, error: lastError });
     }
-    await writeState(workspace, jobId, { phase: "testing", codebuddyExitCode: 0 });
+    await writeState(workspace, jobId, { phase: "testing", executorExitCode: 0 });
     const test = await runTest(directory, workdir, context.testCommand, context.timeoutMs);
     if (existsSync(cancelMarker)) return finishCancelled();
     const reviewedSnapshot = await collectDiff(directory, workdir);
@@ -388,19 +410,21 @@ async function executeJobLocked(workspace: string, jobId: string, extra = ""): P
   return finish({ status: "failed", phase: "executing", error: "任务未能完成" });
 }
 
-export async function executeJob(workspaceInput: string, jobId: string, extra = ""): Promise<JobState> {
+export async function executeJob(workspaceInput: string, jobId: string, extra = "", queueEntryId?: string): Promise<JobState> {
   const workspace = path.resolve(workspaceInput);
   const span = startSpan("cbx.job", { jobId });
   const lock = path.join(jobDir(workspace, jobId), "run.lock");
   return withFileLock(lock, async () => {
     try {
       try { await unlink(path.join(jobDir(workspace, jobId), "cancel.requested")); } catch { /* new run clears an old cancellation */ }
-      return await executeJobLocked(workspace, jobId, extra);
+      const result = await executeJobLocked(workspace, jobId, extra, queueEntryId);
+      if (queueEntryId) await dispatchQueue(workspace);
+      return result;
     } finally {
       try {
         const finalState = await loadState(workspace, jobId);
         await finishSpan(workspace, span, finalState.status === "done" ? "ok" : "error", { status: finalState.status, attempt: finalState.attempt });
-      } catch { /* telemetry must not mask task errors */ }
+      } catch (error) { logJobEvent(workspace, jobId, "telemetry_failed", { error: error instanceof Error ? error.message : String(error) }); }
     }
   }, { retries: 0, busyMessage: `任务正在运行中：${jobId}` });
 }
@@ -412,10 +436,21 @@ export async function approveJob(workspaceInput: string, jobId: string): Promise
   return writeState(workspace, jobId, { status: "queued", phase: "queued", approved: true, approvalRequired: false });
 }
 
-const queueRuntime: QueueRuntime = { loadConfig, loadState, writeState, jobDir };
+const queueRuntime: QueueRuntime = { loadConfig, loadState, writeState, saveStateAndQueue, jobDir };
 
 export async function dispatchQueue(workspaceInput: string): Promise<QueueFile> {
   return queue.dispatchQueue(queueRuntime, workspaceInput);
+}
+
+export async function health(workspaceInput: string): Promise<{ status: "ok"; metrics: Awaited<ReturnType<typeof persistedMetrics>> }> {
+  const workspace = path.resolve(workspaceInput);
+  const config = await loadConfig(workspace);
+  await prunePersistedData(workspace, config.governance?.retentionDays);
+  return { status: "ok", metrics: await persistedMetrics(workspace) };
+}
+
+export async function serveQueue(workspaceInput: string, intervalMs = 30_000): Promise<queue.QueueService> {
+  return queue.serveQueue(queueRuntime, workspaceInput, intervalMs);
 }
 
 export async function enqueueJob(workspaceInput: string, jobId: string, extra = "", priority = 0): Promise<QueueEntry> {
@@ -454,6 +489,6 @@ export async function cancelJob(workspaceInput: string, jobId: string): Promise<
     if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
     else { try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch { /* already exited */ } } }
   }
-  try { await cleanupWorktree(workspace, jobId); } catch { /* preserve cancellation state; cleanup can be retried */ }
+  try { await cleanupWorktree(workspace, jobId); } catch (error) { logJobEvent(workspace, jobId, "cleanup_failed", { phase: "cancel", error: error instanceof Error ? error.message : String(error) }); }
   return writeState(workspace, jobId, { status: "cancelled", phase: "cancelled", cancelledAt: now() });
 }

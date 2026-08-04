@@ -1,7 +1,15 @@
 {
   "name": "cbx-orch",
   "version": "0.8.0",
+  "license": "MIT",
   "private": true,
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CHANGELOG.md"
+  ],
   "type": "module",
   "description": "Durable task orchestration for coding-agent CLIs (codebuddy, opencode, pi)",
   "bin": {
@@ -9,13 +17,25 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test dist/tests/*.test.js"
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "format": "prettier --write --ignore-unknown package.json README.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/executor.test.ts",
+    "format:check": "prettier --check --ignore-unknown package.json README.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/executor.test.ts",
+    "check": "npm run lint && npm run format:check && npm test",
+    "coverage": "npm run build && node --test --experimental-test-coverage dist/tests/*.test.js",
+    "audit": "npm audit --audit-level=high",
+    "sbom": "npm sbom --omit=dev --sbom-format=cyclonedx > sbom.cdx.json"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
+    "prettier": "^3.6.2",
     "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1"
   }
 }

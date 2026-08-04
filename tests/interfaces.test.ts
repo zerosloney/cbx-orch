@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createJob, executeJob, loadState, readArtifact } from "../src/core.js";
 import { createWebUiServer } from "../src/ui.js";
-import { publishEvent } from "../src/observability.js";
+import { finishSpan, publishEvent, startSpan } from "../src/observability.js";
 
 async function closeServer(server: ReturnType<typeof createWebUiServer>): Promise<void> {
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
@@ -26,6 +27,9 @@ test("Web UI exposes read-only local routes without wildcard CORS", async () => 
     const jobs = await fetch(`http://127.0.0.1:${port}/api/jobs`);
     assert.equal(jobs.headers.get("access-control-allow-origin"), null);
     assert.equal((await jobs.json() as Array<{ jobId: string }>)[0].jobId, job.jobId);
+    const health = await fetch(`http://127.0.0.1:${port}/healthz`);
+    assert.equal(health.status, 200);
+    assert.equal((await health.json() as { status: string }).status, "ok");
     const artifact = await fetch(`http://127.0.0.1:${port}/api/jobs/${job.jobId}/artifact/request.md`);
     assert.match(await artifact.text(), /# 任务/);
     assert.equal((await fetch(`http://127.0.0.1:${port}/api/jobs`, { method: "POST" })).status, 405);
@@ -94,12 +98,12 @@ test("job and artifact paths reject traversal and destructive test commands", as
   await assert.rejects(() => createJob({ workspace, task: "危险", testCommand: "npm test && Remove-Item -Recurse .", review: false, isolated: false, permissionMode: "auto", maxTurns: 5 }), /不允许/);
 });
 
-test("corrupt state is surfaced and atomic writes leave no temporary state files", async () => {
+test("SQLite state remains authoritative when legacy state artifact is corrupt", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-state-"));
   const job = await createJob({ workspace, task: "状态", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "state-job" });
   assert.equal((await readdir(job.directory)).some(name => name.includes("state.json.") && name.endsWith(".tmp")), false);
   await writeFile(path.join(job.directory, "state.json"), "{partial", "utf8");
-  await assert.rejects(() => loadState(workspace, job.jobId), /JSON/);
+  assert.equal((await loadState(workspace, job.jobId)).status, "queued");
 });
 
 test("timed out executor plugins are killed before they can mutate later", async () => {
@@ -120,4 +124,44 @@ test("events remain ordered and webhook failures do not reject state notificatio
   await Promise.all(Array.from({ length: 12 }, (_, sequence) => publishEvent(workspace, "test.sequence", { sequence })));
   const lines = (await readFile(path.join(workspace, ".cbx", "events.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line) as { payload: { sequence: number } });
   assert.deepEqual(lines.map(line => line.payload.sequence), Array.from({ length: 12 }, (_, index) => index));
+});
+
+test("webhook and OTLP retry non-2xx responses then persist delivery failures", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-delivery-"));
+  const requests = { webhook: 0, otlp: 0 };
+  const server = createServer((request, response) => {
+    if (request.url === "/webhook") requests.webhook += 1;
+    if (request.url === "/otlp") requests.otlp += 1;
+    response.statusCode = 503; response.end("unavailable");
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({
+    notifications: { webhook: `http://127.0.0.1:${port}/webhook`, timeoutMs: 100, maxRetries: 2, retryBaseMs: 1 },
+    telemetry: { enabled: true, endpoint: `http://127.0.0.1:${port}/otlp`, timeoutMs: 100, maxRetries: 2, retryBaseMs: 1 },
+  }), "utf8");
+  try {
+    await publishEvent(workspace, "test.delivery", {});
+    await finishSpan(workspace, startSpan("test.delivery"), "ok");
+  } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  assert.equal(requests.webhook, 3);
+  assert.equal(requests.otlp, 3);
+  const failures = (await readFile(path.join(workspace, ".cbx", "delivery-failures.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line) as { channel: string; attempts: number });
+  assert.deepEqual(failures.map(failure => failure.channel), ["webhook", "otlp"]);
+  assert.ok(failures.every(failure => failure.attempts === 3));
+});
+
+test("governance redacts configured fields from event artifacts and webhook payloads", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-redaction-"));
+  let received = "";
+  const server = createServer((request, response) => { request.setEncoding("utf8"); request.on("data", chunk => { received += chunk; }); request.on("end", () => response.end()); });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ notifications: { webhook: `http://127.0.0.1:${port}` }, governance: { retentionDays: 7, redactFields: ["token", "password"] } }), "utf8");
+  try { await publishEvent(workspace, "test.redaction", { token: "top-secret", nested: { password: "hidden" } }); }
+  finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  const events = await readFile(path.join(workspace, ".cbx", "events.ndjson"), "utf8");
+  assert.doesNotMatch(events, /top-secret|hidden/);
+  assert.doesNotMatch(received, /top-secret|hidden/);
+  assert.match(events, /\[REDACTED\]/);
 });

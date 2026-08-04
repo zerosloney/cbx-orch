@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
-import { approveJob, cancelJob, cleanupWorktree, createJob, executeJob, finishQueueEntry, jobDir, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, startBackground } from "./core.js";
+import { approveJob, cancelJob, cleanupWorktree, dispatchQueue, createJob, executeJob, health, jobDir, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, serveQueue, startBackground } from "./core.js";
 import { runTui, startWebUi } from "./ui.js";
 
 function option(args: string[], name: string, fallback?: string): string | undefined {
@@ -32,6 +32,7 @@ async function main(): Promise<void> {
       autoBranch: has(args, "--auto-branch") ? true : has(args, "--no-auto-branch") ? false : undefined,
       autoCommit: has(args, "--auto-commit") ? true : has(args, "--no-auto-commit") ? false : undefined,
       commitMessage: option(args, "--commit-message"),
+      trustMode: option(args, "--trust-mode") as "trusted" | "untrusted" | undefined,
     });
     const existingJob = option(args, "--job-id");
     let jobId = existingJob;
@@ -50,6 +51,7 @@ async function main(): Promise<void> {
         autoCommit: defaults.autoCommit,
         commitMessage: defaults.commitMessage,
         executor: defaults.executor,
+        trustMode: defaults.trustMode,
         allowUnsafePermissions: has(args, "--dangerously-skip-permissions"),
       });
       jobId = created.jobId;
@@ -60,12 +62,9 @@ async function main(): Promise<void> {
       return;
     }
     const queueEntryId = option(args, "--queue-entry-id");
-    try {
-      const result = await executeJob(workspace, jobId!, option(args, "--message", ""));
-      print(result);
-      if (has(args, "--ci") && result.status !== "done") process.exitCode = 2;
-    }
-    finally { if (queueEntryId) await finishQueueEntry(workspace, queueEntryId); }
+    const result = await executeJob(workspace, jobId!, option(args, "--message", ""), queueEntryId);
+    print(result);
+    if (has(args, "--ci") && result.status !== "done") process.exitCode = 2;
     return;
   }
   if (command === "status") { print(await loadState(workspace, args[0])); return; }
@@ -75,6 +74,17 @@ async function main(): Promise<void> {
     if (action === "pause") print(await pauseQueue(workspace));
     else if (action === "resume") print(await resumeQueue(workspace));
     else print(await listQueue(workspace));
+    return;
+  }
+  if (command === "dispatch") { print(await dispatchQueue(workspace)); return; }
+  if (command === "health" || command === "metrics") { print(await health(workspace)); return; }
+  if (command === "serve") {
+    const service = await serveQueue(workspace, Number(option(args, "--interval-ms", "30000")));
+    print({ workspace, status: "serving" });
+    await new Promise<void>(resolve => {
+      const stop = () => { void service.stop().finally(resolve); };
+      process.once("SIGINT", stop); process.once("SIGTERM", stop);
+    });
     return;
   }
   if (command === "logs") { console.log(await readArtifact(workspace, args[0], "events.ndjson")); return; }
@@ -106,7 +116,13 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "continue") {
-    print(await executeJob(workspace, args[0], option(args, "--message", "请根据 review.md 修复问题，完成后重新运行验收命令。")!));
+    const message = option(args, "--message", "请根据 review.md 修复问题，完成后重新运行验收命令。")!;
+    if (has(args, "--foreground")) {
+      print(await executeJob(workspace, args[0], message));
+      return;
+    }
+    await startBackground(workspace, args[0], message, Number(option(args, "--priority", "0")));
+    print({ jobId: args[0], status: "queued" });
     return;
   }
   if (command === "cancel") { print(await cancelJob(workspace, args[0])); return; }
@@ -118,7 +134,7 @@ async function main(): Promise<void> {
   }
   if (command === "retry") { print(await retryQueueJob(workspace, args[0], Number(option(args, "--priority", "0")))); return; }
   if (command === "clean") { print({ jobId: args[0], cleaned: await cleanupWorktree(workspace, args[0]) }); return; }
-  console.log("用法：cbx run|start|status|list|queue [pause|resume]|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui ...");
+  console.log("用法：cbx run|start|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui ...");
 }
 
 main().catch((error) => { console.error(error instanceof Error ? error.message : error); process.exitCode = 1; });

@@ -5,4 +5,7 @@ __pycache__/
 .zcode/
 .cbx/
 .cbx-worktrees/
+sbom.cdx.json
+coverage.txt
+test-results.txt
 

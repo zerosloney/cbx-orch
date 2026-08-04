@@ -5,7 +5,9 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { approveJob, cancelJob, createJob, executeJob, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, startBackground } from "../src/core.js";
+import Database from "better-sqlite3";
+import { approveJob, cancelJob, createJob, executeJob, health, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, serveQueue, startBackground } from "../src/core.js";
+import { loadPersistedQueue, savePersistedStateAndQueue } from "../src/storage.js";
 import { BUILTIN_EXECUTORS, resolveExecutor } from "../src/executors/builtin.js";
 
 const fakeAgent = `
@@ -72,6 +74,14 @@ test(".cbx.json provides defaults and tasks can be listed", async () => {
   assert.equal((await listJobs(workspace))[0].jobId, "config-job");
 });
 
+test("untrusted mode is rejected because a Git worktree is not an OS sandbox", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-untrusted-"));
+  await assert.rejects(
+    () => createJob({ workspace, task: "不可信任务", review: false, isolated: true, permissionMode: "auto", maxTurns: 5, trustMode: "untrusted" }),
+    /未提供 OS 容器沙箱/,
+  );
+});
+
 test("end-to-end success runs fake agent, test, and review", async () => {
   const { workspace } = await setupFake();
   spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
@@ -86,7 +96,9 @@ test("end-to-end success runs fake agent, test, and review", async () => {
   assert.equal(state.status, "done");
   assert.equal(state.reviewVerdict, "PASS");
   assert.equal((await readFile(path.join(job.directory, "handback.md"), "utf8")).trim(), "fake handback");
-  assert.ok((await readFile(path.join(job.directory, "events.ndjson"), "utf8")).includes("process_finished"));
+  const events = await readFile(path.join(job.directory, "events.ndjson"), "utf8");
+  assert.ok(events.includes("process_finished"));
+  assert.match(events, /"event":"executor_metadata","source":"builtin"/);
   assert.ok((await readFile(path.join(job.directory, "complete.patch"), "utf8")).includes("fake-change.txt"));
   assert.equal(JSON.parse(await readArtifact(workspace, job.jobId, "result.json")).status, "done");
 });
@@ -229,17 +241,22 @@ test("ESM executor plugin can replace the builtin CLI", async () => {
   const job = await createJob({ workspace, task: "插件执行", review: false, isolated: false, executor: plugin, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "plugin" });
   const state = await executeJob(workspace, job.jobId);
   assert.equal(state.status, "done");
-  assert.match(await readFile(path.join(job.directory, "events.ndjson"), "utf8"), /plugin_finished/);
+  const events = await readFile(path.join(job.directory, "events.ndjson"), "utf8");
+  assert.match(events, /plugin_finished/);
+  assert.match(events, /"event":"executor_metadata","source":"plugin"/);
+  assert.match(events, /"sha256":"[a-f0-9]{64}"/);
 });
 
-test("registry resolves codebuddy/cbc/opencode/pi/oh-my-pi", () => {
+test("registry resolves codebuddy/cbc/opencode/pi/oh-my-pi/omp", () => {
   assert.equal(resolveExecutor("codebuddy")?.name, "codebuddy");
   assert.equal(resolveExecutor("cbc")?.name, "codebuddy");
   assert.equal(resolveExecutor("opencode")?.name, "opencode");
   assert.equal(resolveExecutor("pi")?.name, "pi");
   assert.equal(resolveExecutor("oh-my-pi")?.name, "pi");
+  assert.equal(resolveExecutor("omp")?.name, "omp");
+  assert.equal(resolveExecutor("oh-my-pi-omp")?.name, "omp");
   assert.equal(resolveExecutor("unknown"), undefined);
-  assert.equal(BUILTIN_EXECUTORS.length, 3);
+  assert.equal(BUILTIN_EXECUTORS.length, 4);
 });
 
 test("codebuddy buildArgs uses print/stream-json/max-turns/permission-mode", () => {
@@ -257,6 +274,12 @@ test("pi buildArgs uses -p/mode json and -a when permission is auto/dontAsk", ()
   const spec = resolveExecutor("pi")!;
   assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "dontAsk", maxTurns: 5 }), ["-p", "--mode", "json", "fix", "-a"]);
   assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "plan", maxTurns: 5 }), ["-p", "--mode", "json", "fix"]);
+});
+
+test("omp buildArgs uses -p/mode json and ignores permissionMode (no documented flag)", () => {
+  const spec = resolveExecutor("omp")!;
+  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "auto", maxTurns: 5 }), ["-p", "--mode", "json", "fix"]);
+  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "default", maxTurns: 5 }), ["-p", "--mode", "json", "fix"]);
 });
 
 test("opencode executor runs end-to-end via CBX_OPENCODE fake binary", async () => {
@@ -344,4 +367,64 @@ test("stale job lock and a dead running queue entry recover after a crash", asyn
   await writeFile(path.join(workspace, ".cbx", "queue.json"), JSON.stringify({ maxConcurrent: 1, paused: true, updatedAt: new Date().toISOString(), entries: [{ queueId: "dead-worker", jobId: job.jobId, workspace, extra: "", status: "running", createdAt: new Date().toISOString(), pid: 2_147_483_647, priority: 0 }] }), "utf8");
   const recovered = await (await import("../src/core.js")).dispatchQueue(workspace);
   assert.equal(recovered.entries[0].status, "done");
+});
+
+test("persistent serve loop reclaims dead workers on startup and stops cleanly", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({ workspace, task: "serve 恢复", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, jobId: "serve-recovery" });
+  await mkdir(path.join(workspace, ".cbx"), { recursive: true });
+  await writeFile(path.join(workspace, ".cbx", "queue.json"), JSON.stringify({
+    maxConcurrent: 1, paused: true, updatedAt: new Date().toISOString(),
+    entries: [{ queueId: "dead-serve-worker", jobId: job.jobId, workspace, extra: "", status: "running", createdAt: new Date().toISOString(), pid: 2_147_483_647, priority: 0 }],
+  }), "utf8");
+  const service = await serveQueue(workspace, 50);
+  assert.equal((await listQueue(workspace)).entries[0].status, "queued");
+  await service.stop();
+});
+
+test("SQLite migrates legacy jobs, queue, and delivery failures without losing artifacts", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-sqlite-migration-"));
+  const jobDir = path.join(workspace, ".cbx", "jobs", "legacy-job");
+  await mkdir(jobDir, { recursive: true });
+  const state = { jobId: "legacy-job", status: "failed", phase: "testing", workspace, jobDir, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-02T00:00:00.000Z", attempt: 2 };
+  await writeFile(path.join(jobDir, "state.json"), JSON.stringify(state), "utf8");
+  await writeFile(path.join(workspace, ".cbx", "queue.json"), JSON.stringify({ maxConcurrent: 2, paused: false, updatedAt: state.updatedAt, entries: [{ queueId: "legacy-entry", jobId: state.jobId, workspace, extra: "", status: "failed", createdAt: state.createdAt, priority: 0 }] }), "utf8");
+  await writeFile(path.join(workspace, ".cbx", "delivery-failures.ndjson"), JSON.stringify({ type: "delivery.failed", at: state.updatedAt }) + "\n", "utf8");
+  assert.equal((await listJobs(workspace))[0].jobId, state.jobId);
+  assert.equal((await listQueue(workspace)).entries[0].queueId, "legacy-entry");
+  const snapshot = await health(workspace);
+  assert.equal(snapshot.metrics.failedJobs, 1);
+  assert.equal(snapshot.metrics.deliveryFailures, 1);
+});
+
+test("strict configuration rejects unknown and unsafe nested fields", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-config-schema-"));
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ notifications: { timeoutMs: 10 } }), "utf8");
+  await assert.rejects(() => loadConfig(workspace), /notifications\.timeoutMs/);
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ governance: { unknown: true } }), "utf8");
+  await assert.rejects(() => loadConfig(workspace), /governance 不支持字段/);
+});
+
+test("retention prunes expired delivery failure artifacts and SQLite records together", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-retention-"));
+  await mkdir(path.join(workspace, ".cbx"), { recursive: true });
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ governance: { retentionDays: 1 } }), "utf8");
+  await writeFile(path.join(workspace, ".cbx", "delivery-failures.ndjson"), JSON.stringify({ type: "delivery.failed", at: "2000-01-01T00:00:00.000Z" }) + "\n", "utf8");
+  assert.equal((await health(workspace)).metrics.deliveryFailures, 0);
+  assert.equal(await readFile(path.join(workspace, ".cbx", "delivery-failures.ndjson"), "utf8"), "");
+});
+
+test("paired state and queue write rolls back both records when queue update fails", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-atomic-"));
+  const job = await createJob({ workspace, task: "原子更新", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "atomic" });
+  await pauseQueue(workspace);
+  const beforeState = await loadState(workspace, job.jobId);
+  const beforeQueue = await loadPersistedQueue(workspace, { maxConcurrent: 2, paused: false, entries: [], updatedAt: "" });
+  const db = new Database(path.join(workspace, ".cbx", "state.sqlite"));
+  db.exec("CREATE TRIGGER fail_atomic_queue BEFORE UPDATE ON queue_state BEGIN SELECT RAISE(ABORT, 'injected queue failure'); END");
+  try {
+    await assert.rejects(() => savePersistedStateAndQueue(workspace, job.jobId, { ...beforeState, status: "done" }, { ...beforeQueue, paused: false }), /injected queue failure/);
+  } finally { db.close(); }
+  assert.equal((await loadState(workspace, job.jobId)).status, "queued");
+  assert.equal((await listQueue(workspace)).paused, true);
 });

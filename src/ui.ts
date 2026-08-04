@@ -1,5 +1,5 @@
 import { createServer, type Server, type ServerResponse } from "node:http";
-import { listJobs, listQueue, loadState, readArtifact } from "./core.js";
+import { health, listJobs, listQueue, loadState, readArtifact } from "./core.js";
 
 const page = `<!doctype html><html><head><meta charset="utf-8"><title>CBX Orchestrator</title><style>body{font:14px system-ui;margin:24px;background:#10131a;color:#e8edf5}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #2a3140;text-align:left}.done{color:#70e090}.failed,.needs_fix{color:#ff8d8d}.running{color:#ffd166}.queued{color:#9ecbff}pre{white-space:pre-wrap;background:#171c26;padding:12px;border-radius:8px}</style></head><body><h1>CBX Orchestrator</h1><div id="queue"></div><table><thead><tr><th>Job</th><th>Status</th><th>Phase</th><th>Attempt</th><th>Updated</th></tr></thead><tbody id="jobs"></tbody></table><pre id="event">等待事件…</pre><script>
 async function refresh(){const [jobs,q]=await Promise.all([fetch('/api/jobs').then(r=>r.json()),fetch('/api/queue').then(r=>r.json())]);document.querySelector('#queue').textContent='队列：'+(q.paused?'已暂停':'运行中')+' · 并发 '+q.maxConcurrent+' · '+q.entries.filter(x=>x.status==='running').length+' active';document.querySelector('#jobs').innerHTML=jobs.map(j=>'<tr><td>'+j.jobId+'</td><td class="'+j.status+'">'+j.status+'</td><td>'+j.phase+'</td><td>'+j.attempt+'</td><td>'+j.updatedAt+'</td></tr>').join('')}refresh();setInterval(refresh,1500);const events=new EventSource('/events');events.onmessage=e=>document.querySelector('#event').textContent=e.data;
@@ -19,6 +19,7 @@ export function createWebUiServer(workspace: string, host = "127.0.0.1", port = 
       if (url.pathname === "/events") { res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }); clients.add(res); res.write(`data: ${JSON.stringify({ at: new Date().toISOString(), type: "connected" })}\n\n`); req.on("close", () => clients.delete(res)); return; }
       if (url.pathname === "/api/jobs") return json(res, await import("./core.js").then(mod => mod.listJobs(workspace)));
       if (url.pathname === "/api/queue") return json(res, await listQueue(workspace));
+      if (url.pathname === "/healthz" || url.pathname === "/api/metrics") return json(res, await health(workspace));
       const job = /^\/api\/jobs\/([^/]+)$/.exec(url.pathname);
       if (job) return json(res, await loadState(workspace, job[1]));
       const artifact = /^\/api\/jobs\/([^/]+)\/artifact\/([^/]+)$/.exec(url.pathname);

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm audit --audit-level=high
+      - name: Test
+        run: |
+          set -o pipefail
+          npm test | tee test-results.txt
+      - name: Coverage
+        run: |
+          set -o pipefail
+          npm run coverage | tee coverage.txt
+      - run: npm run sbom
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verification-node-${{ matrix.node }}
+          path: |
+            test-results.txt
+            coverage.txt
+            sbom.cdx.json
