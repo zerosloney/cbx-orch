@@ -177,7 +177,7 @@ async function invokeBuiltin(spec, directory, workdir, prompt, permissionMode, m
     appendFileSync(eventsFile, JSON.stringify({ event: "process_finished", returncode: result.code, timedOut: result.timedOut, at: now() }) + "\n", "utf8");
     return result;
 }
-async function invokeExecutor(executor, workspace, directory, workdir, prompt, permissionMode, maxTurns, timeoutMs) {
+export async function invokeExecutor(executor, workspace, directory, workdir, prompt, permissionMode, maxTurns, timeoutMs) {
     const builtin = resolveExecutor(executor);
     if (builtin)
         return invokeBuiltin(builtin, directory, workdir, prompt, permissionMode, maxTurns, timeoutMs);
@@ -233,6 +233,28 @@ export async function readArtifact(workspaceInput, jobId, artifact) {
     if (!ARTIFACTS.has(artifact))
         throw new Error(`不允许读取任务文件：${artifact}`);
     return readFile(path.join(jobDir(path.resolve(workspaceInput), jobId), artifact), "utf8");
+}
+export async function readEventsIncremental(workspaceInput, jobId, since = 0) {
+    // intentional-simple: 行级游标 + 逐行 JSON.parse 校验。events.ndjson 单 job 最多几百行，O(n) 扫描无压力。
+    // worker 用 appendFileSync 追加；并发写入时最后一条可能截断，parse 失败则停在此处，下次调用补齐。
+    const raw = await readArtifact(workspaceInput, jobId, "events.ndjson");
+    const lines = raw.split("\n");
+    const events = [];
+    let offset = since;
+    for (let i = since; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line)
+            continue;
+        try {
+            JSON.parse(line);
+        }
+        catch {
+            break;
+        }
+        events.push(line);
+        offset = i + 1;
+    }
+    return { events, next_offset: offset };
 }
 export async function listArtifacts(workspaceInput, jobId) {
     const directory = jobDir(path.resolve(workspaceInput), jobId);

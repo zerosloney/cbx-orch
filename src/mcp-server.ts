@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
-import { approveJob, cancelJob, createJob, jobDir, listArtifacts, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, startBackground } from "./core.js";
+import { approveJob, cancelJob, createJob, jobDir, listArtifacts, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, readEventsIncremental, resumeQueue, retryQueueJob, startBackground } from "./core.js";
+import { runReviewGate } from "./review-gate.js";
 
 const serverInfo = { name: "cbx-orch", version: "0.8.0" };
 function send(id: unknown, result?: unknown, error?: unknown): void {
@@ -21,12 +22,13 @@ const tools = [
   { name: "cbx_cancel", description: "取消任务", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" } } } },
   { name: "cbx_approve", description: "批准等待中的任务并启动", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" } } } },
   { name: "cbx_list", description: "列出工作区中的任务", inputSchema: { type: "object", properties: { workspace: { type: "string" } } } },
-  { name: "cbx_logs", description: "读取任务原始事件日志", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" } } } },
+  { name: "cbx_logs", description: "读取任务原始事件日志（传 since 走增量游标，省略则全量）", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" }, since: { type: "number", description: "行号游标，只返回此值之后的事件；省略=全量返回 {logs: string}" } } } },
   { name: "cbx_result", description: "读取任务结构化结果", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" } } } },
   { name: "cbx_queue", description: "查看任务队列和并发槽位", inputSchema: { type: "object", properties: { workspace: { type: "string" } } } },
   { name: "cbx_queue_pause", description: "暂停启动新的队列 worker", inputSchema: { type: "object", properties: { workspace: { type: "string" } } } },
   { name: "cbx_queue_resume", description: "恢复队列并启动等待中的 worker", inputSchema: { type: "object", properties: { workspace: { type: "string" } } } },
   { name: "cbx_retry", description: "将失败任务重新加入队列", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" }, priority: { type: "number" } } } },
+  { name: "cbx_review_gate", description: "对当前工作区未提交改动跑独立 review（Stop hook gate 的手动入口）", inputSchema: { type: "object", properties: { workspace: { type: "string" }, executor: { type: "string" }, timeout_ms: { type: "number" } } } },
 ];
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
@@ -55,7 +57,15 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
   }
   if (name === "cbx_cancel") return cancelJob(root, id);
   if (name === "cbx_approve") { const state = await approveJob(root, id); await startBackground(root, id); return state; }
-  if (name === "cbx_logs") return { job_id: id, logs: await readArtifact(root, id, "events.ndjson") };
+  if (name === "cbx_logs") {
+    if (args.since === undefined) return { job_id: id, logs: await readArtifact(root, id, "events.ndjson") };
+    const { events, next_offset } = await readEventsIncremental(root, id, Number(args.since));
+    return { job_id: id, events, next_offset };
+  }
+  if (name === "cbx_review_gate") {
+    const result = await runReviewGate(root, { executor: args.executor ? String(args.executor) : undefined, timeoutMs: args.timeout_ms === undefined ? undefined : Number(args.timeout_ms) });
+    return { pass: result.pass, reason: result.reason, verdict: result.verdict };
+  }
   if (name === "cbx_result") return JSON.parse(await readArtifact(root, id, "result.json"));
   throw new Error(`未知工具：${name}`);
 }

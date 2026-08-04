@@ -33,7 +33,7 @@ export async function loadRuntimeConfig(workspaceInput) {
         throw error;
     }
     const config = object(parsed, ".cbx.json");
-    known(config, ".cbx.json", ["testCommand", "review", "isolated", "timeoutMs", "maxRetries", "maxTurns", "keepWorktree", "permissionMode", "reviewRules", "approval", "maxConcurrent", "git", "ci", "executor", "execution", "plugins", "notifications", "telemetry", "governance"]);
+    known(config, ".cbx.json", ["testCommand", "review", "isolated", "timeoutMs", "maxRetries", "maxTurns", "keepWorktree", "permissionMode", "reviewRules", "approval", "maxConcurrent", "git", "ci", "executor", "execution", "plugins", "notifications", "telemetry", "governance", "reviewGate"]);
     optionalString(config.testCommand, "testCommand");
     optionalBoolean(config.review, "review");
     optionalBoolean(config.isolated, "isolated");
@@ -116,6 +116,11 @@ export async function loadRuntimeConfig(workspaceInput) {
                 }
             }
         }
+    }
+    if (config.reviewGate !== undefined) {
+        const value = object(config.reviewGate, "reviewGate");
+        known(value, "reviewGate", ["enabled"]);
+        optionalBoolean(value.enabled, "reviewGate.enabled");
     }
     return config;
 }

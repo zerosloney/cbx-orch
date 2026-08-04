@@ -1,0 +1,16 @@
+{
+  "description": "cbx Stop hook gate — runs an independent review on uncommitted changes when reviewGate.enabled is true.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/src/hooks/stop-review-gate.js\"",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}

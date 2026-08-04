@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { approveJob, cancelJob, cleanupWorktree, dispatchQueue, createJob, executeJob, health, jobDir, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, serveQueue, startBackground } from "./core.js";
+import { runReviewGate } from "./review-gate.js";
 import { runTui, startWebUi } from "./ui.js";
 function option(args, name, fallback) {
     const index = args.indexOf(name);
@@ -188,6 +189,13 @@ async function main() {
         print({ jobId: args[0], cleaned: await cleanupWorktree(workspace, args[0]) });
         return;
     }
-    console.log("用法：cbx run|start|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui ...");
+    if (command === "review-gate") {
+        const result = await runReviewGate(workspace, { executor: option(args, "--executor"), timeoutMs: option(args, "--timeout-ms") ? Number(option(args, "--timeout-ms")) : undefined });
+        print({ pass: result.pass, reason: result.reason, verdict: result.verdict });
+        if (!result.pass)
+            process.exitCode = 2;
+        return;
+    }
+    console.log("用法：cbx run|start|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui|review-gate ...");
 }
 main().catch((error) => { console.error(error instanceof Error ? error.message : error); process.exitCode = 1; });

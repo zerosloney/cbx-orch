@@ -238,7 +238,7 @@ async function invokeBuiltin(spec: ReturnType<typeof resolveExecutor> & {}, dire
   return result;
 }
 
-async function invokeExecutor(executor: string, workspace: string, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number): Promise<ProcessResult> {
+export async function invokeExecutor(executor: string, workspace: string, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number): Promise<ProcessResult> {
   const builtin = resolveExecutor(executor);
   if (builtin) return invokeBuiltin(builtin, directory, workdir, prompt, permissionMode, maxTurns, timeoutMs);
   const config = await loadConfig(workspace);
@@ -288,6 +288,23 @@ async function saveStateAndQueue(workspace: string, jobId: string, state: Record
 export async function readArtifact(workspaceInput: string, jobId: string, artifact: string): Promise<string> {
   if (!ARTIFACTS.has(artifact)) throw new Error(`不允许读取任务文件：${artifact}`);
   return readFile(path.join(jobDir(path.resolve(workspaceInput), jobId), artifact), "utf8");
+}
+
+export async function readEventsIncremental(workspaceInput: string, jobId: string, since = 0): Promise<{ events: string[]; next_offset: number }> {
+  // intentional-simple: 行级游标 + 逐行 JSON.parse 校验。events.ndjson 单 job 最多几百行，O(n) 扫描无压力。
+  // worker 用 appendFileSync 追加；并发写入时最后一条可能截断，parse 失败则停在此处，下次调用补齐。
+  const raw = await readArtifact(workspaceInput, jobId, "events.ndjson");
+  const lines = raw.split("\n");
+  const events: string[] = [];
+  let offset = since;
+  for (let i = since; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    try { JSON.parse(line); } catch { break; }
+    events.push(line);
+    offset = i + 1;
+  }
+  return { events, next_offset: offset };
 }
 
 export async function listArtifacts(workspaceInput: string, jobId: string): Promise<string[]> {
