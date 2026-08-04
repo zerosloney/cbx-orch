@@ -286,6 +286,21 @@ test("isolated auto-branch and auto-commit produce a Git commit", async () => {
   assert.equal(spawnSync("git", ["show-ref", "--verify", "refs/heads/cbx/commit"], { cwd: workspace }).status, 0);
 });
 
+test("autoCommit=true implicitly enables isolated instead of throwing", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-implicit-"));
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "initial"], { cwd: workspace, encoding: "utf8" });
+  // autoCommit=true，isolated=false（等价 mergeConfig 默认）—— 不再抛错，隐含开启 isolated
+  const job = await createJob({ workspace, task: "隐含隔离", review: false, isolated: false, autoBranch: true, autoCommit: true, commitMessage: "test", permissionMode: "auto", maxTurns: 5, timeoutMs: 2_000, maxRetries: 0, jobId: "implicit" });
+  // context.json 落盘的 isolated 应为 true
+  const context = JSON.parse(await readFile(path.join(job.directory, "context.json"), "utf8")) as { isolated: boolean };
+  assert.equal(context.isolated, true);
+});
+
 test("ESM executor plugin can replace the builtin CLI", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-plugin-"));
   const plugin = path.resolve(process.cwd(), "plugins", "example-executor.mjs");

@@ -118,8 +118,12 @@ export async function createJob(options) {
         throw new Error("timeoutMs 必须不小于 100ms。");
     if (options.maxRetries !== undefined && (!Number.isInteger(options.maxRetries) || options.maxRetries < 0))
         throw new Error("maxRetries 必须是非负整数。");
-    if (options.autoCommit && !options.isolated)
-        throw new Error("autoCommit 要求 isolated=true，避免提交主工作区中的无关修改。");
+    // autoCommit 隐含 isolated：提交到 worktree 才安全，避免把主工作区无关改动一起提交。
+    // 不抛错——autoCommit=true 时自动开启 isolated，保留告警让用户知道发生了隐含提升。
+    if (options.autoCommit && !options.isolated) {
+        console.error("cbx 提示：autoCommit=true 已隐含开启 isolated=true（提交到 worktree，避免污染主工作区）。");
+        options.isolated = true;
+    }
     // 测试命令黑名单是软防线（正则可被变体绕过）。非隔离时强警告：cbx 不保证命令安全，应运行在受控环境。
     if (options.testCommand && !options.isolated) {
         console.error(`cbx 警告：测试命令将在主工作区执行（isolated=false），cbx 不保证其安全性：${options.testCommand}`);
