@@ -15,6 +15,12 @@
   ],
   "type": "module",
   "description": "Durable task orchestration for coding-agent CLIs (codebuddy, opencode, pi)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zerosloney/cbx-orch.git"
+  },
+  "homepage": "https://github.com/zerosloney/cbx-orch#readme",
+  "bugs": { "url": "https://github.com/zerosloney/cbx-orch/issues" },
   "bin": {
     "cbx": "dist/src/cli.js"
   },
