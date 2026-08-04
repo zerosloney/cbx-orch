@@ -67,6 +67,7 @@ async function main(): Promise<void> {
     if (has(args, "--ci") && result.status !== "done") process.exitCode = 2;
     return;
   }
+  if (command === "mcp") { const { runMcpServer } = await import("./mcp-server.js"); runMcpServer(); return; }
   if (command === "status") { print(await loadState(workspace, args[0])); return; }
   if (command === "list") { print(await listJobs(workspace)); return; }
   if (command === "queue") {
@@ -134,7 +135,7 @@ async function main(): Promise<void> {
   }
   if (command === "retry") { print(await retryQueueJob(workspace, args[0], Number(option(args, "--priority", "0")))); return; }
   if (command === "clean") { print({ jobId: args[0], cleaned: await cleanupWorktree(workspace, args[0]) }); return; }
-  console.log("用法：cbx run|start|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui ...");
+  console.log("用法：cbx run|start|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui ...");
 }
 
 main().catch((error) => { console.error(error instanceof Error ? error.message : error); process.exitCode = 1; });

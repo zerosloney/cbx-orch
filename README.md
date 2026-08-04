@@ -10,7 +10,13 @@
 
 ## 快速开始
 
-先构建：
+全局安装（发布到 npm 后）：
+
+```powershell
+npm install -g cbx-orch
+```
+
+开发模式（从源码构建）：
 
 ```powershell
 npm install
@@ -173,14 +179,14 @@ node dist/src/cli.js health --workspace .
 
 `npm run check` 执行类型 lint、格式检查和测试；`npm run coverage` 运行 Node 测试覆盖率；`npm run audit` 检查高危依赖问题；`npm run sbom` 生成 CycloneDX SBOM。CI 在 Node 20、22 和 24 上执行这些确定性检查并上传测试、覆盖率和 SBOM 工件。
 
-发布遵循 Semantic Versioning；`package.json.files` 明确限定发布内容。当前包保持 `private`，在准备公开发布前应移除该标记、更新版本和 `CHANGELOG.md`。
+发布遵循 Semantic Versioning；`package.json.files` 明确限定发布内容（仅 `dist/` + 文档，不含源码与测试）。`private` 已设为 `false`，推送 `v*` tag 触发 `.github/workflows/publish.yml` 自动发布到 npm（需在仓库 Secrets 配置 `NPM_TOKEN`）。
 
 ## MCP
 
-最小 MCP stdio 适配器，不依赖 MCP SDK：
+最小 MCP stdio 适配器，不依赖 MCP SDK。安装 CLI 后直接调用子命令：
 
 ```powershell
-node C:\path\to\cbx-orch\dist\src\mcp-server.js
+cbx mcp
 ```
 
 提供的工具：`cbx_start`、`cbx_status`、`cbx_review`、`cbx_continue`、`cbx_cancel`、`cbx_approve`、`cbx_list`、`cbx_logs`、`cbx_result`、`cbx_queue`、`cbx_queue_pause`、`cbx_queue_resume`、`cbx_retry`。
@@ -194,10 +200,13 @@ cbx 本身就是一个 ZCode 市场插件（仓库根含 `.zcode-plugin/plugin.j
 ### 安装
 
 ```powershell
-# 添加本仓库为市场源
+# 1. 全局安装 cbx CLI（提供 cbx / cbx mcp 命令，依赖由 npm 自动解析）
+npm install -g cbx-orch
+
+# 2. 添加本仓库为市场源
 zcode plugin marketplace add zerosloney/cbx-orch
 
-# 安装 cbx-orch 插件
+# 3. 安装 cbx-orch 插件
 zcode plugin install cbx-orch@cbx-orch-marketplace
 ```
 
@@ -205,13 +214,13 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 ### 斜杠命令
 
-| 命令 | 作用 |
-|---|---|
-| `/cbx-run [task]` | 委派任务到 cbx，后台执行（含测试+审查），轮询至完成 |
-| `/cbx-status [job_id]` | 查任务状态/阶段/尝试 |
-| `/cbx-continue [job_id] [message]` | 按 review.md 或测试失败返工 |
-| `/cbx-list` | 列出当前工作区所有任务 |
-| `/cbx-queue [pause\|resume]` | 查看或控制任务队列 |
+| 命令                               | 作用                                                |
+| ---------------------------------- | --------------------------------------------------- |
+| `/cbx-run [task]`                  | 委派任务到 cbx，后台执行（含测试+审查），轮询至完成 |
+| `/cbx-status [job_id]`             | 查任务状态/阶段/尝试                                |
+| `/cbx-continue [job_id] [message]` | 按 review.md 或测试失败返工                         |
+| `/cbx-list`                        | 列出当前工作区所有任务                              |
+| `/cbx-queue [pause\|resume]`       | 查看或控制任务队列                                  |
 
 ### 技能
 
@@ -221,11 +230,11 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 插件安装后，在 ZCode 设置中可配置（对应 `userConfig`）：
 
-| 配置项 | 默认值 | 作用 |
-|---|---|---|
+| 配置项     | 默认值      | 作用                                          |
+| ---------- | ----------- | --------------------------------------------- |
 | `executor` | `codebuddy` | 默认执行器：`codebuddy`/`opencode`/`pi`/`omp` |
-| `review` | `true` | 测试通过后是否跑独立审查 |
-| `isolated` | `true` | 是否在 git worktree 中隔离执行 |
+| `review`   | `true`      | 测试通过后是否跑独立审查                      |
+| `isolated` | `true`      | 是否在 git worktree 中隔离执行                |
 
 ### 工作区定位
 

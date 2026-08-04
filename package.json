@@ -2,7 +2,10 @@
   "name": "cbx-orch",
   "version": "0.8.0",
   "license": "MIT",
-  "private": true,
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist/",
     "README.md",
@@ -24,7 +27,8 @@
     "check": "npm run lint && npm run format:check && npm test",
     "coverage": "npm run build && node --test --experimental-test-coverage dist/tests/*.test.js",
     "audit": "npm audit --audit-level=high",
-    "sbom": "npm sbom --omit=dev --sbom-format=cyclonedx > sbom.cdx.json"
+    "sbom": "npm sbom --omit=dev --sbom-format=cyclonedx > sbom.cdx.json",
+    "prepublishOnly": "npm run lint && tsc -p tsconfig.json"
   },
   "engines": {
     "node": ">=20"

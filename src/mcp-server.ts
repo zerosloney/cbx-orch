@@ -60,35 +60,42 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
   throw new Error(`未知工具：${name}`);
 }
 
-const input = createInterface({ input: process.stdin });
-input.on("line", async (line) => {
-  if (!line.trim()) return;
-  let requestId: unknown = null;
-  try {
-    const request = JSON.parse(line) as { id?: unknown; method?: string; params?: Record<string, unknown> };
-    requestId = request.id ?? null;
-    // Per JSON-RPC 2.0, a request without an id is a notification and must not receive a response.
-    const isNotification = request.id === undefined || request.id === null;
-    if (isNotification && request.method && request.method !== "ping") return;
-    if (request.method === "initialize") send(request.id, { protocolVersion: "2024-11-05", capabilities: { tools: {}, resources: { subscribe: false, listChanged: false } }, serverInfo });
-    else if (request.method === "ping") send(request.id, {});
-    else if (request.method === "tools/list") send(request.id, { tools });
-    else if (request.method === "resources/list") {
-      const root = workspace((request.params ?? {}) as Record<string, unknown>);
-      const jobs = await listJobs(root);
-      const resources: Array<{ uri: string; name: string; mimeType: string }> = [];
-      for (const job of jobs) for (const name of await listArtifacts(root, job.jobId)) resources.push({ uri: `cbx://job/${job.jobId}/${name}?workspace=${encodeURIComponent(root)}`, name: `${job.jobId}/${name}`, mimeType: name.endsWith(".json") ? "application/json" : "text/plain" });
-      send(request.id, { resources });
-    }
-    else if (request.method === "resources/read") {
-      const uri = String(request.params?.uri ?? "");
-      const match = /^cbx:\/\/job\/([^/]+)\/([^?]+)(?:\?workspace=(.*))?$/.exec(uri);
-      if (!match) throw new Error(`不支持的资源 URI：${uri}`);
-      const root = match[3] ? decodeURIComponent(match[3]) : process.cwd();
-      const content = await readArtifact(root, match[1], match[2]);
-      send(request.id, { contents: [{ uri, mimeType: match[2].endsWith(".json") ? "application/json" : "text/plain", text: content }] });
-    }
-    else if (request.method === "tools/call") send(request.id, text(await callTool(String(request.params?.name), (request.params?.arguments ?? {}) as Record<string, unknown>)));
-    else throw new Error(`未知方法：${request.method ?? "<missing>"}`);
-  } catch (error) { send(requestId, undefined, { code: -32000, message: error instanceof Error ? error.message : String(error) }); }
-});
+export function runMcpServer(): void {
+  const input = createInterface({ input: process.stdin });
+  input.on("line", async (line) => {
+    if (!line.trim()) return;
+    let requestId: unknown = null;
+    try {
+      const request = JSON.parse(line) as { id?: unknown; method?: string; params?: Record<string, unknown> };
+      requestId = request.id ?? null;
+      // Per JSON-RPC 2.0, a request without an id is a notification and must not receive a response.
+      const isNotification = request.id === undefined || request.id === null;
+      if (isNotification && request.method && request.method !== "ping") return;
+      if (request.method === "initialize") send(request.id, { protocolVersion: "2024-11-05", capabilities: { tools: {}, resources: { subscribe: false, listChanged: false } }, serverInfo });
+      else if (request.method === "ping") send(request.id, {});
+      else if (request.method === "tools/list") send(request.id, { tools });
+      else if (request.method === "resources/list") {
+        const root = workspace((request.params ?? {}) as Record<string, unknown>);
+        const jobs = await listJobs(root);
+        const resources: Array<{ uri: string; name: string; mimeType: string }> = [];
+        for (const job of jobs) for (const name of await listArtifacts(root, job.jobId)) resources.push({ uri: `cbx://job/${job.jobId}/${name}?workspace=${encodeURIComponent(root)}`, name: `${job.jobId}/${name}`, mimeType: name.endsWith(".json") ? "application/json" : "text/plain" });
+        send(request.id, { resources });
+      }
+      else if (request.method === "resources/read") {
+        const uri = String(request.params?.uri ?? "");
+        const match = /^cbx:\/\/job\/([^/]+)\/([^?]+)(?:\?workspace=(.*))?$/.exec(uri);
+        if (!match) throw new Error(`不支持的资源 URI：${uri}`);
+        const root = match[3] ? decodeURIComponent(match[3]) : process.cwd();
+        const content = await readArtifact(root, match[1], match[2]);
+        send(request.id, { contents: [{ uri, mimeType: match[2].endsWith(".json") ? "application/json" : "text/plain", text: content }] });
+      }
+      else if (request.method === "tools/call") send(request.id, text(await callTool(String(request.params?.name), (request.params?.arguments ?? {}) as Record<string, unknown>)));
+      else throw new Error(`未知方法：${request.method ?? "<missing>"}`);
+    } catch (error) { send(requestId, undefined, { code: -32000, message: error instanceof Error ? error.message : String(error) }); }
+  });
+}
+
+// Backward compat: `node dist/src/mcp-server.js` still starts the server directly.
+// `cbx mcp` 子命令通过 import 后显式调用 runMcpServer()。
+import { pathToFileURL } from "node:url";
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) runMcpServer();

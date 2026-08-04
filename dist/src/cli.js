@@ -67,6 +67,11 @@ async function main() {
             process.exitCode = 2;
         return;
     }
+    if (command === "mcp") {
+        const { runMcpServer } = await import("./mcp-server.js");
+        runMcpServer();
+        return;
+    }
     if (command === "status") {
         print(await loadState(workspace, args[0]));
         return;
@@ -183,6 +188,6 @@ async function main() {
         print({ jobId: args[0], cleaned: await cleanupWorktree(workspace, args[0]) });
         return;
     }
-    console.log("用法：cbx run|start|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui ...");
+    console.log("用法：cbx run|start|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui ...");
 }
 main().catch((error) => { console.error(error instanceof Error ? error.message : error); process.exitCode = 1; });

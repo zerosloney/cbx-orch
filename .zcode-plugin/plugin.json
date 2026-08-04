@@ -8,8 +8,8 @@
   "commands": "commands",
   "mcpServers": {
     "cbx": {
-      "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/src/mcp-server.js"],
+      "command": "cbx",
+      "args": ["mcp"],
       "cwd": "${CLAUDE_PROJECT_DIR}",
       "env": {
         "CBX_WORKSPACE": "${CLAUDE_PROJECT_DIR}"
