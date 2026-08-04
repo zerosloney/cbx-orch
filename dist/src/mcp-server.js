@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
-import { approveJob, cancelJob, createJob, jobDir, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, startBackground } from "./core.js";
+import { approveJob, cancelJob, createJob, jobDir, listArtifacts, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, startBackground } from "./core.js";
 const serverInfo = { name: "cbx-orch", version: "0.8.0" };
 function send(id, result, error) {
     const response = { jsonrpc: "2.0", id };
@@ -29,7 +29,6 @@ const tools = [
     { name: "cbx_queue_resume", description: "恢复队列并启动等待中的 worker", inputSchema: { type: "object", properties: { workspace: { type: "string" } } } },
     { name: "cbx_retry", description: "将失败任务重新加入队列", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" }, priority: { type: "number" } } } },
 ];
-const resourceNames = ["state.json", "result.json", "request.md", "context-snapshot.md", "events.ndjson", "test.log", "complete.patch", "review.md", "handback.md"];
 async function callTool(name, args) {
     const root = workspace(args);
     const id = String(args.job_id ?? "");
@@ -98,7 +97,11 @@ input.on("line", async (line) => {
         else if (request.method === "resources/list") {
             const root = workspace((request.params ?? {}));
             const jobs = await listJobs(root);
-            send(request.id, { resources: jobs.flatMap(job => resourceNames.map(name => ({ uri: `cbx://job/${job.jobId}/${name}?workspace=${encodeURIComponent(root)}`, name: `${job.jobId}/${name}`, mimeType: name.endsWith(".json") ? "application/json" : "text/plain" }))) });
+            const resources = [];
+            for (const job of jobs)
+                for (const name of await listArtifacts(root, job.jobId))
+                    resources.push({ uri: `cbx://job/${job.jobId}/${name}?workspace=${encodeURIComponent(root)}`, name: `${job.jobId}/${name}`, mimeType: name.endsWith(".json") ? "application/json" : "text/plain" });
+            send(request.id, { resources });
         }
         else if (request.method === "resources/read") {
             const uri = String(request.params?.uri ?? "");

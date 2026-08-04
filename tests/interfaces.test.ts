@@ -70,6 +70,9 @@ test("MCP initialize, tools, resources and errors preserve request ids", async (
     const resources = ((await call(4, "resources/list", { workspace })).result as { resources: Array<{ uri: string }> }).resources;
     const requestResource = resources.find(resource => resource.uri.includes("request.md"));
     assert.ok(requestResource);
+    assert.ok(!resources.some(resource => resource.uri.includes("result.json")), "queued job 不应暴露 result.json");
+    assert.ok(!resources.some(resource => resource.uri.includes("review.md")), "queued job 不应暴露 review.md");
+    assert.ok(!resources.some(resource => resource.uri.includes("handback.md")), "queued job 不应暴露 handback.md");
     const read = await call(5, "resources/read", { uri: requestResource!.uri });
     assert.match(((read.result as { contents: Array<{ text: string }> }).contents[0].text), /MCP/);
     const error = await call(73, "unknown/method");

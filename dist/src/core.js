@@ -234,12 +234,17 @@ export async function readArtifact(workspaceInput, jobId, artifact) {
         throw new Error(`不允许读取任务文件：${artifact}`);
     return readFile(path.join(jobDir(path.resolve(workspaceInput), jobId), artifact), "utf8");
 }
-async function writeResult(workspace, jobId, state) {
-    const directory = jobDir(workspace, jobId);
+export async function listArtifacts(workspaceInput, jobId) {
+    const directory = jobDir(path.resolve(workspaceInput), jobId);
     const files = [];
     for (const file of ARTIFACTS)
         if (existsSync(path.join(directory, file)))
             files.push(file);
+    return files;
+}
+async function writeResult(workspace, jobId, state) {
+    const directory = jobDir(workspace, jobId);
+    const files = await listArtifacts(workspace, jobId);
     await saveJson(path.join(directory, "result.json"), {
         jobId, status: state.status, phase: state.phase, attempt: state.attempt,
         error: state.error ?? null, executorExitCode: state.executorExitCode ?? state.codebuddyExitCode ?? null,
