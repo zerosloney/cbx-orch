@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { appendFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -8,7 +9,7 @@ import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from
 import { findExecutable, resolveExecutor } from "./executors/builtin.js";
 import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, redactText, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, withFileLock, type RuntimeConfig } from "./storage.js";
 import { runProcess, runShell, type ProcessResult } from "./process-runner.js";
-import { cleanupRecordedWorktree, collectDiff, commitWorktree, gitRoot, prepareWorktree, snapshotDiff } from "./git-ops.js";
+import { cleanupRecordedWorktree, collectDiff, commitWorktree, gitDirtyFingerprint, gitRoot, prepareWorktree, snapshotDiff, snapshotGitBaseline } from "./git-ops.js";
 import * as queue from "./queue.js";
 import type { QueueEntry, QueueFile, QueueRuntime } from "./queue.js";
 export type { QueueEntry, QueueEntryStatus, QueueFile } from "./queue.js";
@@ -37,8 +38,26 @@ export interface JobContext {
   autoCommit: boolean;
   commitMessage: string;
   executor: string;
+  reviewExecutor?: string;
+  taskContract?: TaskContract;
+  baseCommit?: string;
+  baseBranch?: string;
+  baseDirty?: boolean;
+  baseStatus?: string;
+  dirtyFingerprint?: string;
   trustMode: "trusted" | "untrusted";
   gitRoot?: string;
+}
+
+export interface TaskContract {
+  goal?: string;
+  nonGoals?: string[];
+  acceptanceCriteria?: string[];
+  constraints?: string[];
+  relevantFiles?: string[];
+  decisions?: string[];
+  rejectedOptions?: string[];
+  assumptions?: string[];
 }
 
 export interface JobState {
@@ -82,7 +101,7 @@ export async function loadConfig(workspaceInput: string): Promise<CbxConfig> {
   return loadRuntimeConfig(workspaceInput);
 }
 
-export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & { approvalBeforeRun?: boolean; autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string; trustMode?: "trusted" | "untrusted" }): Required<Pick<CbxConfig, "review" | "isolated" | "timeoutMs" | "maxRetries" | "maxTurns" | "keepWorktree" | "permissionMode" | "maxConcurrent">> & Pick<CbxConfig, "testCommand" | "reviewRules" | "executor"> & { approvalBeforeRun: boolean; autoBranch: boolean; autoCommit: boolean; commitMessage: string; trustMode: "trusted" | "untrusted" } {
+export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & { approvalBeforeRun?: boolean; autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string; trustMode?: "trusted" | "untrusted" }): Required<Pick<CbxConfig, "review" | "isolated" | "timeoutMs" | "maxRetries" | "maxTurns" | "keepWorktree" | "permissionMode" | "maxConcurrent">> & Pick<CbxConfig, "testCommand" | "reviewRules" | "executor" | "reviewExecutor"> & { approvalBeforeRun: boolean; autoBranch: boolean; autoCommit: boolean; commitMessage: string; trustMode: "trusted" | "untrusted" } {
   return {
     testCommand: overrides.testCommand ?? config.testCommand,
     review: overrides.review ?? config.review ?? false,
@@ -99,8 +118,26 @@ export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & {
     autoCommit: overrides.autoCommit ?? config.git?.autoCommit ?? false,
     commitMessage: overrides.commitMessage ?? config.git?.commitMessage ?? "chore(cbx): apply task",
     executor: overrides.executor ?? config.executor ?? "codebuddy",
+    reviewExecutor: overrides.reviewExecutor ?? config.reviewExecutor,
     trustMode: overrides.trustMode ?? config.execution?.trustMode ?? "trusted",
   };
+}
+
+function normalizeTaskContract(value?: TaskContract): TaskContract | undefined {
+  if (!value) return undefined;
+  const result: TaskContract = {};
+  if (value.goal !== undefined) {
+    if (typeof value.goal !== "string") throw new Error("taskContract.goal 必须是字符串。");
+    if (value.goal.trim()) result.goal = value.goal.trim();
+  }
+  for (const key of ["nonGoals", "acceptanceCriteria", "constraints", "relevantFiles", "decisions", "rejectedOptions", "assumptions"] as const) {
+    const items = value[key];
+    if (items !== undefined) {
+      if (!Array.isArray(items) || items.some(item => typeof item !== "string")) throw new Error(`taskContract.${key} 必须是字符串数组。`);
+      result[key] = items.map(item => item.trim()).filter(Boolean);
+    }
+  }
+  return Object.keys(result).length ? result : undefined;
 }
 
 function assertExecutionPolicy(trustMode: string, isolated: boolean): asserts trustMode is "trusted" | "untrusted" {
@@ -166,8 +203,10 @@ export async function createJob(options: {
   autoCommit?: boolean;
   commitMessage?: string;
   executor?: string;
+  reviewExecutor?: string;
   trustMode?: "trusted" | "untrusted";
   contextSnapshot?: string;
+  taskContract?: TaskContract;
   jobId?: string;
 }): Promise<{ jobId: string; directory: string }> {
   const workspace = path.resolve(options.workspace);
@@ -178,6 +217,7 @@ export async function createJob(options: {
   if (!Number.isFinite(options.maxTurns) || options.maxTurns < 1) throw new Error("maxTurns 必须是正整数。");
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 100)) throw new Error("timeoutMs 必须不小于 100ms。");
   if (options.maxRetries !== undefined && (!Number.isInteger(options.maxRetries) || options.maxRetries < 0)) throw new Error("maxRetries 必须是非负整数。");
+  const taskContract = normalizeTaskContract(options.taskContract);
   // autoCommit 隐含 isolated：提交到 worktree 才安全，避免把主工作区无关改动一起提交。
   // 不抛错——autoCommit=true 时自动开启 isolated，保留告警让用户知道发生了隐含提升。
   if (options.autoCommit && !options.isolated) {
@@ -192,11 +232,14 @@ export async function createJob(options: {
   const directory = jobDir(workspace, jobId);
   if (existsSync(directory)) throw new Error(`任务已存在：${jobId}`);
   await mkdir(directory, { recursive: true });
-  const request = `# 任务\n\n## 目标\n\n${options.task.trim()}\n\n## 验收命令\n\n${options.testCommand ?? "未指定；请根据项目现有脚本选择最相关的检查。"}\n\n## 执行规则\n\n- 只修改完成目标所需的文件。\n- 先检查项目结构和现有测试，再修改。\n- 完成后运行验收命令。\n- 将修改摘要、测试命令、测试结果和遗留问题写入 handback.md。\n`;
+  const request = `# 任务\n\n## 目标\n\n${taskContract?.goal ?? options.task.trim()}\n\n## 验收标准\n\n${taskContract?.acceptanceCriteria?.map(item => `- ${item}`).join("\n") || "- 以目标和验收命令为准。"}\n\n## 非目标\n\n${taskContract?.nonGoals?.map(item => `- ${item}`).join("\n") || "- 未指定。"}\n\n## 约束\n\n${taskContract?.constraints?.map(item => `- ${item}`).join("\n") || "- 只修改完成目标所需的文件。"}\n\n## 验收命令\n\n${options.testCommand ?? "未指定；请根据项目现有脚本选择最相关的检查。"}\n\n## 执行规则\n\n- 先检查项目结构和现有测试，再修改。\n- 完成后运行验收命令。\n- 将修改摘要、测试命令、测试结果和遗留问题写入 handback.md。\n`;
   await writeFile(path.join(directory, "request.md"), request, "utf8");
   const governance = (await loadConfig(workspace)).governance;
   const snapshot = redactText(options.contextSnapshot ?? "", governance?.redactFields, governance?.redactPatterns);
   if (snapshot) await writeFile(path.join(directory, "context-snapshot.md"), snapshot, "utf8");
+  if (taskContract) await saveJson(path.join(directory, "context-contract.json"), taskContract);
+  const baseline = snapshotGitBaseline(workspace);
+  const dirtyFingerprint = gitDirtyFingerprint(workspace);
   const context: JobContext = {
     appVersion: APP_VERSION, jobId, workspace, createdAt: now(), testCommand: options.testCommand,
     reviewRequested: options.review, isolated: options.isolated, permissionMode: options.permissionMode,
@@ -205,9 +248,11 @@ export async function createJob(options: {
     reviewRules: options.reviewRules, approvalBeforeRun: options.approvalBeforeRun ?? false,
     autoBranch: options.autoBranch ?? false, autoCommit: options.autoCommit ?? false,
     commitMessage: options.commitMessage ?? "chore(cbx): apply task",
-    executor: options.executor ?? "codebuddy",
+    executor: options.executor ?? "codebuddy", reviewExecutor: options.reviewExecutor,
+    taskContract,
     trustMode: options.trustMode ?? "trusted",
-    gitRoot: gitRoot(workspace),
+    gitRoot: baseline?.root ?? gitRoot(workspace), baseCommit: baseline?.commit, baseBranch: baseline?.branch,
+    baseDirty: baseline?.dirty, baseStatus: baseline?.status, dirtyFingerprint,
   };
   await saveJson(path.join(directory, "context.json"), context);
   const state: JobState = {
@@ -274,7 +319,7 @@ async function runTest(directory: string, workdir: string, command: string | und
   return result;
 }
 
-const ARTIFACTS = new Set(["request.md", "context-snapshot.md", "context.json", "state.json", "events.ndjson", "agent.log", "handback.md", "review.md", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt", "result.json"]);
+const ARTIFACTS = new Set(["request.md", "context-snapshot.md", "context-contract.json", "understanding.json", "context.json", "state.json", "events.ndjson", "agent.log", "handback.md", "review.md", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt", "result.json"]);
 
 export async function listJobs(workspaceInput: string): Promise<JobState[]> {
   const workspace = path.resolve(workspaceInput);
@@ -322,12 +367,31 @@ export async function listArtifacts(workspaceInput: string, jobId: string): Prom
 async function writeResult(workspace: string, jobId: string, state: JobState): Promise<void> {
   const directory = jobDir(workspace, jobId);
   const files = await listArtifacts(workspace, jobId);
+  const context = await loadJson<JobContext>(path.join(directory, "context.json"));
+  const text = async (name: string): Promise<string | null> => existsSync(path.join(directory, name)) ? readFile(path.join(directory, name), "utf8") : null;
+  const handback = await text("handback.md");
+  const status = await text("git-status.txt");
+  const artifactHashes: Record<string, string> = {};
+  const stableEvidence = new Set(["request.md", "context-snapshot.md", "context-contract.json", "understanding.json", "handback.md", "review.md", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt"]);
+  for (const file of files.filter(file => stableEvidence.has(file))) artifactHashes[file] = createHash("sha256").update(await readFile(path.join(directory, file))).digest("hex");
+  const changedFiles = (status ?? "").split(/\r?\n/).filter(Boolean).map(line => line.slice(3).replace(/^.* -> /, ""));
+  const evidenceArtifacts = ["complete.patch", "test.log", ...(context.reviewRequested ? ["review.md"] : [])].filter(file => existsSync(path.join(directory, file)));
+  const acceptanceEvidence = (context.taskContract?.acceptanceCriteria ?? []).map(criterion => ({ criterion, status: evidenceArtifacts.length === (context.reviewRequested ? 3 : 2) ? "evidence_available" : "unverified", artifacts: evidenceArtifacts }));
   await saveJson(path.join(directory, "result.json"), {
     jobId, status: state.status, phase: state.phase, attempt: state.attempt,
     error: state.error ?? null, executorExitCode: state.executorExitCode ?? state.codebuddyExitCode ?? null,
     testExitCode: state.testExitCode ?? null, reviewVerdict: state.reviewVerdict ?? null,
-    files, updatedAt: now(),
+    baseCommit: context.baseCommit ?? null, baseBranch: context.baseBranch ?? null, baseDirty: context.baseDirty ?? null,
+    baselineDrift: state.baselineDrift ?? false, changedFiles, handback,
+    tests: [{ command: context.testCommand ?? null, exitCode: state.testExitCode ?? null, timedOut: state.phase === "testing" ? Boolean(state.timedOut) : false }],
+    acceptanceEvidence, artifactHashes, files, updatedAt: now(),
   });
+}
+
+interface Understanding { interpretedGoal?: string; plannedFiles?: string[]; acceptanceCriteria?: string[]; assumptions?: string[]; blockingQuestions?: string[]; }
+
+function semanticReviewFailure(review: string): boolean {
+  return review.split(/\r?\n/).slice(1, 4).some(line => /^CLASSIFICATION\s*:\s*(SEMANTIC|CONTRACT|BASELINE)$/i.test(line.trim()));
 }
 
 async function executeJobLocked(workspace: string, jobId: string, extra = "", queueEntryId?: string): Promise<JobState> {
@@ -346,9 +410,32 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
   if (context.approvalBeforeRun && initial.approved !== true) {
     return writeState(workspace, jobId, { status: "awaiting_approval", phase: "before_run", approvalRequired: true });
   }
+  const currentBaseline = snapshotGitBaseline(workspace);
+  const currentDirtyFingerprint = gitDirtyFingerprint(workspace);
+  const baselineDrift = Boolean(context.baseCommit && currentBaseline?.commit && context.baseCommit !== currentBaseline.commit);
+  const dirtyBaselineDrift = Boolean(context.dirtyFingerprint && currentDirtyFingerprint && context.dirtyFingerprint !== currentDirtyFingerprint);
+  if (context.isolated && context.baseDirty) {
+    const state = await writeState(workspace, jobId, { status: "needs_fix", phase: "dirty_baseline", dirtyBaselineDrift: false, error: "隔离任务无法携带创建时的未提交内容；请先提交或清理工作区后刷新基线。" }, queueEntryId);
+    await writeResult(workspace, jobId, state);
+    return state;
+  }
+  if (!context.isolated && dirtyBaselineDrift) {
+    const state = await writeState(workspace, jobId, { status: "needs_fix", phase: "dirty_baseline", dirtyBaselineDrift: true, error: "非隔离工作区未提交内容已偏离任务创建基线；请刷新上下文/基线后继续。" }, queueEntryId);
+    await writeResult(workspace, jobId, state);
+    return state;
+  }
+  if (baselineDrift) {
+    logJobEvent(workspace, jobId, "baseline_drift", { baseCommit: context.baseCommit, currentCommit: currentBaseline?.commit, isolated: context.isolated });
+    if (!context.isolated) {
+      const state = await writeState(workspace, jobId, { status: "needs_fix", phase: "baseline_drift", baselineDrift: true, currentCommit: currentBaseline?.commit, error: "非隔离工作区 HEAD 已偏离任务创建基线；请刷新上下文/基线后继续。" }, queueEntryId);
+      await writeResult(workspace, jobId, state);
+      return state;
+    }
+    await writeState(workspace, jobId, { baselineDrift: true, currentCommit: currentBaseline?.commit });
+  }
   const worktreeFile = path.join(directory, "worktree.json");
   const recordedWorkdir = existsSync(worktreeFile) ? (await loadJson<{ path: string }>(worktreeFile)).path : "";
-  const workdir = recordedWorkdir && existsSync(recordedWorkdir) ? recordedWorkdir : await prepareWorktree(workspace, directory, jobId, context.isolated, context.autoBranch);
+  const workdir = recordedWorkdir && existsSync(recordedWorkdir) ? recordedWorkdir : await prepareWorktree(workspace, directory, jobId, context.isolated, context.autoBranch, context.baseCommit ?? "HEAD");
   const maxAttempts = Math.max(1, context.maxRetries + 1);
   let attempt = Number(initial.attempt ?? 0);
   let attemptExtra = extra;
@@ -381,6 +468,20 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
     return finalState;
   };
 
+  if (context.taskContract && !existsSync(path.join(directory, "understanding.json"))) {
+    const beforeHandshake = await snapshotDiff(workdir);
+    const handshakePrompt = promptFor(directory, "context handshake", `只确认任务理解，不要修改代码。将 JSON 写入 ${path.join(directory, "understanding.json")}，字段为 interpretedGoal、plannedFiles、acceptanceCriteria、assumptions、blockingQuestions。没有阻塞问题时 blockingQuestions 必须是空数组；需要产品决策、公共契约选择或上下文冲突时写入问题并停止。${extra ? `\n\n主 Agent 补充：\n${extra}` : ""}`, label, existsSync(path.join(directory, "context-snapshot.md")));
+    let handshake: ProcessResult;
+    try { handshake = await invokeExecutor(context.executor, workspace, directory, workdir, handshakePrompt, context.permissionMode, context.maxTurns, context.timeoutMs); }
+    catch (error) { return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: String(error) }); }
+    const afterHandshake = await snapshotDiff(workdir);
+    if (JSON.stringify(beforeHandshake) !== JSON.stringify(afterHandshake)) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "上下文握手阶段修改了工作区。" });
+    if (handshake.code !== 0 || handshake.timedOut || !existsSync(path.join(directory, "understanding.json"))) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "执行代理未能生成有效的 understanding.json。" });
+    const understanding = await loadJson<Understanding>(path.join(directory, "understanding.json"));
+    if (!Array.isArray(understanding.blockingQuestions)) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "understanding.json 缺少 blockingQuestions 数组。" });
+    if (understanding.blockingQuestions.length) return finish({ status: "needs_fix", phase: "awaiting_clarification", contextIssue: true, blockingQuestions: understanding.blockingQuestions, error: "任务存在阻塞性歧义，需要主 Agent 纠偏。" });
+  }
+
   for (let tryNumber = 1; tryNumber <= maxAttempts; tryNumber += 1) {
     if (existsSync(cancelMarker)) return finishCancelled();
     attempt += 1;
@@ -411,9 +512,11 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
     }
     if (!context.reviewRequested) return finish({ status: "done", phase: "done", testExitCode: 0 });
     await writeState(workspace, jobId, { status: "running", phase: "reviewing", testExitCode: 0 });
-    const reviewExtra = `审查以下材料：\n- ${path.join(directory, "complete.patch")}\n- ${path.join(directory, "git-status.txt")}\n- ${path.join(directory, "untracked-files.txt")}\n- ${path.join(directory, "test.log")}\n- ${path.join(directory, "handback.md")}（如果存在）\n\n不要修改代码。将结果写入 ${path.join(directory, "review.md")}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL。按严重程度列出问题、文件和行号。\n\n审查规则：\n${context.reviewRules ?? "关注正确性、回归风险、安全性、测试覆盖和改动范围。"}`;
+    const reviewExtra = `审查以下材料：\n- ${path.join(directory, "complete.patch")}\n- ${path.join(directory, "git-status.txt")}\n- ${path.join(directory, "untracked-files.txt")}\n- ${path.join(directory, "test.log")}\n- ${path.join(directory, "handback.md")}（如果存在）\n\n不要修改代码。将结果写入 ${path.join(directory, "review.md")}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL。若失败源于需求歧义、公共契约冲突或基线问题，第二行写 CLASSIFICATION: SEMANTIC；普通代码缺陷无需 classification。按严重程度列出问题、文件和行号。\n\n审查规则：\n${context.reviewRules ?? "关注正确性、回归风险、安全性、测试覆盖和改动范围。"}`;
     let reviewAgent: ProcessResult;
-    try { reviewAgent = await invokeExecutor(context.executor, workspace, directory, workdir, promptFor(directory, "independent review", reviewExtra, label, existsSync(path.join(directory, "context-snapshot.md"))), context.permissionMode, context.maxTurns, context.timeoutMs); }
+    const reviewExecutor = context.reviewExecutor ?? context.executor;
+    const reviewLabel = resolveExecutor(reviewExecutor)?.label ?? "审查代理";
+    try { reviewAgent = await invokeExecutor(reviewExecutor, workspace, directory, workdir, promptFor(directory, "independent review", reviewExtra, reviewLabel, existsSync(path.join(directory, "context-snapshot.md"))), context.permissionMode, context.maxTurns, context.timeoutMs); }
     catch (error) {
       lastError = String(error);
       if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", retryReason: lastError }); continue; }
@@ -437,6 +540,7 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
     if (pass) return finish({ status: "done", phase: "done", reviewVerdict: "PASS", reviewExitCode: 0 });
     lastError = "审查发现问题";
     attemptExtra = `请读取 ${path.join(directory, "review.md")}，修复其中的问题后重新执行。`;
+    if (semanticReviewFailure(review)) return finish({ status: "needs_fix", phase: "awaiting_clarification", reviewVerdict: "FAIL", reviewExitCode: 0, contextIssue: true, error: "审查发现语义或契约问题，需要主 Agent 纠偏。" });
     if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", retryReason: lastError }); continue; }
     return finish({ status: "needs_fix", phase: "reviewing", reviewVerdict: "FAIL", reviewExitCode: 0, error: lastError });
   }
@@ -508,14 +612,25 @@ export async function retryQueueJob(workspaceInput: string, jobId: string, prior
   return queue.retryQueueJob(queueRuntime, workspaceInput, jobId, priority);
 }
 
-export async function startBackground(workspaceInput: string, jobId: string, extra = "", priority = 0, contextSnapshot?: string): Promise<void> {
+export async function startBackground(workspaceInput: string, jobId: string, extra = "", priority = 0, contextSnapshot?: string, refreshBaseline = false): Promise<void> {
+  const workspace = path.resolve(workspaceInput);
+  const directory = jobDir(workspace, jobId);
   if (contextSnapshot !== undefined) {
-    const workspace = path.resolve(workspaceInput);
-    const directory = jobDir(workspace, jobId);
     const governance = (await loadConfig(workspace)).governance;
     const snapshot = redactText(contextSnapshot, governance?.redactFields, governance?.redactPatterns);
     if (snapshot) await writeFile(path.join(directory, "context-snapshot.md"), snapshot, "utf8");
     else await unlink(path.join(directory, "context-snapshot.md")).catch(() => undefined);
+  }
+  await unlink(path.join(directory, "understanding.json")).catch(() => undefined);
+  if (refreshBaseline) {
+    const baseline = snapshotGitBaseline(workspace);
+    const dirtyFingerprint = gitDirtyFingerprint(workspace);
+    const context = await loadJson<JobContext>(path.join(directory, "context.json"));
+    Object.assign(context, { gitRoot: baseline?.root, baseCommit: baseline?.commit, baseBranch: baseline?.branch, baseDirty: baseline?.dirty, baseStatus: baseline?.status, dirtyFingerprint });
+    await saveJson(path.join(directory, "context.json"), context);
+    const refreshedState = await writeState(workspace, jobId, { baselineDrift: false, dirtyBaselineDrift: false, currentCommit: null, error: null });
+    await writeResult(workspace, jobId, refreshedState);
+    logJobEvent(workspace, jobId, "baseline_refreshed", { baseCommit: baseline?.commit, baseBranch: baseline?.branch, baseDirty: baseline?.dirty });
   }
   await enqueueJob(workspaceInput, jobId, extra, priority);
 }

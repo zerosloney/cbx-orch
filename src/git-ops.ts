@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rmdir, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { atomicWriteFile, loadJson, now, saveJson } from "./storage.js";
 import { capture } from "./process-runner.js";
@@ -11,7 +12,38 @@ export function gitRoot(workspace: string): string | undefined {
   return result.code === 0 && result.stdout.trim() ? path.resolve(result.stdout.trim()) : undefined;
 }
 
-export async function prepareWorktree(workspace: string, directory: string, jobId: string, isolated: boolean, autoBranch = false): Promise<string> {
+export interface GitBaseline { root: string; commit?: string; branch?: string; dirty: boolean; status: string; }
+
+export function snapshotGitBaseline(workspace: string): GitBaseline | undefined {
+  const root = gitRoot(workspace);
+  if (!root) return undefined;
+  const commit = capture(["git", "rev-parse", "HEAD"], root);
+  const branch = capture(["git", "branch", "--show-current"], root);
+  const status = capture(["git", "status", "--porcelain", "--untracked-files=all", "--", ...CODE_PATHS], root);
+  return {
+    root,
+    commit: commit.code === 0 ? commit.stdout.trim() : undefined,
+    branch: branch.code === 0 && branch.stdout.trim() ? branch.stdout.trim() : undefined,
+    dirty: Boolean(status.stdout.trim()),
+    status: status.stdout,
+  };
+}
+
+export function gitDirtyFingerprint(workspace: string): string | undefined {
+  const root = gitRoot(workspace);
+  if (!root) return undefined;
+  const status = capture(["git", "status", "--porcelain", "--untracked-files=all", "--", ...CODE_PATHS], root);
+  const tracked = trackedDiff(root);
+  const paths = capture(["git", "ls-files", "--others", "--exclude-standard", "-z", "--", ...CODE_PATHS], root).stdout.split("\0").filter(Boolean).sort();
+  const hash = createHash("sha256").update(status.stdout).update("\0").update(tracked);
+  for (const relative of paths) {
+    const blob = capture(["git", "hash-object", "--no-filters", "--", relative], root);
+    hash.update("\0").update(relative).update("\0").update(blob.code === 0 ? blob.stdout.trim() : `ERROR:${blob.stderr.trim()}`);
+  }
+  return hash.digest("hex");
+}
+
+export async function prepareWorktree(workspace: string, directory: string, jobId: string, isolated: boolean, autoBranch = false, baseCommit = "HEAD"): Promise<string> {
   if (!isolated) return workspace;
   const root = gitRoot(workspace);
   if (!root) throw new Error("--isolated 要求工作区位于 Git 仓库中。");
@@ -19,10 +51,10 @@ export async function prepareWorktree(workspace: string, directory: string, jobI
   await mkdir(path.dirname(target), { recursive: true });
   const branch = `cbx/${jobId}`;
   const branchExists = capture(["git", "show-ref", "--verify", `refs/heads/${branch}`], root).code === 0;
-  const args = autoBranch && branchExists ? ["git", "worktree", "add", target, branch] : autoBranch ? ["git", "worktree", "add", "-b", branch, target, "HEAD"] : ["git", "worktree", "add", "--detach", target, "HEAD"];
+  const args = autoBranch && branchExists ? ["git", "worktree", "add", target, branch] : autoBranch ? ["git", "worktree", "add", "-b", branch, target, baseCommit] : ["git", "worktree", "add", "--detach", target, baseCommit];
   const result = capture(args, root);
   if (result.code !== 0) throw new Error(`创建 Git worktree 失败：\n${result.stderr.trim()}`);
-  await saveJson(path.join(directory, "worktree.json"), { path: target, branch: autoBranch ? branch : undefined, createdAt: now() });
+  await saveJson(path.join(directory, "worktree.json"), { path: target, branch: autoBranch ? branch : undefined, baseCommit, createdAt: now() });
   return target;
 }
 
@@ -36,6 +68,14 @@ export async function cleanupRecordedWorktree(workspace: string, directory: stri
   if (!root || path.dirname(target) !== expectedParent) throw new Error("拒绝清理不属于本编排器的 worktree 路径。");
   const result = capture(["git", "worktree", "remove", "--force", target], root);
   if (result.code !== 0 && existsSync(target)) throw new Error(`清理 worktree 失败：\n${result.stderr.trim()}`);
+  // 容器目录 .<repo>.cbx-worktrees/ 跨 job 复用；删完 job 子目录后若已空，一并清理避免孤儿。
+  // 并发安全：readdir 非空（其他 job 在用）则跳过；rmdir 仅删空目录，不会误伤。
+  if (expectedParent && existsSync(expectedParent)) {
+    try {
+      const remaining = await readdir(expectedParent);
+      if (remaining.length === 0) await rmdir(expectedParent);
+    } catch { /* 容器清理是 best-effort，失败不影响 job 终态 */ }
+  }
   await saveJson(path.join(directory, "worktree-cleaned.json"), { path: target, cleanedAt: now() });
   return true;
 }

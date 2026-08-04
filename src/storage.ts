@@ -8,7 +8,7 @@ export function now(): string { return new Date().toISOString(); }
 export interface RuntimeConfig {
   testCommand?: string; review?: boolean; isolated?: boolean; timeoutMs?: number; maxRetries?: number; maxTurns?: number;
   keepWorktree?: boolean; permissionMode?: string; reviewRules?: string; approval?: { beforeRun?: boolean }; maxConcurrent?: number;
-  git?: { autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string }; ci?: { failOnReview?: boolean }; executor?: string;
+  git?: { autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string }; ci?: { failOnReview?: boolean }; executor?: string; reviewExecutor?: string;
   execution?: { trustMode?: "trusted" | "untrusted" };
   plugins?: { enforce?: boolean; allowPaths?: string[]; allowSha256?: string[] };
   notifications?: { webhook?: string; timeoutMs?: number; maxRetries?: number; retryBaseMs?: number };
@@ -36,8 +36,8 @@ export async function loadRuntimeConfig(workspaceInput: string): Promise<Runtime
   try { parsed = JSON.parse(await readFile(file, "utf8")); }
   catch (error) { if (isMissing(error)) return {}; throw error; }
   const config = object(parsed, ".cbx.json");
-  known(config, ".cbx.json", ["testCommand", "review", "isolated", "timeoutMs", "maxRetries", "maxTurns", "keepWorktree", "permissionMode", "reviewRules", "approval", "maxConcurrent", "git", "ci", "executor", "execution", "plugins", "notifications", "telemetry", "governance", "reviewGate"]);
-  optionalString(config.testCommand, "testCommand"); optionalBoolean(config.review, "review"); optionalBoolean(config.isolated, "isolated"); optionalInteger(config.timeoutMs, "timeoutMs", 100); optionalInteger(config.maxRetries, "maxRetries", 0); optionalInteger(config.maxTurns, "maxTurns", 1); optionalBoolean(config.keepWorktree, "keepWorktree"); optionalString(config.permissionMode, "permissionMode"); optionalString(config.reviewRules, "reviewRules"); optionalInteger(config.maxConcurrent, "maxConcurrent", 1); optionalString(config.executor, "executor");
+  known(config, ".cbx.json", ["testCommand", "review", "isolated", "timeoutMs", "maxRetries", "maxTurns", "keepWorktree", "permissionMode", "reviewRules", "approval", "maxConcurrent", "git", "ci", "executor", "reviewExecutor", "execution", "plugins", "notifications", "telemetry", "governance", "reviewGate"]);
+  optionalString(config.testCommand, "testCommand"); optionalBoolean(config.review, "review"); optionalBoolean(config.isolated, "isolated"); optionalInteger(config.timeoutMs, "timeoutMs", 100); optionalInteger(config.maxRetries, "maxRetries", 0); optionalInteger(config.maxTurns, "maxTurns", 1); optionalBoolean(config.keepWorktree, "keepWorktree"); optionalString(config.permissionMode, "permissionMode"); optionalString(config.reviewRules, "reviewRules"); optionalInteger(config.maxConcurrent, "maxConcurrent", 1); optionalString(config.executor, "executor"); optionalString(config.reviewExecutor, "reviewExecutor");
   if (config.approval !== undefined) { const value = object(config.approval, "approval"); known(value, "approval", ["beforeRun"]); optionalBoolean(value.beforeRun, "approval.beforeRun"); }
   if (config.git !== undefined) { const value = object(config.git, "git"); known(value, "git", ["autoBranch", "autoCommit", "commitMessage"]); optionalBoolean(value.autoBranch, "git.autoBranch"); optionalBoolean(value.autoCommit, "git.autoCommit"); optionalString(value.commitMessage, "git.commitMessage"); }
   if (config.ci !== undefined) { const value = object(config.ci, "ci"); known(value, "ci", ["failOnReview"]); optionalBoolean(value.failOnReview, "ci.failOnReview"); }

@@ -30,6 +30,7 @@ async function main(): Promise<void> {
       keepWorktree: has(args, "--keep-worktree") ? true : has(args, "--no-keep-worktree") ? false : undefined,
       permissionMode: has(args, "--dangerously-skip-permissions") ? "dontAsk" : option(args, "--permission-mode"),
       executor: option(args, "--executor"),
+      reviewExecutor: option(args, "--review-executor"),
       autoBranch: has(args, "--auto-branch") ? true : has(args, "--no-auto-branch") ? false : undefined,
       autoCommit: has(args, "--auto-commit") ? true : has(args, "--no-auto-commit") ? false : undefined,
       commitMessage: option(args, "--commit-message"),
@@ -52,6 +53,7 @@ async function main(): Promise<void> {
         autoCommit: defaults.autoCommit,
         commitMessage: defaults.commitMessage,
         executor: defaults.executor,
+        reviewExecutor: defaults.reviewExecutor,
         trustMode: defaults.trustMode,
         allowUnsafePermissions: has(args, "--dangerously-skip-permissions"),
       });
@@ -123,7 +125,7 @@ async function main(): Promise<void> {
       print(await executeJob(workspace, args[0], message));
       return;
     }
-    await startBackground(workspace, args[0], message, Number(option(args, "--priority", "0")));
+    await startBackground(workspace, args[0], message, Number(option(args, "--priority", "0")), undefined, has(args, "--refresh-baseline"));
     print({ jobId: args[0], status: "queued" });
     return;
   }

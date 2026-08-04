@@ -14,7 +14,7 @@ import { BUILTIN_EXECUTORS, resolveExecutor } from "../src/executors/builtin.js"
 const fakeAgent = `
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 const args = process.argv.slice(2);
-const prompt = args.at(-1) ?? "";
+const prompt = args.find(value => value.includes("执行代理")) ?? args.at(-1) ?? "";
 const sleepMs = Number(process.env.FAKE_SLEEP_MS ?? 0);
 if (sleepMs) await new Promise(resolve => setTimeout(resolve, sleepMs));
 const jobDir = process.env.FAKE_JOB_DIR;
@@ -22,7 +22,10 @@ const promptFile = process.env.FAKE_PROMPT_FILE;
 if (promptFile) await appendFile(promptFile, prompt + "\\n---\\n");
 if (jobDir) {
   await mkdir(jobDir, { recursive: true });
-  if (prompt.includes("independent review")) {
+  if (prompt.includes("context handshake")) {
+    const blockingQuestions = process.env.FAKE_BLOCKING_QUESTION ? [process.env.FAKE_BLOCKING_QUESTION] : [];
+    await writeFile(jobDir + "/understanding.json", JSON.stringify({ interpretedGoal: "fake goal", plannedFiles: [], acceptanceCriteria: [], assumptions: [], blockingQuestions }));
+  } else if (prompt.includes("independent review")) {
     const verdict = process.env.FAKE_REVIEW_VERDICT ?? "PASS";
     await writeFile(jobDir + "/review.md", process.env.FAKE_REVIEW_CONTENT ?? ("VERDICT: " + verdict + "\\n"));
     if (process.env.FAKE_REVIEW_MUTATE === "1") await writeFile(process.cwd() + "/reviewer-change.txt", "untested reviewer change\\n");
@@ -52,7 +55,8 @@ process.exit(Number(sequence[Math.min(index, sequence.length - 1)] ?? 0));
 
 async function setupFake(): Promise<{ workspace: string; script: string }> {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-e2e-"));
-  const script = path.join(workspace, "fake-codebuddy.mjs");
+  const binaryDirectory = await mkdtemp(path.join(os.tmpdir(), "cbx-fake-bin-"));
+  const script = path.join(binaryDirectory, "fake-codebuddy.mjs");
   await writeFile(script, fakeAgent, "utf8");
   process.env.CBX_CODEBUDDY = script;
   process.env.FAKE_JOB_DIR = "";
@@ -64,6 +68,7 @@ async function setupFake(): Promise<{ workspace: string; script: string }> {
   delete process.env.FAKE_STAGE_CHANGE;
   delete process.env.FAKE_COUNTER_FILE;
   delete process.env.FAKE_PROMPT_FILE;
+  delete process.env.FAKE_BLOCKING_QUESTION;
   return { workspace, script };
 }
 
@@ -116,11 +121,12 @@ test("readEventsIncremental returns events after cursor and skips partial tail",
 
 test(".cbx.json provides defaults and tasks can be listed", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-config-"));
-  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ testCommand: "npm test", review: true, isolated: true, maxRetries: 3, approval: { beforeRun: true } }), "utf8");
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ testCommand: "npm test", review: true, isolated: true, maxRetries: 3, approval: { beforeRun: true }, reviewExecutor: "opencode" }), "utf8");
   const config = await loadConfig(workspace);
   const defaults = mergeConfig(config, {});
   assert.equal(defaults.review, true);
   assert.equal(defaults.approvalBeforeRun, true);
+  assert.equal(defaults.reviewExecutor, "opencode");
   await createJob({ workspace, task: "配置任务", review: defaults.review, isolated: defaults.isolated, permissionMode: defaults.permissionMode, maxTurns: defaults.maxTurns, timeoutMs: defaults.timeoutMs, maxRetries: defaults.maxRetries, approvalBeforeRun: defaults.approvalBeforeRun, jobId: "config-job" });
   assert.equal((await listJobs(workspace))[0].jobId, "config-job");
 });
@@ -151,7 +157,139 @@ test("end-to-end success runs fake agent, test, and review", async () => {
   assert.ok(events.includes("process_finished"));
   assert.match(events, /"event":"executor_metadata","source":"builtin"/);
   assert.ok((await readFile(path.join(job.directory, "complete.patch"), "utf8")).includes("fake-change.txt"));
-  assert.equal(JSON.parse(await readArtifact(workspace, job.jobId, "result.json")).status, "done");
+  const result = JSON.parse(await readArtifact(workspace, job.jobId, "result.json"));
+  assert.equal(result.status, "done");
+  assert.ok(result.changedFiles.includes("fake-change.txt"));
+  assert.equal(result.handback.trim(), "fake handback");
+  assert.match(result.artifactHashes["complete.patch"], /^[a-f0-9]{64}$/);
+});
+
+test("structured task contract performs a plan-only handshake and pauses on ambiguity", async () => {
+  const { workspace } = await setupFake();
+  process.env.FAKE_BLOCKING_QUESTION = "是否允许修改公共 API？";
+  const job = await createJob({ workspace, task: "兼容目标", taskContract: { goal: "明确目标", acceptanceCriteria: ["保持 API 兼容"] }, review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 1, jobId: "handshake" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "needs_fix");
+  assert.equal(state.phase, "awaiting_clarification");
+  assert.equal(state.attempt, 0, "语义歧义不应消耗实现重试");
+  assert.equal(existsSync(path.join(workspace, "fake-change.txt")), false);
+  assert.deepEqual(JSON.parse(await readArtifact(workspace, job.jobId, "understanding.json")).blockingQuestions, ["是否允许修改公共 API？"]);
+  assert.equal(JSON.parse(await readArtifact(workspace, job.jobId, "result.json")).acceptanceEvidence[0].status, "unverified");
+});
+
+test("reviewExecutor can independently override the implementation executor", async () => {
+  const { workspace, script } = await setupFake();
+  process.env.CBX_OPENCODE = script;
+  const job = await createJob({ workspace, task: "独立审查", review: true, isolated: false, executor: "codebuddy", reviewExecutor: "opencode", permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "review-executor" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  try { assert.equal((await executeJob(workspace, job.jobId)).status, "done"); }
+  finally { delete process.env.CBX_OPENCODE; }
+  const events = await readFile(path.join(job.directory, "events.ndjson"), "utf8");
+  assert.match(events, /"name":"codebuddy"/);
+  assert.match(events, /"name":"opencode"/);
+});
+
+test("git baseline is recorded and isolated execution stays pinned when HEAD drifts", async () => {
+  const { workspace } = await setupFake();
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "base"], { cwd: workspace });
+  const baseCommit = spawnSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).stdout.trim();
+  const job = await createJob({ workspace, task: "固定基线", review: false, isolated: true, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "pinned" });
+  await writeFile(path.join(workspace, "README.md"), "later\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "later"], { cwd: workspace });
+  process.env.FAKE_JOB_DIR = job.directory;
+  assert.equal((await executeJob(workspace, job.jobId)).status, "done");
+  const result = JSON.parse(await readArtifact(workspace, job.jobId, "result.json"));
+  assert.equal(result.baseCommit, baseCommit);
+  assert.equal(result.baselineDrift, true);
+});
+
+test("non-isolated baseline drift pauses without blind retry", async () => {
+  const { workspace } = await setupFake();
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "base"], { cwd: workspace });
+  const job = await createJob({ workspace, task: "检测漂移", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 2, jobId: "drift" });
+  await writeFile(path.join(workspace, "README.md"), "later\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "later"], { cwd: workspace });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "needs_fix");
+  assert.equal(state.phase, "baseline_drift");
+  assert.equal(state.attempt, 0);
+});
+
+test("isolated execution pauses when the recorded baseline contains uncommitted work", async () => {
+  const { workspace } = await setupFake();
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "base"], { cwd: workspace });
+  await writeFile(path.join(workspace, "draft.txt"), "uncommitted\n", "utf8");
+  const job = await createJob({ workspace, task: "不得丢草稿", review: false, isolated: true, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 2, jobId: "dirty-isolated" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "needs_fix");
+  assert.equal(state.phase, "dirty_baseline");
+  assert.equal(state.attempt, 0);
+  assert.equal(existsSync(path.join(job.directory, "worktree.json")), false);
+});
+
+test("non-isolated execution compares dirty content fingerprint", async () => {
+  const { workspace } = await setupFake();
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "base"], { cwd: workspace });
+  await writeFile(path.join(workspace, "draft.txt"), "version one\n", "utf8");
+  const unchanged = await createJob({ workspace, task: "使用相同草稿", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "dirty-same" });
+  process.env.FAKE_JOB_DIR = unchanged.directory;
+  assert.equal((await executeJob(workspace, unchanged.jobId)).status, "done");
+
+  await writeFile(path.join(workspace, "fake-change.txt"), "changed\n", "utf8");
+  const changed = await createJob({ workspace, task: "检测草稿变化", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "dirty-changed" });
+  await writeFile(path.join(workspace, "draft.txt"), "version two\n", "utf8");
+  process.env.FAKE_JOB_DIR = changed.directory;
+  const state = await executeJob(workspace, changed.jobId);
+  assert.equal(state.status, "needs_fix");
+  assert.equal(state.phase, "dirty_baseline");
+  assert.equal(state.dirtyBaselineDrift, true);
+});
+
+test("refreshBaseline clears stale drift flags in state and result", async () => {
+  const { workspace } = await setupFake();
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "base"], { cwd: workspace });
+  const job = await createJob({ workspace, task: "刷新基线", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "refresh-drift" });
+  await writeFile(path.join(workspace, "README.md"), "later\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "later"], { cwd: workspace });
+  assert.equal((await executeJob(workspace, job.jobId)).baselineDrift, true);
+  process.env.FAKE_JOB_DIR = job.directory;
+  await startBackground(workspace, job.jobId, "使用新基线", 0, "已确认新 HEAD", true);
+  const refreshed = await loadState(workspace, job.jobId);
+  assert.equal(refreshed.baselineDrift, false);
+  assert.equal(refreshed.dirtyBaselineDrift, false);
+  assert.equal(refreshed.currentCommit, null);
+  assert.equal(JSON.parse(await readArtifact(workspace, job.jobId, "result.json")).baselineDrift, false);
 });
 
 test("failed agent attempt is retried", async () => {
@@ -205,6 +343,9 @@ test("isolated worktree is cleaned after success", async () => {
   assert.equal(state.worktreeCleaned, true);
   const record = JSON.parse(await readFile(path.join(job.directory, "worktree.json"), "utf8")) as { path: string };
   assert.equal(existsSync(record.path), false);
+  // 容器目录（.<repo>.cbx-worktrees/）在最后一个 job 清理后也应删除，避免孤儿
+  const container = path.dirname(record.path);
+  assert.equal(existsSync(container), false);
 });
 
 test("background cancellation terminates the task", async () => {
@@ -403,6 +544,17 @@ test("review verdict is parsed only from the first line", async () => {
   const state = await executeJob(workspace, job.jobId);
   assert.equal(state.status, "needs_fix");
   assert.equal(state.reviewVerdict, "FAIL");
+});
+
+test("semantic review failures pause without automatic implementation retries", async () => {
+  const { workspace } = await setupFake();
+  process.env.FAKE_REVIEW_CONTENT = "VERDICT: FAIL\nCLASSIFICATION: SEMANTIC\n需要产品决策\n";
+  const job = await createJob({ workspace, task: "语义冲突", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 2, jobId: "semantic-review" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "needs_fix");
+  assert.equal(state.phase, "awaiting_clarification");
+  assert.equal(state.attempt, 1);
 });
 
 test("corrupt queue is surfaced and dead queue locks are recovered", async () => {

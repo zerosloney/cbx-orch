@@ -25,6 +25,7 @@ cbx's MCP server is registered under the name `cbx`. In ZCode its tools appear a
 - `mcp__cbx__cbx_start` — create + enqueue a task (runs in a detached worker)
 - `mcp__cbx__cbx_status` — read job status / phase / attempt
 - `mcp__cbx__cbx_result` — read structured result (exit codes, review verdict, artifact list)
+- `mcp__cbx__cbx_artifact` — read an allowlisted evidence artifact (`handback.md`, `complete.patch`, `test.log`, `review.md`, `understanding.json`)
 - `mcp__cbx__cbx_review` — read the review report
 - `mcp__cbx__cbx_continue` — re-queue a job to fix review/test failures
 - `mcp__cbx__cbx_cancel` / `mcp__cbx__cbx_approve` — lifecycle control
@@ -34,7 +35,7 @@ cbx's MCP server is registered under the name `cbx`. In ZCode its tools appear a
 
 ## Default workflow
 
-1. **Start**: `cbx_start` with `task` (and optional `test_command`, `executor`, `review`, `isolated`). Returns `{ job_id, status: "queued" }`. Give the user the `job_id` immediately.
+1. **Start**: `cbx_start` with `task` (and optional `test_command`, `executor`, `review_executor`, `review`, `isolated`). For non-trivial tasks also pass `task_contract` with goal, acceptance criteria, non-goals, constraints, relevant files, decisions/rejections, and assumptions. This creates a plan-only `understanding.json` handshake; blocking ambiguity stops as `needs_fix`. Returns `{ job_id, status: "queued" }`. Give the user the `job_id` immediately.
 2. **Poll** (incremental, low-cost): the worker writes events to `events.ndjson` as it runs; stream them back with a line cursor so this session only pays for new events each round:
    - `offset = 0`
    - loop:
@@ -43,8 +44,8 @@ cbx's MCP server is registered under the name `cbx`. In ZCode its tools appear a
      3. `cbx_status` once to check for a terminal status (`done` / `failed` / `needs_fix` / `review_failed` / `cancelled`). Terminal → break.
      4. Not terminal → wait a few seconds (backoff up to ~15s for long tasks) and loop.
    - Omitting `since` returns the legacy full `{ logs: string }` shape — use it only for one-shot full reads, not in the poll loop.
-3. **Collect**: on `done`, call `cbx_result` and summarize the diff, test result, and review verdict. On failure, call `cbx_review` + `cbx_logs` to diagnose.
-4. **Rework** (if needed): `cbx_continue` with a fix message re-queues the job.
+3. **Collect**: on `done`, call `cbx_result`, then read `handback.md`, `complete.patch`, `test.log`, and (when requested) `review.md` with `cbx_artifact`. Compare these primary artifacts before summarizing; `result.json` alone is not sufficient evidence. On failure, read the available evidence plus `cbx_review` + `cbx_logs`.
+4. **Rework** (if needed): `cbx_continue` with a fix message and refreshed `context_snapshot` re-queues the job. For `baseline_drift` or `dirty_baseline`, use `refresh_baseline: true` only after the main Agent confirms the current HEAD and dirty state are intended. An isolated dirty baseline must be committed or cleaned first.
 
 ## Executor choice
 
@@ -56,6 +57,7 @@ cbx's MCP server is registered under the name `cbx`. In ZCode its tools appear a
 | `omp` | `omp` | omp (no documented permission flag yet) |
 
 Override per-task via `cbx_start`'s `executor` argument, or globally via the plugin's `userConfig.executor`.
+Set `review_executor` (or `.cbx.json` `reviewExecutor`) to use a different reviewer; otherwise review remains backward-compatible and uses `executor`.
 
 ## Isolation
 
@@ -64,5 +66,6 @@ Override per-task via `cbx_start`'s `executor` argument, or globally via the plu
 ## Safety notes
 
 - cbx stores everything under `<workspace>/.cbx/jobs/<job-id>/` — request.md, events.ndjson, test.log, diff.patch, review.md, result.json. Inspect any of it via the corresponding tool.
+- Job creation records commit, branch, dirty state, and a dirty content fingerprint. With `isolated: true`, a dirty creation baseline pauses as `needs_fix / dirty_baseline` before worktree creation so uncommitted content cannot be silently omitted; commit or clean it, then confirm with `refresh_baseline: true`. Once clean, the worktree is created from the fixed commit. Non-isolated jobs pause on HEAD drift or when the dirty content fingerprint changes, but may run when the recorded dirty content is unchanged.
 - The review agent runs in the same worktree; cbx detects if the reviewer mutated files and fails the job rather than delivering untested code.
 - Test commands run in the worktree; cbx applies a basic destructive-command blocklist but does not guarantee safety of arbitrary commands.
