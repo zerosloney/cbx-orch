@@ -35,7 +35,14 @@ cbx's MCP server is registered under the name `cbx`. In ZCode its tools appear a
 ## Default workflow
 
 1. **Start**: `cbx_start` with `task` (and optional `test_command`, `executor`, `review`, `isolated`). Returns `{ job_id, status: "queued" }`. Give the user the `job_id` immediately.
-2. **Poll**: `cbx_status` every few seconds until `status` is terminal (`done` / `failed` / `needs_fix` / `review_failed` / `cancelled`). The worker is detached; do not block this session.
+2. **Poll** (incremental, low-cost): the worker writes events to `events.ndjson` as it runs; stream them back with a line cursor so this session only pays for new events each round:
+   - `offset = 0`
+   - loop:
+     1. `cbx_logs` with `{ job_id, since: offset }` → returns `{ events: [...], next_offset }`. Save `offset = next_offset`.
+     2. Surface key events to the user — `process_started`, `process_finished`, `test` exit, `review_verdict`. Do NOT dump the full event list.
+     3. `cbx_status` once to check for a terminal status (`done` / `failed` / `needs_fix` / `review_failed` / `cancelled`). Terminal → break.
+     4. Not terminal → wait a few seconds (backoff up to ~15s for long tasks) and loop.
+   - Omitting `since` returns the legacy full `{ logs: string }` shape — use it only for one-shot full reads, not in the poll loop.
 3. **Collect**: on `done`, call `cbx_result` and summarize the diff, test result, and review verdict. On failure, call `cbx_review` + `cbx_logs` to diagnose.
 4. **Rework** (if needed): `cbx_continue` with a fix message re-queues the job.
 

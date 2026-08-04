@@ -6,6 +6,7 @@
   "license": "MIT",
   "skills": "skills",
   "commands": "commands",
+  "hooks": "hooks",
   "mcpServers": {
     "cbx": {
       "command": "cbx",

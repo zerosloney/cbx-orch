@@ -6,7 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
-import { approveJob, cancelJob, createJob, executeJob, health, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, serveQueue, startBackground } from "../src/core.js";
+import { approveJob, cancelJob, createJob, executeJob, health, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, readEventsIncremental, resumeQueue, retryQueueJob, serveQueue, startBackground } from "../src/core.js";
+import { runReviewGate, stopReviewGateHook } from "../src/review-gate.js";
 import { loadPersistedQueue, savePersistedStateAndQueue } from "../src/storage.js";
 import { BUILTIN_EXECUTORS, resolveExecutor } from "../src/executors/builtin.js";
 
@@ -29,6 +30,14 @@ if (jobDir) {
     await writeFile(jobDir + "/handback.md", "fake handback\\n");
     await writeFile(process.cwd() + "/fake-change.txt", "changed\\n");
     if (process.env.FAKE_STAGE_CHANGE === "1") (await import("node:child_process")).spawnSync("git", ["add", "fake-change.txt"], { cwd: process.cwd() });
+  }
+}
+// review-gate：prompt 含 "stop-gate review"，从 prompt 解析 review.md 路径写 verdict
+if (prompt.includes("stop-gate review")) {
+  const match = prompt.match(/将结果写入 (.+?review\\.md)/);
+  if (match) {
+    const verdict = process.env.FAKE_REVIEW_VERDICT ?? "PASS";
+    await writeFile(match[1], process.env.FAKE_REVIEW_CONTENT ?? ("VERDICT: " + verdict + "\\n"));
   }
 }
 const sequence = (process.env.FAKE_EXIT_SEQUENCE ?? "0").split(",");
@@ -65,6 +74,44 @@ test("createJob persists task contract and state", async () => {
   assert.equal((await loadState(workspace, job.jobId)).status, "queued");
   assert.match(await readFile(path.join(job.directory, "request.md"), "utf8"), /实现功能/);
   assert.equal(existsSync(path.join(job.directory, "context-snapshot.md")), false);
+});
+
+test("readEventsIncremental returns events after cursor and skips partial tail", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-"));
+  const job = await createJob({ workspace, task: "游标", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "cursor-job" });
+  const eventsFile = path.join(job.directory, "events.ndjson");
+  await writeFile(eventsFile, [
+    JSON.stringify({ event: "a", n: 0 }),
+    JSON.stringify({ event: "a", n: 1 }),
+    JSON.stringify({ event: "a", n: 2 }),
+    "",  // trailing newline split artifact
+    "{partial",  // line index 3: concurrent write mid-flight, truncated
+  ].join("\n"), "utf8");
+
+  // since=0: three valid lines, stop at partial; next_offset points past line 2
+  const first = await readEventsIncremental(workspace, job.jobId, 0);
+  assert.equal(first.events.length, 3);
+  assert.equal(first.next_offset, 3);
+
+  // since=3: partial line still there, returns nothing, offset unchanged
+  const second = await readEventsIncremental(workspace, job.jobId, first.next_offset);
+  assert.equal(second.events.length, 0);
+  assert.equal(second.next_offset, 3);
+
+  // worker appends completion of partial line (now valid), plus one more
+  await writeFile(eventsFile, [
+    JSON.stringify({ event: "a", n: 0 }),
+    JSON.stringify({ event: "a", n: 1 }),
+    JSON.stringify({ event: "a", n: 2 }),
+    JSON.stringify({ event: "a", n: 3 }),
+    JSON.stringify({ event: "a", n: 4 }),
+    "",
+  ].join("\n"), "utf8");
+
+  const third = await readEventsIncremental(workspace, job.jobId, second.next_offset);
+  assert.equal(third.events.length, 2);
+  assert.equal(third.next_offset, 5);
+  assert.equal(JSON.parse(third.events[1]).n, 4);
 });
 
 test(".cbx.json provides defaults and tasks can be listed", async () => {
@@ -489,4 +536,79 @@ test("paired state and queue write rolls back both records when queue update fai
   } finally { db.close(); }
   assert.equal((await loadState(workspace, job.jobId)).status, "queued");
   assert.equal((await listQueue(workspace)).paused, true);
+});
+
+test("runReviewGate skips when there are no uncommitted changes", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-gate-skip-"));
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "initial"], { cwd: workspace, encoding: "utf8" });
+  const result = await runReviewGate(workspace, { executor: "codebuddy", timeoutMs: 5_000 });
+  assert.equal(result.pass, true);
+  assert.equal(result.verdict, "SKIP");
+});
+
+test("runReviewGate returns PASS verdict from executor for uncommitted changes", async () => {
+  const { workspace, script } = await setupFake();
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "initial"], { cwd: workspace, encoding: "utf8" });
+  await writeFile(path.join(workspace, "README.md"), "changed\n", "utf8");
+  process.env.FAKE_REVIEW_VERDICT = "PASS";
+  const result = await runReviewGate(workspace, { executor: "codebuddy", timeoutMs: 10_000 });
+  assert.equal(result.pass, true);
+  assert.equal(result.verdict, "PASS");
+});
+
+test("runReviewGate returns FAIL verdict from executor and block decision", async () => {
+  const { workspace } = await setupFake();
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "initial"], { cwd: workspace, encoding: "utf8" });
+  await writeFile(path.join(workspace, "README.md"), "dangerous\n", "utf8");
+  process.env.FAKE_REVIEW_VERDICT = "FAIL";
+  process.env.FAKE_REVIEW_CONTENT = "VERDICT: FAIL\n\n# 问题\n\n- 引入危险模式";
+  const result = await runReviewGate(workspace, { executor: "codebuddy", timeoutMs: 10_000 });
+  assert.equal(result.pass, false);
+  assert.equal(result.verdict, "FAIL");
+  assert.match(result.reason, /引入危险模式/);
+});
+
+test("stopReviewGateHook returns null when reviewGate disabled (fail-open default)", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-gate-off-"));
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  await writeFile(path.join(workspace, "README.md"), "x\n", "utf8");
+  const decision = await stopReviewGateHook(workspace);
+  assert.equal(decision, null);
+});
+
+test("stopReviewGateHook returns null when reviewGate enabled but no changes", async () => {
+  const { workspace } = await setupFake();
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "initial"], { cwd: workspace, encoding: "utf8" });
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ reviewGate: { enabled: true } }), "utf8");
+  const decision = await stopReviewGateHook(workspace);
+  assert.equal(decision, null);
+});
+
+test("reviewGate config field is accepted and rejects unknown nested keys", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-gate-config-"));
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ reviewGate: { enabled: true } }), "utf8");
+  const config = await loadConfig(workspace);
+  assert.equal(config.reviewGate?.enabled, true);
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ reviewGate: { unknown: 1 } }), "utf8");
+  await assert.rejects(() => loadConfig(workspace), /reviewGate 不支持字段：unknown/);
 });
