@@ -15,10 +15,10 @@ function text(value) { return { content: [{ type: "text", text: JSON.stringify(v
 // intentional-simple: workspace 三级回退 args → env → cwd。env 单值，不处理多 workspace 切换。
 function workspace(args) { return String(args.workspace ?? process.env.CBX_WORKSPACE ?? "."); }
 const tools = [
-    { name: "cbx_start", description: "创建并后台执行一个任务", inputSchema: { type: "object", required: ["task"], properties: { task: { type: "string" }, workspace: { type: "string" }, test_command: { type: "string" }, review: { type: "boolean" }, isolated: { type: "boolean" }, timeout_ms: { type: "number" }, max_retries: { type: "number" }, keep_worktree: { type: "boolean" }, priority: { type: "number" }, auto_branch: { type: "boolean" }, auto_commit: { type: "boolean" }, commit_message: { type: "string" }, executor: { type: "string", description: "内置执行器 codebuddy/opencode/pi，或插件路径" } } } },
+    { name: "cbx_start", description: "创建并后台执行一个任务", inputSchema: { type: "object", required: ["task"], properties: { task: { type: "string" }, context_snapshot: { type: "string", description: "父会话提炼的目标补充、计划、关键文件或命令输出及约束" }, workspace: { type: "string" }, test_command: { type: "string" }, review: { type: "boolean" }, isolated: { type: "boolean" }, timeout_ms: { type: "number" }, max_retries: { type: "number" }, keep_worktree: { type: "boolean" }, priority: { type: "number" }, auto_branch: { type: "boolean" }, auto_commit: { type: "boolean" }, commit_message: { type: "string" }, executor: { type: "string", description: "内置执行器 codebuddy/opencode/pi，或插件路径" } } } },
     { name: "cbx_status", description: "读取任务状态", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" } } } },
     { name: "cbx_review", description: "读取任务审查报告", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" } } } },
-    { name: "cbx_continue", description: "根据审查意见继续任务", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" }, message: { type: "string" }, priority: { type: "number" } } } },
+    { name: "cbx_continue", description: "根据审查意见继续任务", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" }, message: { type: "string" }, context_snapshot: { type: "string", description: "覆盖父会话提炼的目标补充、计划、关键文件或命令输出及约束" }, priority: { type: "number" } } } },
     { name: "cbx_cancel", description: "取消任务", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" } } } },
     { name: "cbx_approve", description: "批准等待中的任务并启动", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" } } } },
     { name: "cbx_list", description: "列出工作区中的任务", inputSchema: { type: "object", properties: { workspace: { type: "string" } } } },
@@ -29,14 +29,14 @@ const tools = [
     { name: "cbx_queue_resume", description: "恢复队列并启动等待中的 worker", inputSchema: { type: "object", properties: { workspace: { type: "string" } } } },
     { name: "cbx_retry", description: "将失败任务重新加入队列", inputSchema: { type: "object", required: ["job_id"], properties: { job_id: { type: "string" }, workspace: { type: "string" }, priority: { type: "number" } } } },
 ];
-const resourceNames = ["state.json", "result.json", "request.md", "events.ndjson", "test.log", "complete.patch", "review.md", "handback.md"];
+const resourceNames = ["state.json", "result.json", "request.md", "context-snapshot.md", "events.ndjson", "test.log", "complete.patch", "review.md", "handback.md"];
 async function callTool(name, args) {
     const root = workspace(args);
     const id = String(args.job_id ?? "");
     if (name === "cbx_start") {
         const config = await loadConfig(root);
         const defaults = mergeConfig(config, { testCommand: args.test_command ? String(args.test_command) : undefined, review: typeof args.review === "boolean" ? args.review : undefined, isolated: typeof args.isolated === "boolean" ? args.isolated : undefined, timeoutMs: args.timeout_ms === undefined ? undefined : Number(args.timeout_ms), maxRetries: args.max_retries === undefined ? undefined : Number(args.max_retries), keepWorktree: args.keep_worktree === undefined ? undefined : Boolean(args.keep_worktree), autoBranch: args.auto_branch === undefined ? undefined : Boolean(args.auto_branch), autoCommit: args.auto_commit === undefined ? undefined : Boolean(args.auto_commit), commitMessage: args.commit_message ? String(args.commit_message) : undefined, executor: args.executor ? String(args.executor) : undefined });
-        const job = await createJob({ workspace: root, task: String(args.task), testCommand: defaults.testCommand, review: defaults.review, isolated: defaults.isolated, permissionMode: defaults.permissionMode, maxTurns: defaults.maxTurns, timeoutMs: defaults.timeoutMs, maxRetries: defaults.maxRetries, keepWorktree: defaults.keepWorktree, reviewRules: config.reviewRules, approvalBeforeRun: defaults.approvalBeforeRun, autoBranch: defaults.autoBranch, autoCommit: defaults.autoCommit, commitMessage: defaults.commitMessage, executor: defaults.executor });
+        const job = await createJob({ workspace: root, task: String(args.task), contextSnapshot: args.context_snapshot === undefined ? undefined : String(args.context_snapshot), testCommand: defaults.testCommand, review: defaults.review, isolated: defaults.isolated, permissionMode: defaults.permissionMode, maxTurns: defaults.maxTurns, timeoutMs: defaults.timeoutMs, maxRetries: defaults.maxRetries, keepWorktree: defaults.keepWorktree, reviewRules: config.reviewRules, approvalBeforeRun: defaults.approvalBeforeRun, autoBranch: defaults.autoBranch, autoCommit: defaults.autoCommit, commitMessage: defaults.commitMessage, executor: defaults.executor });
         await startBackground(root, job.jobId, "", Number(args.priority ?? 0));
         return { job_id: job.jobId, status: "queued" };
     }
@@ -61,7 +61,7 @@ async function callTool(name, args) {
         }
     }
     if (name === "cbx_continue") {
-        await startBackground(root, id, String(args.message ?? "请根据 review.md 修复问题。"), Number(args.priority ?? 0));
+        await startBackground(root, id, String(args.message ?? "请根据 review.md 修复问题。"), Number(args.priority ?? 0), args.context_snapshot === undefined ? undefined : String(args.context_snapshot));
         return { job_id: id, status: "queued" };
     }
     if (name === "cbx_cancel")

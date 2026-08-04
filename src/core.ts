@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { finishSpan, publishEvent, startSpan } from "./observability.js";
 import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from "./executor.js";
 import { findExecutable, resolveExecutor } from "./executors/builtin.js";
-import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, withFileLock, type RuntimeConfig } from "./storage.js";
+import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, redactText, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, withFileLock, type RuntimeConfig } from "./storage.js";
 import { runProcess, runShell, type ProcessResult } from "./process-runner.js";
 import { cleanupRecordedWorktree, collectDiff, commitWorktree, gitRoot, prepareWorktree, snapshotDiff } from "./git-ops.js";
 import * as queue from "./queue.js";
@@ -167,6 +167,7 @@ export async function createJob(options: {
   commitMessage?: string;
   executor?: string;
   trustMode?: "trusted" | "untrusted";
+  contextSnapshot?: string;
   jobId?: string;
 }): Promise<{ jobId: string; directory: string }> {
   const workspace = path.resolve(options.workspace);
@@ -188,6 +189,9 @@ export async function createJob(options: {
   await mkdir(directory, { recursive: true });
   const request = `# 任务\n\n## 目标\n\n${options.task.trim()}\n\n## 验收命令\n\n${options.testCommand ?? "未指定；请根据项目现有脚本选择最相关的检查。"}\n\n## 执行规则\n\n- 只修改完成目标所需的文件。\n- 先检查项目结构和现有测试，再修改。\n- 完成后运行验收命令。\n- 将修改摘要、测试命令、测试结果和遗留问题写入 handback.md。\n`;
   await writeFile(path.join(directory, "request.md"), request, "utf8");
+  const governance = (await loadConfig(workspace)).governance;
+  const snapshot = redactText(options.contextSnapshot ?? "", governance?.redactFields, governance?.redactPatterns);
+  if (snapshot) await writeFile(path.join(directory, "context-snapshot.md"), snapshot, "utf8");
   const context: JobContext = {
     appVersion: APP_VERSION, jobId, workspace, createdAt: now(), testCommand: options.testCommand,
     reviewRequested: options.review, isolated: options.isolated, permissionMode: options.permissionMode,
@@ -216,8 +220,9 @@ export async function cleanupWorktree(workspaceInput: string, jobId: string): Pr
   return cleanupRecordedWorktree(workspace, directory);
 }
 
-function promptFor(directory: string, phase: string, extra = "", label = "编码代理"): string {
-  return `你是 ${label} 执行代理。\n\n必须先读取：\n- ${path.join(directory, "request.md")}\n- ${path.join(directory, "context.json")}\n\n当前阶段：${phase}\n\n持久化要求：\n- 完成后将交接报告写入 ${path.join(directory, "handback.md")}。\n- 报告必须包含：修改文件、关键设计、运行过的命令、结果、未解决问题。\n- 不要把关键信息只放在聊天输出中。\n\n${extra}`;
+function promptFor(directory: string, phase: string, extra = "", label = "编码代理", hasSnapshot = false): string {
+  const snapshotLine = hasSnapshot ? `- ${path.join(directory, "context-snapshot.md")}\n` : "";
+  return `你是 ${label} 执行代理。\n\n必须先读取：\n- ${path.join(directory, "request.md")}\n${snapshotLine}- ${path.join(directory, "context.json")}\n\n当前阶段：${phase}\n\n持久化要求：\n- 完成后将交接报告写入 ${path.join(directory, "handback.md")}。\n- 报告必须包含：修改文件、关键设计、运行过的命令、结果、未解决问题。\n- 不要把关键信息只放在聊天输出中。\n\n${extra}`;
 }
 
 async function invokeBuiltin(spec: ReturnType<typeof resolveExecutor> & {}, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number): Promise<ProcessResult> {
@@ -264,7 +269,7 @@ async function runTest(directory: string, workdir: string, command: string | und
   return result;
 }
 
-const ARTIFACTS = new Set(["request.md", "context.json", "state.json", "events.ndjson", "agent.log", "handback.md", "review.md", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt", "result.json"]);
+const ARTIFACTS = new Set(["request.md", "context-snapshot.md", "context.json", "state.json", "events.ndjson", "agent.log", "handback.md", "review.md", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt", "result.json"]);
 
 export async function listJobs(workspaceInput: string): Promise<JobState[]> {
   const workspace = path.resolve(workspaceInput);
@@ -353,7 +358,7 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
     attempt += 1;
     await writeState(workspace, jobId, { status: "running", phase: "executing", attempt, workdir, error: lastError || null });
     let agent: ProcessResult;
-    try { agent = await invokeExecutor(context.executor, workspace, directory, workdir, promptFor(directory, "implementation", attemptExtra, label), context.permissionMode, context.maxTurns, context.timeoutMs); }
+    try { agent = await invokeExecutor(context.executor, workspace, directory, workdir, promptFor(directory, "implementation", attemptExtra, label, existsSync(path.join(directory, "context-snapshot.md"))), context.permissionMode, context.maxTurns, context.timeoutMs); }
     catch (error) {
       lastError = String(error);
       if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", retryReason: lastError }); continue; }
@@ -380,7 +385,7 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
     await writeState(workspace, jobId, { status: "running", phase: "reviewing", testExitCode: 0 });
     const reviewExtra = `审查以下材料：\n- ${path.join(directory, "complete.patch")}\n- ${path.join(directory, "git-status.txt")}\n- ${path.join(directory, "untracked-files.txt")}\n- ${path.join(directory, "test.log")}\n- ${path.join(directory, "handback.md")}（如果存在）\n\n不要修改代码。将结果写入 ${path.join(directory, "review.md")}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL。按严重程度列出问题、文件和行号。\n\n审查规则：\n${context.reviewRules ?? "关注正确性、回归风险、安全性、测试覆盖和改动范围。"}`;
     let reviewAgent: ProcessResult;
-    try { reviewAgent = await invokeExecutor(context.executor, workspace, directory, workdir, promptFor(directory, "independent review", reviewExtra, label), context.permissionMode, context.maxTurns, context.timeoutMs); }
+    try { reviewAgent = await invokeExecutor(context.executor, workspace, directory, workdir, promptFor(directory, "independent review", reviewExtra, label, existsSync(path.join(directory, "context-snapshot.md"))), context.permissionMode, context.maxTurns, context.timeoutMs); }
     catch (error) {
       lastError = String(error);
       if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", retryReason: lastError }); continue; }
@@ -475,7 +480,15 @@ export async function retryQueueJob(workspaceInput: string, jobId: string, prior
   return queue.retryQueueJob(queueRuntime, workspaceInput, jobId, priority);
 }
 
-export async function startBackground(workspaceInput: string, jobId: string, extra = "", priority = 0): Promise<void> {
+export async function startBackground(workspaceInput: string, jobId: string, extra = "", priority = 0, contextSnapshot?: string): Promise<void> {
+  if (contextSnapshot !== undefined) {
+    const workspace = path.resolve(workspaceInput);
+    const directory = jobDir(workspace, jobId);
+    const governance = (await loadConfig(workspace)).governance;
+    const snapshot = redactText(contextSnapshot, governance?.redactFields, governance?.redactPatterns);
+    if (snapshot) await writeFile(path.join(directory, "context-snapshot.md"), snapshot, "utf8");
+    else await unlink(path.join(directory, "context-snapshot.md")).catch(() => undefined);
+  }
   await enqueueJob(workspaceInput, jobId, extra, priority);
 }
 

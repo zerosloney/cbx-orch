@@ -98,10 +98,24 @@ export async function loadRuntimeConfig(workspaceInput) {
     }
     if (config.governance !== undefined) {
         const value = object(config.governance, "governance");
-        known(value, "governance", ["retentionDays", "redactFields"]);
+        known(value, "governance", ["retentionDays", "redactFields", "redactPatterns"]);
         optionalInteger(value.retentionDays, "governance.retentionDays", 1, 3650);
         if (value.redactFields !== undefined && (!Array.isArray(value.redactFields) || value.redactFields.length > 100 || value.redactFields.some(field => typeof field !== "string" || !field.trim())))
             throw new Error("governance.redactFields 必须是最多 100 个非空字符串。");
+        if (value.redactPatterns !== undefined) {
+            if (!Array.isArray(value.redactPatterns) || value.redactPatterns.length > 100)
+                throw new Error("governance.redactPatterns 必须是最多 100 个正则字符串。");
+            for (const pattern of value.redactPatterns) {
+                if (typeof pattern !== "string" || !pattern.trim())
+                    throw new Error("governance.redactPatterns 必须是非空正则字符串。");
+                try {
+                    new RegExp(pattern);
+                }
+                catch {
+                    throw new Error(`governance.redactPatterns 包含无效正则：${pattern}`);
+                }
+            }
+        }
     }
     return config;
 }
@@ -115,6 +129,25 @@ export function redactSensitive(value, fields = []) {
         return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, sensitive.has(key.toLowerCase()) ? "[REDACTED]" : visit(child)]));
     };
     return visit(value);
+}
+// intentional-simple: 行级键名匹配用单一正则覆盖 `key: v` / `- key: v` / `key = v` 三种形态。
+// 抓不到句中内嵌密钥（如 "use sk-xxx here"）；由 redactPatterns 全文正则兜底。
+const KEY_LINE = /^\s*([-*]\s+)?([\p{L}\p{N}_][\p{L}\p{N}_\s-]*?)\s*[:=]\s*(.+)$/u;
+export function redactText(text, fields = [], patterns = []) {
+    const sensitive = new Set(fields.map(field => field.toLowerCase()));
+    let out = text;
+    if (sensitive.size > 0) {
+        out = text.split("\n").map(line => {
+            const match = line.match(KEY_LINE);
+            if (!match)
+                return line;
+            const key = match[2].trim().toLowerCase();
+            return sensitive.has(key) ? `${match[1] ?? ""}${match[2].trim()}: [REDACTED]` : line;
+        }).join("\n");
+    }
+    for (const pattern of patterns)
+        out = out.replace(new RegExp(pattern, "g"), "[REDACTED]");
+    return out;
 }
 const databases = new Map();
 const SCHEMA_VERSION = 2;

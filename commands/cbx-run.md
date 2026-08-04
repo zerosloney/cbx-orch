@@ -8,6 +8,7 @@ Dispatch the following task to cbx and track it to completion.
 Call `mcp__cbx__cbx_start` with:
 - `task`: `$ARGUMENTS`
 - `workspace`: omit (defaults to the current project via CBX_WORKSPACE)
+- `context_snapshot`: before dispatching, extract only the context needed to execute safely: goal clarifications, current plan, relevant file paths and command outputs, and constraints or decisions from this conversation. Omit unrelated chat history. Omit or pass an empty string if there is no relevant context — an empty snapshot is not persisted and the worker will not read it. Secrets are auto-redacted when `governance.redactFields` / `governance.redactPatterns` are configured in `.cbx.json`, but do not rely on this as the sole defense — exclude secrets at the source.
 
 You will receive `{ job_id, status: "queued" }`. Then:
 1. Poll `mcp__cbx__cbx_status` with that `job_id` every few seconds until `status` reaches a terminal value (`done`, `failed`, `needs_fix`, `review_failed`, `cancelled`).

@@ -17,6 +17,8 @@ const prompt = args.at(-1) ?? "";
 const sleepMs = Number(process.env.FAKE_SLEEP_MS ?? 0);
 if (sleepMs) await new Promise(resolve => setTimeout(resolve, sleepMs));
 const jobDir = process.env.FAKE_JOB_DIR;
+const promptFile = process.env.FAKE_PROMPT_FILE;
+if (promptFile) await appendFile(promptFile, prompt + "\\n---\\n");
 if (jobDir) {
   await mkdir(jobDir, { recursive: true });
   if (prompt.includes("independent review")) {
@@ -52,6 +54,7 @@ async function setupFake(): Promise<{ workspace: string; script: string }> {
   delete process.env.FAKE_REVIEW_MUTATE;
   delete process.env.FAKE_STAGE_CHANGE;
   delete process.env.FAKE_COUNTER_FILE;
+  delete process.env.FAKE_PROMPT_FILE;
   return { workspace, script };
 }
 
@@ -61,6 +64,7 @@ test("createJob persists task contract and state", async () => {
   assert.equal(job.jobId, "test-job");
   assert.equal((await loadState(workspace, job.jobId)).status, "queued");
   assert.match(await readFile(path.join(job.directory, "request.md"), "utf8"), /实现功能/);
+  assert.equal(existsSync(path.join(job.directory, "context-snapshot.md")), false);
 });
 
 test(".cbx.json provides defaults and tasks can be listed", async () => {
@@ -367,6 +371,64 @@ test("stale job lock and a dead running queue entry recover after a crash", asyn
   await writeFile(path.join(workspace, ".cbx", "queue.json"), JSON.stringify({ maxConcurrent: 1, paused: true, updatedAt: new Date().toISOString(), entries: [{ queueId: "dead-worker", jobId: job.jobId, workspace, extra: "", status: "running", createdAt: new Date().toISOString(), pid: 2_147_483_647, priority: 0 }] }), "utf8");
   const recovered = await (await import("../src/core.js")).dispatchQueue(workspace);
   assert.equal(recovered.entries[0].status, "done");
+});
+
+test("context snapshot is persisted and required by implementation and review prompts", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({ workspace, task: "保留父会话上下文", contextSnapshot: "计划：修改核心流程\\n约束：不要新增依赖", testCommand: "node -e \"process.exit(0)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "context-snapshot" });
+  const promptFile = path.join(workspace, "prompts.txt");
+  process.env.FAKE_JOB_DIR = job.directory;
+  process.env.FAKE_PROMPT_FILE = promptFile;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "done");
+  assert.equal(await readFile(path.join(job.directory, "context-snapshot.md"), "utf8"), "计划：修改核心流程\\n约束：不要新增依赖");
+  const prompts = await readFile(promptFile, "utf8");
+  const snapshotPath = path.join(job.directory, "context-snapshot.md");
+  const escaped = snapshotPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const matches = prompts.match(new RegExp(escaped, "g"));
+  assert.ok(matches && matches.length >= 2, `context-snapshot.md 应在 impl 和 review prompt 中各引用一次，实际 ${matches?.length ?? 0} 次`);
+});
+
+test("empty context snapshot is not persisted and omitted from prompts", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({ workspace, task: "无快照任务", testCommand: "node -e \"process.exit(0)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "no-snapshot" });
+  assert.equal(existsSync(path.join(job.directory, "context-snapshot.md")), false);
+  const promptFile = path.join(workspace, "prompts.txt");
+  process.env.FAKE_JOB_DIR = job.directory;
+  process.env.FAKE_PROMPT_FILE = promptFile;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "done");
+  const prompts = await readFile(promptFile, "utf8");
+  assert.equal(prompts.includes("context-snapshot.md"), false);
+});
+
+test("cbx_continue overwrites context snapshot via startBackground with redaction", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-continue-snapshot-"));
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ governance: { redactFields: ["token"], redactPatterns: ["sk-[a-zA-Z0-9]{6,}"] } }), "utf8");
+  const job = await createJob({ workspace, task: "待 continue", contextSnapshot: "旧快照", review: false, isolated: false, permissionMode: "auto", maxTurns: 1, jobId: "continue-snap" });
+  assert.equal(await readFile(path.join(job.directory, "context-snapshot.md"), "utf8"), "旧快照");
+  await startBackground(workspace, job.jobId, "修复", 0, "新计划\nToken: leak\nkey sk-abcdef123456");
+  assert.equal(await readFile(path.join(job.directory, "context-snapshot.md"), "utf8"), "新计划\nToken: [REDACTED]\nkey [REDACTED]");
+});
+
+test("cbx_continue with empty snapshot deletes existing context-snapshot.md", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-continue-delete-"));
+  const job = await createJob({ workspace, task: "待清空", contextSnapshot: "将删除", review: false, isolated: false, permissionMode: "auto", maxTurns: 1, jobId: "continue-delete" });
+  assert.equal(existsSync(path.join(job.directory, "context-snapshot.md")), true);
+  await startBackground(workspace, job.jobId, "修复", 0, "");
+  assert.equal(existsSync(path.join(job.directory, "context-snapshot.md")), false);
+});
+
+test("governance redaction scrubs context snapshot by key name and regex pattern", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-redact-snapshot-"));
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ governance: { redactFields: ["token", "api_key"], redactPatterns: ["sk-[a-zA-Z0-9]{6,}"] } }), "utf8");
+  const snapshot = "## 计划\n\nToken: secret-value-123\n- api_key: sk-internal\n使用 sk-abcdef123456 调用上游\n保留这行普通文本";
+  const job = await createJob({ workspace, task: "带敏感上下文", contextSnapshot: snapshot, review: false, isolated: false, permissionMode: "auto", maxTurns: 1, jobId: "redact-snapshot" });
+  const persisted = await readFile(path.join(job.directory, "context-snapshot.md"), "utf8");
+  assert.doesNotMatch(persisted, /secret-value-123|sk-internal|sk-abcdef123456/);
+  assert.match(persisted, /\[REDACTED\]/);
+  assert.match(persisted, /## 计划/);
+  assert.match(persisted, /保留这行普通文本/);
 });
 
 test("persistent serve loop reclaims dead workers on startup and stops cleanly", async () => {
