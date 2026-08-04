@@ -1,0 +1,28 @@
+{
+  "name": "cbx-orch-marketplace",
+  "owner": {
+    "name": "dc",
+    "url": "https://github.com/zerosloney/cbx-orch"
+  },
+  "plugins": [
+    {
+      "name": "cbx-orch",
+      "source": {
+        "source": "github",
+        "repo": "zerosloney/cbx-orch"
+      },
+      "description": "Durable coding-agent orchestrator: dispatch tasks to codebuddy/opencode/pi/omp with persistent jobs, queue, review, and rollback.",
+      "description_i18n": {
+        "en": "Durable coding-agent orchestrator: dispatch tasks to codebuddy/opencode/pi/omp with persistent jobs, queue, review, and rollback.",
+        "zh-CN": "持久化的编码 agent 编排器：把任务分派给 codebuddy/opencode/pi/omp，提供任务持久化、队列、审查与回滚。"
+      },
+      "version": "0.8.0",
+      "author": {
+        "name": "dc",
+        "url": "https://github.com/zerosloney/cbx-orch"
+      },
+      "category": "developer-tools",
+      "keywords": ["orchestrator", "coding-agent", "codebuddy", "opencode", "pi", "omp", "mcp", "pipeline"]
+    }
+  ]
+}

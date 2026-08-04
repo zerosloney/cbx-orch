@@ -10,7 +10,8 @@ function send(id: unknown, result?: unknown, error?: unknown): void {
   process.stdout.write(JSON.stringify(response) + "\n");
 }
 function text(value: unknown): unknown { return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], structuredContent: value }; }
-function workspace(args: Record<string, unknown>): string { return String(args.workspace ?? "."); }
+// intentional-simple: workspace 三级回退 args → env → cwd。env 单值，不处理多 workspace 切换。
+function workspace(args: Record<string, unknown>): string { return String(args.workspace ?? process.env.CBX_WORKSPACE ?? "."); }
 
 const tools = [
   { name: "cbx_start", description: "创建并后台执行一个任务", inputSchema: { type: "object", required: ["task"], properties: { task: { type: "string" }, workspace: { type: "string" }, test_command: { type: "string" }, review: { type: "boolean" }, isolated: { type: "boolean" }, timeout_ms: { type: "number" }, max_retries: { type: "number" }, keep_worktree: { type: "boolean" }, priority: { type: "number" }, auto_branch: { type: "boolean" }, auto_commit: { type: "boolean" }, commit_message: { type: "string" }, executor: { type: "string", description: "内置执行器 codebuddy/opencode/pi，或插件路径" } } } },

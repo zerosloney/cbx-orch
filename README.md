@@ -187,6 +187,54 @@ node C:\path\to\cbx-orch\dist\src\mcp-server.js
 
 MCP 还提供 `resources/list` 和 `resources/read`，可直接读取任务的 `result.json`、`events.ndjson`、`complete.patch`、`review.md` 等产物。
 
+## ZCode 插件
+
+cbx 本身就是一个 ZCode 市场插件（仓库根含 `.zcode-plugin/plugin.json`、`commands/`、`skills/`）。安装后自动注册 cbx MCP server，并提供斜杠命令和技能，无需手写 MCP 配置。
+
+### 安装
+
+```powershell
+# 添加本仓库为市场源
+zcode plugin marketplace add zerosloney/cbx-orch
+
+# 安装 cbx-orch 插件
+zcode plugin install cbx-orch@cbx-orch-marketplace
+```
+
+安装后重启 ZCode 会话，cbx MCP server 自动以 `cbx` 名注册，工具暴露为 `mcp__cbx__cbx_*`。
+
+### 斜杠命令
+
+| 命令 | 作用 |
+|---|---|
+| `/cbx-run [task]` | 委派任务到 cbx，后台执行（含测试+审查），轮询至完成 |
+| `/cbx-status [job_id]` | 查任务状态/阶段/尝试 |
+| `/cbx-continue [job_id] [message]` | 按 review.md 或测试失败返工 |
+| `/cbx-list` | 列出当前工作区所有任务 |
+| `/cbx-queue [pause\|resume]` | 查看或控制任务队列 |
+
+### 技能
+
+`cbx-orchestration` 技能文档（`skills/cbx-orchestration/SKILL.md`）指导 agent 何时用 cbx、如何选执行器、隔离策略。
+
+### 用户配置
+
+插件安装后，在 ZCode 设置中可配置（对应 `userConfig`）：
+
+| 配置项 | 默认值 | 作用 |
+|---|---|---|
+| `executor` | `codebuddy` | 默认执行器：`codebuddy`/`opencode`/`pi`/`omp` |
+| `review` | `true` | 测试通过后是否跑独立审查 |
+| `isolated` | `true` | 是否在 git worktree 中隔离执行 |
+
+### 工作区定位
+
+插件通过 `CBX_WORKSPACE=${CLAUDE_PROJECT_DIR}` 把当前项目目录注入 cbx MCP server。调 `cbx_*` 工具时无需传 `workspace` 参数，默认即当前项目。
+
+### 前置依赖
+
+插件依赖仓库 `dist/` 目录的编译产物（已随仓库分发）。若自行 clone 开发，需先 `npm install && npm run build`。还需至少安装一个执行器 CLI（codebuddy/opencode/pi/omp 之一）才能真正执行任务。
+
 ## 安全说明
 
 - 默认权限模式 `auto`。可通过 `--permission-mode` 或配置覆盖；`dontAsk` 需显式 `--dangerously-skip-permissions`。
