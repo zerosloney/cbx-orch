@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-// 内置执行器适配层：把 codebuddy / opencode / omp 等编码 CLI 收敛到统一的调用契约。
+// 内置执行器适配层：把 codebuddy / opencode / omp / cline 等编码 CLI 收敛到统一的调用契约。
 // 每个 adapter 描述：发现二进制的方式 + 如何把 (prompt, permissionMode, maxTurns) 翻译成 CLI 参数。
 
 export interface BuildArgsOptions {
@@ -11,7 +11,7 @@ export interface BuildArgsOptions {
 
 export interface BuiltinExecutor {
   /** 注册名，写入 .cbx.json 的 executor 字段或 --executor */
-  name: "codebuddy" | "opencode" | "omp";
+  name: "codebuddy" | "opencode" | "omp" | "cline";
   /** 别名，resolveExecutor 同样命中（oh-my-pi 指向 omp，非独立二进制） */
   aliases: string[];
   /** 显示名，注入到提示词与用户可见的错误消息中 */
@@ -24,7 +24,7 @@ export interface BuiltinExecutor {
   buildArgs(opts: BuildArgsOptions): string[];
 }
 
-// permissionMode 中表示「自动放行」的语义值：opencode 用 --auto 表达。
+// permissionMode 中表示「自动放行」的语义值：opencode 用 --auto、cline 用 --auto-approve true 表达。
 const AUTO_MODES = new Set(["auto", "dontAsk"]);
 
 export const BUILTIN_EXECUTORS: readonly BuiltinExecutor[] = [
@@ -63,6 +63,20 @@ export const BUILTIN_EXECUTORS: readonly BuiltinExecutor[] = [
     // omp 官方 CLI 文档未公开 permission/auto flag；非交互 -p 默认按 omp 自身权限行事。
     // intentional-simple: 不追加 auto flag，缺已知天花板——待 omp 暴露权限 flag 后补 `-a` 类参数。
     buildArgs: ({ prompt }) => ["-p", "--mode", "json", prompt],
+  },
+  {
+    name: "cline",
+    aliases: [],
+    label: "Cline",
+    envVar: "CBX_CLINE",
+    candidates: ["cline"],
+    // cline 默认 auto-approve=true；仅当 cbx permissionMode 显式 auto/dontAsk 时追加 --auto-approve true 以对齐语义。
+    // intentional-simple: 非 auto 模式不显式关闭，沿用 cline 默认 true——headless 下关闭可能导致卡死，待 cline 暴露安全的非交互受限模式后再补。
+    buildArgs: ({ prompt, permissionMode }) => {
+      const args = ["--json", prompt];
+      if (AUTO_MODES.has(permissionMode)) args.push("--auto-approve", "true");
+      return args;
+    },
   },
 ];
 

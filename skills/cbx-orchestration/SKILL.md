@@ -1,11 +1,11 @@
 ---
 name: cbx-orchestration
-description: Delegate coding work to the cbx orchestrator for durable, queued, test-verified, and reviewed task execution via codebuddy/opencode/omp.
+description: Delegate coding work to the cbx orchestrator for durable, queued, test-verified, and reviewed task execution via codebuddy/opencode/omp/cline.
 ---
 
 # cbx Orchestration
 
-Use this skill when the user wants to offload a coding task to a background coding-agent CLI (codebuddy / opencode / omp) with durable persistence — so the task survives crashes, runs tests, gets reviewed, and leaves a full audit trail on disk.
+Use this skill when the user wants to offload a coding task to a background coding-agent CLI (codebuddy / opencode / omp / cline) with durable persistence — so the task survives crashes, runs tests, gets reviewed, and leaves a full audit trail on disk.
 
 ## When to reach for cbx
 
@@ -13,7 +13,7 @@ Prefer cbx when ANY of these hold:
 - The task spans multiple files or has non-obvious sequencing.
 - The user wants tests run and an independent review before accepting changes.
 - The task is long-running and the user prefers it in the background rather than blocking this session.
-- The user explicitly mentions cbx, "orchestrator", "pipeline", "委派", "编排", or asks to run a coding CLI (codebuddy/opencode/omp).
+- The user explicitly mentions cbx, "orchestrator", "pipeline", "委派", "编排", or asks to run a coding CLI (codebuddy/opencode/omp/cline).
 
 Do NOT use cbx for:
 - Single-file edits or trivial fixes you can do inline faster.
@@ -54,6 +54,7 @@ cbx's MCP server is registered under the name `cbx`. In ZCode its tools appear a
 | `codebuddy` (default) | `codebuddy` / `cbc` | Tencent CodeBuddy CLI |
 | `opencode` | `opencode` | OpenCode CLI |
 | `omp` | `omp` (alias `oh-my-pi`) | Oh My Pi coding agent (no documented permission flag yet) |
+| `cline` | `cline` | Cline coding agent (headless `--json`, `--auto-approve true` on auto/dontAsk) |
 
 Override per-task via `cbx_start`'s `executor` argument, or globally via the plugin's `userConfig.executor`.
 Set `review_executor` (or `.cbx.json` `reviewExecutor`) to use a different reviewer; otherwise review remains backward-compatible and uses `executor`.

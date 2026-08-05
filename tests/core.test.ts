@@ -454,14 +454,15 @@ test("ESM executor plugin can replace the builtin CLI", async () => {
   assert.match(events, /"sha256":"[a-f0-9]{64}"/);
 });
 
-test("registry resolves codebuddy/cbc/opencode/omp/oh-my-pi", () => {
+test("registry resolves codebuddy/cbc/opencode/omp/oh-my-pi/cline", () => {
   assert.equal(resolveExecutor("codebuddy")?.name, "codebuddy");
   assert.equal(resolveExecutor("cbc")?.name, "codebuddy");
   assert.equal(resolveExecutor("opencode")?.name, "opencode");
   assert.equal(resolveExecutor("omp")?.name, "omp");
   assert.equal(resolveExecutor("oh-my-pi")?.name, "omp");
+  assert.equal(resolveExecutor("cline")?.name, "cline");
   assert.equal(resolveExecutor("unknown"), undefined);
-  assert.equal(BUILTIN_EXECUTORS.length, 3);
+  assert.equal(BUILTIN_EXECUTORS.length, 4);
 });
 
 test("codebuddy buildArgs uses print/stream-json/max-turns/permission-mode", () => {
@@ -479,6 +480,12 @@ test("omp buildArgs uses -p/mode json and ignores permissionMode (no documented 
   const spec = resolveExecutor("omp")!;
   assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "auto", maxTurns: 5 }), ["-p", "--mode", "json", "fix"]);
   assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "default", maxTurns: 5 }), ["-p", "--mode", "json", "fix"]);
+});
+
+test("cline buildArgs uses --json positional prompt and --auto-approve true when permission is auto/dontAsk", () => {
+  const spec = resolveExecutor("cline")!;
+  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "dontAsk", maxTurns: 5 }), ["--json", "fix", "--auto-approve", "true"]);
+  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "plan", maxTurns: 5 }), ["--json", "fix"]);
 });
 
 test("opencode executor runs end-to-end via CBX_OPENCODE fake binary", async () => {

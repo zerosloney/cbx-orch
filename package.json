@@ -14,7 +14,7 @@
     "CHANGELOG.md"
   ],
   "type": "module",
-  "description": "Durable task orchestration for coding-agent CLIs (codebuddy, opencode, omp)",
+  "description": "Durable task orchestration for coding-agent CLIs (codebuddy, opencode, omp, cline)",
   "repository": {
     "type": "git",
     "url": "https://github.com/zerosloney/cbx-orch.git"
