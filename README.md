@@ -63,14 +63,14 @@ node dist\src\cli.js clean JOB_ID
 | CodeBuddy | `codebuddy` / `cbc` | `codebuddy` | `-p "<prompt>" --output-format stream-json --max-turns N --permission-mode M` | `npm i -g @tencent-ai/codebuddy-code`      | `CBX_CODEBUDDY` |
 | OpenCode  | `opencode`        | `opencode`  | `run "<prompt>" --format json [--auto]`                                       | `npm i -g opencode-ai`                     | `CBX_OPENCODE`  |
 | Oh My Pi  | `omp` / `oh-my-pi` | `omp`       | `-p "<prompt>" --mode json`                                                   | `npm i -g @oh-my-pi/pi-coding-agent`       | `CBX_OMP`       |
-| Cline     | `cline`           | `cline`     | `--json "<prompt>" [--auto-approve true]`                                     | `npm i -g cline`                           | `CBX_CLINE`     |
+| Cline     | `cline`           | `cline`     | `--json "<prompt>" --auto-approve true\|false [--plan]`                       | `npm i -g cline`                           | `CBX_CLINE`     |
 
 说明：
 
 - `oh-my-pi` 是 Oh My Pi 的扩展框架，本身不是独立二进制，因此作为 `omp` 的别名。
-- `--auto`（OpenCode）/ `--auto-approve true`（Cline）仅在 `permissionMode` 为 `auto` 或 `dontAsk` 时追加；`default`/`acceptEdits`/`plan` 不追加，让 CLI 自行按默认权限行事。
+- `--auto`（OpenCode）仅在 `permissionMode` 为 `auto` 或 `dontAsk` 时追加。Cline 始终显式传 `--auto-approve`：`auto`/`dontAsk` 为 `true`，`default`/`acceptEdits`/`plan` 为 `false`；`plan` 还会追加 `--plan`。
 - Oh My Pi 的 CLI 文档未公开权限/放行 flag，因此当前不追加任何权限参数，由 omp 非交互 `-p` 默认行为决定；待其暴露后补齐。
-- Cline 在 headless 模式默认 `auto-approve=true`；`default`/`acceptEdits`/`plan` 模式下不显式追加，沿用 Cline 默认行为，避免 headless 卡死。
+- Cline 在 headless 模式默认 `auto-approve=true`，因此 cbx 对非自动模式显式关闭，避免受限权限被静默放宽。
 - 四个 CLI 中只有 CodeBuddy 保留 `--max-turns`；其余靠 `--timeout-ms` 兜底。
 - 通过对应的 env 变量可覆盖二进制路径，常用于测试或指向自定义脚本。
 - 自定义插件：`executor` 指向一个 ESM 模块路径，模块导出 `run(request)`，返回 `{ code, output, timedOut }`。示例见 `plugins/example-executor.mjs`。

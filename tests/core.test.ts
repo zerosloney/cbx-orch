@@ -190,6 +190,32 @@ test("reviewExecutor can independently override the implementation executor", as
   assert.match(events, /"name":"opencode"/);
 });
 
+test("staged tasks inherit the top-level reviewExecutor", async () => {
+  const { workspace, script } = await setupFake();
+  process.env.CBX_OPENCODE = script;
+  const job = await createJob({ workspace, task: "阶段审查", review: true, isolated: false, executor: "codebuddy", reviewExecutor: "opencode", permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "staged-review-executor", taskContract: { stages: [{ name: "implement", executor: "codebuddy", task: "实现" }] } });
+  process.env.FAKE_JOB_DIR = job.directory;
+  try { assert.equal((await executeJob(workspace, job.jobId)).status, "done"); }
+  finally { delete process.env.CBX_OPENCODE; }
+  const events = (await readFile(path.join(job.directory, "events.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(events.filter(event => event.event === "executor_metadata").map(event => event.name), ["codebuddy", "codebuddy", "opencode"]);
+});
+
+test("staged tasks use the first stage executor for the context handshake", async () => {
+  const { workspace, script } = await setupFake();
+  process.env.CBX_CODEBUDDY = path.join(workspace, "missing-codebuddy.mjs");
+  process.env.CBX_OPENCODE = script;
+  const job = await createJob({ workspace, task: "仅阶段执行器", review: false, isolated: false, executor: "codebuddy", permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "stage-handshake-executor", taskContract: { stages: [{ name: "implement", executor: "opencode", task: "实现" }] } });
+  process.env.FAKE_JOB_DIR = job.directory;
+  try { assert.equal((await executeJob(workspace, job.jobId)).status, "done"); }
+  finally {
+    process.env.CBX_CODEBUDDY = script;
+    delete process.env.CBX_OPENCODE;
+  }
+  const events = (await readFile(path.join(job.directory, "events.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(events.filter(event => event.event === "executor_metadata").map(event => event.name), ["opencode", "opencode"]);
+});
+
 test("git baseline is recorded and isolated execution stays pinned when HEAD drifts", async () => {
   const { workspace } = await setupFake();
   spawnSync("git", ["init", "-b", "main"], { cwd: workspace });
@@ -482,10 +508,13 @@ test("omp buildArgs uses -p/mode json and ignores permissionMode (no documented 
   assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "default", maxTurns: 5 }), ["-p", "--mode", "json", "fix"]);
 });
 
-test("cline buildArgs uses --json positional prompt and --auto-approve true when permission is auto/dontAsk", () => {
+test("cline buildArgs maps every permission mode without inheriting auto approval", () => {
   const spec = resolveExecutor("cline")!;
+  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "auto", maxTurns: 5 }), ["--json", "fix", "--auto-approve", "true"]);
   assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "dontAsk", maxTurns: 5 }), ["--json", "fix", "--auto-approve", "true"]);
-  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "plan", maxTurns: 5 }), ["--json", "fix"]);
+  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "default", maxTurns: 5 }), ["--json", "fix", "--auto-approve", "false"]);
+  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "acceptEdits", maxTurns: 5 }), ["--json", "fix", "--auto-approve", "false"]);
+  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "plan", maxTurns: 5 }), ["--json", "fix", "--auto-approve", "false", "--plan"]);
 });
 
 test("opencode executor runs end-to-end via CBX_OPENCODE fake binary", async () => {

@@ -23,7 +23,10 @@ test("Web UI exposes read-only local routes without wildcard CORS", async () => 
   try {
     const page = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /CBX Orchestrator/);
+    const pageHtml = await page.text();
+    assert.match(pageHtml, /CBX Orchestrator/);
+    assert.match(pageHtml, /<button type="button" class="job-select">/);
+    assert.match(pageHtml, /<button type="button" class="art" data-name=/);
     const jobs = await fetch(`http://127.0.0.1:${port}/api/jobs`);
     assert.equal(jobs.headers.get("access-control-allow-origin"), null);
     assert.equal((await jobs.json() as Array<{ jobId: string }>)[0].jobId, job.jobId);
@@ -75,12 +78,33 @@ test("MCP initialize, tools, resources and errors preserve request ids", async (
     assert.match(String((forbiddenArtifact.error as { message: string }).message), /不允许通过 cbx_artifact/);
     const invalidContract = await call(32, "tools/call", { name: "cbx_start", arguments: { workspace, task: "invalid", task_contract: [] } });
     assert.match(String((invalidContract.error as { message: string }).message), /task_contract 必须是普通对象/);
+    const jobsBeforeInvalidStages = await readdir(path.join(workspace, ".cbx", "jobs"));
+    const invalidStages = [
+      [{ name: "missing-executor", task: "do work" }],
+      [{ name: "missing-task", executor: "codebuddy" }],
+      [{ name: 42, executor: "codebuddy", task: "do work" }],
+      [{ name: "wrong-executor", executor: 42, task: "do work" }],
+      [{ name: "wrong-task", executor: "codebuddy", task: 42 }],
+      [{ name: "wrong-review-executor", executor: "codebuddy", task: "do work", review_executor: 42 }],
+      [{ name: "wrong-skip-review", executor: "codebuddy", task: "do work", skip_review: "false" }],
+    ];
+    const expectedStageErrors = [/executor 必须是非空字符串/, /task 必须是非空字符串/, /name 必须是非空字符串/, /executor 必须是非空字符串/, /task 必须是非空字符串/, /reviewExecutor 必须是非空字符串/, /skipReview 必须是布尔值/];
+    for (let index = 0; index < invalidStages.length; index += 1) {
+      const response = await call(33 + index, "tools/call", { name: "cbx_start", arguments: { workspace, task: "invalid stage", task_contract: { stages: invalidStages[index] } } });
+      assert.match(String((response.error as { message: string }).message), expectedStageErrors[index]);
+    }
+    assert.deepEqual(await readdir(path.join(workspace, ".cbx", "jobs")), jobsBeforeInvalidStages, "invalid stages must not create or enqueue jobs");
+    const validStage = await call(40, "tools/call", { name: "cbx_start", arguments: { workspace, task: "valid stage", task_contract: { stages: [{ name: "implement", executor: "codebuddy", task: "do work", review_executor: "opencode", skip_review: false }] } } });
+    const validJobId = ((validStage.result as { structuredContent: { job_id: string } }).structuredContent).job_id;
+    const persistedContract = JSON.parse(await readFile(path.join(workspace, ".cbx", "jobs", validJobId, "context-contract.json"), "utf8")) as { stages: Array<Record<string, unknown>> };
+    assert.deepEqual(persistedContract.stages[0], { name: "implement", executor: "codebuddy", task: "do work", reviewExecutor: "opencode", skipReview: false });
     const resources = ((await call(4, "resources/list", { workspace })).result as { resources: Array<{ uri: string }> }).resources;
-    const requestResource = resources.find(resource => resource.uri.includes("request.md"));
+    const requestResource = resources.find(resource => resource.uri.includes(`/mcp-job/request.md`));
     assert.ok(requestResource);
-    assert.ok(!resources.some(resource => resource.uri.includes("result.json")), "queued job 不应暴露 result.json");
-    assert.ok(!resources.some(resource => resource.uri.includes("review.md")), "queued job 不应暴露 review.md");
-    assert.ok(!resources.some(resource => resource.uri.includes("handback.md")), "queued job 不应暴露 handback.md");
+    const queuedJobResources = resources.filter(resource => resource.uri.includes(`/mcp-job/`));
+    assert.ok(!queuedJobResources.some(resource => resource.uri.includes("result.json")), "queued job 不应暴露 result.json");
+    assert.ok(!queuedJobResources.some(resource => resource.uri.includes("review.md")), "queued job 不应暴露 review.md");
+    assert.ok(!queuedJobResources.some(resource => resource.uri.includes("handback.md")), "queued job 不应暴露 handback.md");
     const read = await call(5, "resources/read", { uri: requestResource!.uri });
     assert.match(((read.result as { contents: Array<{ text: string }> }).contents[0].text), /MCP/);
     const error = await call(73, "unknown/method");

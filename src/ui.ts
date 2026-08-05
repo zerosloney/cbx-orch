@@ -14,6 +14,8 @@ td,th{padding:7px 8px;border-bottom:1px solid #2a3140;text-align:left;font-size:
 tr.job{cursor:pointer}
 tr.job:hover{background:#171c26}
 tr.job.selected{background:#1c2840;border-left:3px solid #9ecbff}
+.job-select{background:none;border:0;padding:0;color:inherit;font:inherit;cursor:pointer;text-align:left}
+.job-select:focus-visible,.art:focus-visible{outline:2px solid #9ecbff;outline-offset:2px}
 .s-done{color:#70e090}.s-failed,.s-needs_fix,.s-review_failed{color:#ff8d8d}.s-running,.s-awaiting_approval{color:#ffd166}.s-queued{color:#9ecbff}.s-cancelled{color:#888}
 .v-PASS{color:#70e090;font-weight:bold}.v-FAIL{color:#ff8d8d;font-weight:bold}
 #detail-panel{margin-top:16px;background:#0d1117;border-radius:8px;padding:14px;border:1px solid #2a3140;min-height:80px}
@@ -25,7 +27,7 @@ tr.job.selected{background:#1c2840;border-left:3px solid #9ecbff}
 .st-skip{background:#2a2a2a;color:#888}
 .arrow{color:#555;font-size:11px}
 .arts{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
-.art{padding:3px 10px;border-radius:3px;background:#171c26;cursor:pointer;font-size:12px;border:1px solid #2a3140;color:#9ecbff}
+.art{padding:3px 10px;border-radius:3px;background:#171c26;cursor:pointer;font:inherit;font-size:12px;border:1px solid #2a3140;color:#9ecbff}
 .art:hover{background:#1c2430}
 .art.active{border-color:#9ecbff;background:#1c2840}
 pre.art-view{white-space:pre-wrap;background:#080b11;padding:10px;border-radius:6px;max-height:350px;overflow:auto;font-size:12px;border:1px solid #2a3140;margin:0;font-family:ui-monospace,monospace}
@@ -51,7 +53,7 @@ async function refresh(){
 }
 function rowHtml(j){
   var cls='job'+(selected===j.jobId?' selected':'');
-  return '<tr class="'+cls+'" data-id="'+esc(j.jobId)+'"><td>'+esc(j.jobId)+'</td><td class="s-'+j.status+'">'+j.status+'</td><td>'+esc(j.phase||'')+'</td><td>'+j.attempt+'</td><td class="v-'+(j.reviewVerdict||'')+'">'+(j.reviewVerdict||'\\u2014')+'</td><td>'+fmt(j.updatedAt)+'</td></tr>';
+  return '<tr class="'+cls+'" data-id="'+esc(j.jobId)+'"><td><button type="button" class="job-select">'+esc(j.jobId)+'</button></td><td class="s-'+j.status+'">'+j.status+'</td><td>'+esc(j.phase||'')+'</td><td>'+j.attempt+'</td><td class="v-'+(j.reviewVerdict||'')+'">'+(j.reviewVerdict||'\\u2014')+'</td><td>'+fmt(j.updatedAt)+'</td></tr>';
 }
 function selectJob(id){
   selected=(selected===id)?null:id;
@@ -78,7 +80,7 @@ async function loadDetail(id){
   try{arts=await fetch('/api/jobs/'+id+'/artifacts').then(function(r){return r.json()});}catch(e){}
   if(arts.length){
     html+='<div class="arts">';
-    arts.forEach(function(a){html+='<span class="art" data-name="'+esc(a)+'">'+esc(a)+'</span>';});
+    arts.forEach(function(a){html+='<button type="button" class="art" data-name="'+esc(a)+'">'+esc(a)+'</button>';});
     html+='</div>';
   }
   html+='<pre class="art-view" id="art-view">\\u70b9\\u51fb\\u4e0a\\u65b9\\u6587\\u4ef6\\u540d\\u67e5\\u770b\\u5185\\u5bb9</pre>';

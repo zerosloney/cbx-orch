@@ -457,13 +457,14 @@ async function performContextHandshake(
   context: JobContext,
   workdir: string,
   extra: string,
-  label: string,
   finish: (updates: Json) => Promise<JobState>,
 ): Promise<JobState | undefined> {
   const beforeHandshake = await snapshotDiff(workdir);
+  const executor = context.taskContract?.stages?.[0]?.executor ?? context.executor;
+  const label = resolveExecutor(executor)?.label ?? "编码代理";
   const handshakePrompt = promptFor(directory, "context handshake", `只确认任务理解，不要修改代码。将 JSON 写入 ${path.join(directory, "understanding.json")}，字段为 interpretedGoal、plannedFiles、acceptanceCriteria、assumptions、blockingQuestions。没有阻塞问题时 blockingQuestions 必须是空数组；需要产品决策、公共契约选择或上下文冲突时写入问题并停止。${extra ? `\n\n主 Agent 补充：\n${extra}` : ""}`, label, existsSync(path.join(directory, "context-snapshot.md")));
   let handshake: ProcessResult;
-  try { handshake = await invokeExecutor(context.executor, workspace, directory, workdir, handshakePrompt, context.permissionMode, context.maxTurns, context.timeoutMs); }
+  try { handshake = await invokeExecutor(executor, workspace, directory, workdir, handshakePrompt, context.permissionMode, context.maxTurns, context.timeoutMs); }
   catch (error) { return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: String(error) }); }
   const afterHandshake = await snapshotDiff(workdir);
   if (JSON.stringify(beforeHandshake) !== JSON.stringify(afterHandshake)) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "上下文握手阶段修改了工作区。" });
@@ -549,7 +550,7 @@ async function runStage(params: {
     await writeState(workspace, jobId, { status: "running", phase: "reviewing", stage: stage.name, testExitCode: 0 });
     const reviewExtra = `审查以下材料：\n- ${path.join(directory, "complete.patch")}\n- ${path.join(directory, "git-status.txt")}\n- ${path.join(directory, "untracked-files.txt")}\n- ${path.join(directory, "test.log")}\n- ${path.join(directory, "handback.md")}（如果存在）\n\n不要修改代码。将结果写入 ${path.join(directory, "review.md")}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL。若失败源于需求歧义、公共契约冲突或基线问题，第二行写 CLASSIFICATION: SEMANTIC；普通代码缺陷无需 classification。按严重程度列出问题、文件和行号。\n\n审查规则：\n${context.reviewRules ?? "关注正确性、回归风险、安全性、测试覆盖和改动范围。"}`;
     let reviewAgent: ProcessResult;
-    const reviewExecutor = stage.reviewExecutor ?? stage.executor;
+    const reviewExecutor = stage.reviewExecutor ?? context.reviewExecutor ?? stage.executor;
     const reviewLabel = resolveExecutor(reviewExecutor)?.label ?? "审查代理";
     try { reviewAgent = await invokeExecutor(reviewExecutor, workspace, directory, workdir, promptFor(directory, "independent review", reviewExtra, reviewLabel, existsSync(path.join(directory, "context-snapshot.md"))), context.permissionMode, context.maxTurns, context.timeoutMs); }
     catch (error) {
@@ -605,7 +606,6 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
     logJobEvent(workspace, jobId, "version_mismatch", { jobVersion: context.appVersion, runtimeVersion: APP_VERSION, warning });
     console.error(`cbx: ${warning}`);
   }
-  const label = resolveExecutor(context.executor)?.label ?? "编码代理";
   assertExecutionPolicy(context.trustMode ?? "trusted", context.isolated);
   if (context.approvalBeforeRun && initial.approved !== true) {
     return writeState(workspace, jobId, { status: "awaiting_approval", phase: "before_run", approvalRequired: true });
@@ -665,7 +665,7 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
   };
 
   if (context.taskContract && !existsSync(path.join(directory, "understanding.json"))) {
-    const handshakeOutcome = await performContextHandshake(workspace, directory, context, workdir, extra, label, finish);
+    const handshakeOutcome = await performContextHandshake(workspace, directory, context, workdir, extra, finish);
     if (handshakeOutcome) return handshakeOutcome;
   }
 

@@ -95,7 +95,7 @@ The `job_id` is available from step 1, so the user can inspect it via `/cbx-stat
 | `codebuddy` (default) | `codebuddy` / `cbc` | Tencent CodeBuddy CLI |
 | `opencode` | `opencode` | OpenCode CLI |
 | `omp` | `omp` (alias `oh-my-pi`) | Oh My Pi coding agent (no documented permission flag yet) |
-| `cline` | `cline` | Cline coding agent (headless `--json`, `--auto-approve true` on auto/dontAsk) |
+| `cline` | `cline` | Cline coding agent (headless `--json`; auto/dontAsk enable auto-approve, restricted modes disable it, plan adds `--plan`) |
 
 Override per-task via `cbx_start`'s `executor` argument, or globally via the plugin's `userConfig.executor`.
 Set `review_executor` (or `.cbx.json` `reviewExecutor`) to use a different reviewer; otherwise review remains backward-compatible and uses `executor`.
@@ -140,7 +140,7 @@ If a stage fails (executor error, test failure, or review FAIL), the job stops a
 | `name` | yes | Stage identifier (used in phase, events, artifact filenames) |
 | `executor` | yes | Which CLI runs this stage (`codebuddy` / `opencode` / `omp` / `cline` / plugin path) |
 | `task` | yes | Stage-specific instructions |
-| `review_executor` | no | Independent reviewer for this stage; defaults to stage's `executor` |
+| `review_executor` | no | Independent reviewer override; falls back to the job-level `review_executor`, then the stage's `executor` |
 | `skip_review` | no | Skip review for this stage (default: follows job-level `review` flag) |
 
 ### Without stages (backward compat)

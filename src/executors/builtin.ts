@@ -70,11 +70,9 @@ export const BUILTIN_EXECUTORS: readonly BuiltinExecutor[] = [
     label: "Cline",
     envVar: "CBX_CLINE",
     candidates: ["cline"],
-    // cline 默认 auto-approve=true；仅当 cbx permissionMode 显式 auto/dontAsk 时追加 --auto-approve true 以对齐语义。
-    // intentional-simple: 非 auto 模式不显式关闭，沿用 cline 默认 true——headless 下关闭可能导致卡死，待 cline 暴露安全的非交互受限模式后再补。
     buildArgs: ({ prompt, permissionMode }) => {
-      const args = ["--json", prompt];
-      if (AUTO_MODES.has(permissionMode)) args.push("--auto-approve", "true");
+      const args = ["--json", prompt, "--auto-approve", String(AUTO_MODES.has(permissionMode))];
+      if (permissionMode === "plan") args.push("--plan");
       return args;
     },
   },
