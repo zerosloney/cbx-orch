@@ -58,12 +58,12 @@ node dist\src\cli.js clean JOB_ID
 
 `executor` 决定编排器实际调用哪个编码 CLI。内置 4 个适配器，也可指向自定义 ESM 插件。
 
-| 执行器    | 注册名 / 别名     | 二进制      | 一次性调用                                                                    | 安装                                       | 覆盖 env        |
-| --------- | ----------------- | ----------- | ----------------------------------------------------------------------------- | ------------------------------------------ | --------------- |
-| CodeBuddy | `codebuddy` / `cbc` | `codebuddy` | `-p "<prompt>" --output-format stream-json --max-turns N --permission-mode M` | `npm i -g @tencent-ai/codebuddy-code`      | `CBX_CODEBUDDY` |
-| OpenCode  | `opencode`        | `opencode`  | `run "<prompt>" --format json [--auto]`                                       | `npm i -g opencode-ai`                     | `CBX_OPENCODE`  |
-| Oh My Pi  | `omp` / `oh-my-pi` | `omp`       | `-p "<prompt>" --mode json`                                                   | `npm i -g @oh-my-pi/pi-coding-agent`       | `CBX_OMP`       |
-| Cline     | `cline`           | `cline`     | `--json "<prompt>" --auto-approve true\|false [--plan]`                       | `npm i -g cline`                           | `CBX_CLINE`     |
+| 执行器    | 注册名 / 别名       | 二进制      | 一次性调用                                                                    | 安装                                  | 覆盖 env        |
+| --------- | ------------------- | ----------- | ----------------------------------------------------------------------------- | ------------------------------------- | --------------- |
+| CodeBuddy | `codebuddy` / `cbc` | `codebuddy` | `-p "<prompt>" --output-format stream-json --max-turns N --permission-mode M` | `npm i -g @tencent-ai/codebuddy-code` | `CBX_CODEBUDDY` |
+| OpenCode  | `opencode`          | `opencode`  | `run "<prompt>" --format json [--auto]`                                       | `npm i -g opencode-ai`                | `CBX_OPENCODE`  |
+| Oh My Pi  | `omp` / `oh-my-pi`  | `omp`       | `-p "<prompt>" --mode json`                                                   | `npm i -g @oh-my-pi/pi-coding-agent`  | `CBX_OMP`       |
+| Cline     | `cline`             | `cline`     | `--json "<prompt>" --auto-approve true\|false [--plan]`                       | `npm i -g cline`                      | `CBX_CLINE`     |
 
 说明：
 
@@ -237,11 +237,11 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 插件安装后，在 ZCode 设置中可配置（对应 `userConfig`）：
 
-| 配置项     | 默认值      | 作用                                          |
-| ---------- | ----------- | --------------------------------------------- |
+| 配置项     | 默认值      | 作用                                             |
+| ---------- | ----------- | ------------------------------------------------ |
 | `executor` | `codebuddy` | 默认执行器：`codebuddy`/`opencode`/`omp`/`cline` |
-| `review`   | `true`      | 测试通过后是否跑独立审查                      |
-| `isolated` | `true`      | 是否在 git worktree 中隔离执行                |
+| `review`   | `true`      | 测试通过后是否跑独立审查                         |
+| `isolated` | `true`      | 是否在 git worktree 中隔离执行                   |
 
 ### 工作区定位
 
