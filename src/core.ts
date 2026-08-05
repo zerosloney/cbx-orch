@@ -409,7 +409,7 @@ async function writeResult(workspace: string, jobId: string, state: JobState): P
   const acceptanceEvidence = (context.taskContract?.acceptanceCriteria ?? []).map(criterion => ({ criterion, status: evidenceArtifacts.length === (context.reviewRequested ? 3 : 2) ? "evidence_available" : "unverified", artifacts: evidenceArtifacts }));
   await saveJson(path.join(directory, "result.json"), {
     jobId, status: state.status, phase: state.phase, attempt: state.attempt,
-    error: state.error ?? null, executorExitCode: state.executorExitCode ?? state.codebuddyExitCode ?? null,
+    error: state.error ?? null, executorExitCode: state.executorExitCode ?? null,
     testExitCode: state.testExitCode ?? null, reviewVerdict: state.reviewVerdict ?? null,
     baseCommit: context.baseCommit ?? null, baseBranch: context.baseBranch ?? null, baseDirty: context.baseDirty ?? null,
     baselineDrift: state.baselineDrift ?? false, changedFiles, handback,
