@@ -778,3 +778,79 @@ test("reviewGate config field is accepted and rejects unknown nested keys", asyn
   await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ reviewGate: { unknown: 1 } }), "utf8");
   await assert.rejects(() => loadConfig(workspace), /reviewGate 不支持字段：unknown/);
 });
+
+test("multi-stage chain runs each stage with its own executor and accumulates stage reports", async () => {
+  const { workspace, script } = await setupFake();
+  process.env.CBX_OPENCODE = script;
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "initial"], { cwd: workspace, encoding: "utf8" });
+  const job = await createJob({ workspace, task: "多阶段任务", testCommand: "node -e \"process.exit(0)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "staged", taskContract: { goal: "接力链", stages: [{ name: "scaffold", executor: "codebuddy", task: "搭骨架" }, { name: "implement", executor: "opencode", task: "填实现" }, { name: "x/../evil", executor: "codebuddy", task: "t3" }] } });
+  process.env.FAKE_JOB_DIR = job.directory;
+  let state: { status: string; stages?: unknown[] };
+  try { state = await executeJob(workspace, job.jobId); }
+  finally { delete process.env.CBX_OPENCODE; }
+  assert.equal(state.status, "done");
+  // result.json 应包含 stages 数组，每 stage 记录 executor 和 verdict
+  const result = JSON.parse(await readArtifact(workspace, job.jobId, "result.json"));
+  assert.ok(Array.isArray(result.stages), "result.json should have stages array");
+  assert.equal(result.stages.length, 3);
+  assert.equal(result.stages[0].name, "scaffold");
+  assert.equal(result.stages[0].executor, "codebuddy");
+  assert.equal(result.stages[1].name, "implement");
+  assert.equal(result.stages[1].executor, "opencode");
+  // 每 stage 应有独立的 handback 副本
+  assert.ok(existsSync(path.join(job.directory, "stage-0-scaffold-handback.md")), "stage-0 handback copy should exist");
+  assert.ok(existsSync(path.join(job.directory, "stage-1-implement-handback.md")), "stage-1 handback copy should exist");
+  // 恶意 stage name（含路径分隔符）必须被清洗，副本落在 job 目录内，不得路径穿越
+  assert.ok(existsSync(path.join(job.directory, "stage-2-x-..-evil-handback.md")), "hostile stage name should be sanitized");
+  // 事件流应有 stage_started / stage_finished
+  const events = await readFile(path.join(job.directory, "events.ndjson"), "utf8");
+  assert.match(events, /"event":"stage_started"/);
+  assert.match(events, /"event":"stage_finished"/);
+});
+
+test("normalizeTaskContract rejects invalid stages and accepts valid ones", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-"));
+  // 空 stages 数组应拒绝
+  await assert.rejects(() => createJob({ workspace, task: "test", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "bad-empty", taskContract: { stages: [] } }), /stages 必须是非空数组/);
+  // 缺少 executor 应拒绝
+  await assert.rejects(() => createJob({ workspace, task: "test", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "bad-noexec", taskContract: { stages: [{ name: "s1", task: "do" }] as unknown as { name: string; executor: string; task: string }[] } }), /executor 必须是非空字符串/);
+  // 合法 stages 应持久化到 context-contract.json
+  const job = await createJob({ workspace, task: "test", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "good-stages", taskContract: { stages: [{ name: "s1", executor: "codebuddy", task: "do something" }] } });
+  const contract = JSON.parse(await readFile(path.join(job.directory, "context-contract.json"), "utf8"));
+  assert.equal(contract.stages[0].name, "s1");
+  assert.equal(contract.stages[0].executor, "codebuddy");
+});
+
+test("mid-chain stage failure preserves earlier stage reports in result.json", async () => {
+  const { workspace, script } = await setupFake();
+  process.env.CBX_OPENCODE = script;
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "initial"], { cwd: workspace, encoding: "utf8" });
+    const job = await createJob({ workspace, task: "阶段失败", testCommand: "node -e \"process.exit(0)\"", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "stage-fail", taskContract: { goal: "接力链", stages: [{ name: "a", executor: "codebuddy", task: "t1" }, { name: "b", executor: "opencode", task: "t2" }] } });
+  // 计数器放 job.directory（git 排除 .cbx），避免握手阶段的工作区 diff 被误判为"修改了工作区"。
+  const counter = path.join(job.directory, "counter.txt");
+  // 执行序：index 0 = 上下文握手（exit 0），index 1 = stage0（exit 0），index 2 = stage1（exit 1 触发失败）
+  process.env.FAKE_COUNTER_FILE = counter;
+  process.env.FAKE_EXIT_SEQUENCE = "0,0,1";
+  process.env.FAKE_JOB_DIR = job.directory;
+  let state;
+  try { state = await executeJob(workspace, job.jobId); }
+  finally { delete process.env.CBX_OPENCODE; }
+  assert.equal(state.status, "failed");
+  const result = JSON.parse(await readArtifact(workspace, job.jobId, "result.json"));
+  assert.ok(Array.isArray(result.stages), "result.json should keep stage reports after mid-chain failure");
+  assert.equal(result.stages.length, 2);
+  assert.equal(result.stages[0].name, "a");
+  assert.equal(result.stages[0].exitCode, 0);
+  assert.equal(result.stages[1].name, "b");
+  assert.equal(result.stages[1].exitCode, 1);
+});
