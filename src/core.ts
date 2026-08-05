@@ -9,7 +9,7 @@ import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from
 import { findExecutable, resolveExecutor } from "./executors/builtin.js";
 import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, redactText, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, withFileLock, type RuntimeConfig } from "./storage.js";
 import { runProcess, runShell, type ProcessResult } from "./process-runner.js";
-import { cleanupRecordedWorktree, collectDiff, commitWorktree, gitDirtyFingerprint, gitRoot, prepareWorktree, snapshotDiff, snapshotGitBaseline } from "./git-ops.js";
+import { cleanupRecordedWorktree, collectDiff, commitWorktree, gitDirtyFingerprint, gitRoot, prepareWorktree, snapshotDiff, snapshotGitBaseline, type GitBaseline } from "./git-ops.js";
 import * as queue from "./queue.js";
 import type { QueueEntry, QueueFile, QueueRuntime } from "./queue.js";
 export type { QueueEntry, QueueEntryStatus, QueueFile } from "./queue.js";
@@ -72,7 +72,7 @@ export interface JobState {
   [key: string]: unknown;
 }
 
-const APP_VERSION = "0.8.0";
+const APP_VERSION = "0.8.2";
 
 /** 把降级路径的失败原因落到 job 事件流，避免裸吞导致排障无据。 */
 function logJobEvent(workspace: string, jobId: string, event: string, detail: Record<string, unknown> = {}): void {
@@ -394,6 +394,54 @@ function semanticReviewFailure(review: string): boolean {
   return review.split(/\r?\n/).slice(1, 4).some(line => /^CLASSIFICATION\s*:\s*(SEMANTIC|CONTRACT|BASELINE)$/i.test(line.trim()));
 }
 
+interface BaselineDrift { commitDrift: boolean; dirtyDrift: boolean; currentBaseline?: GitBaseline; currentDirtyFingerprint?: string; }
+
+function evaluateBaselineDrift(context: JobContext, workspace: string): BaselineDrift {
+  const currentBaseline = snapshotGitBaseline(workspace);
+  const currentDirtyFingerprint = gitDirtyFingerprint(workspace);
+  return {
+    currentBaseline,
+    currentDirtyFingerprint,
+    commitDrift: Boolean(context.baseCommit && currentBaseline?.commit && context.baseCommit !== currentBaseline.commit),
+    dirtyDrift: Boolean(context.dirtyFingerprint && currentDirtyFingerprint && context.dirtyFingerprint !== currentDirtyFingerprint),
+  };
+}
+
+async function refreshBaseline(workspace: string, jobId: string, directory: string): Promise<JobState> {
+  const baseline = snapshotGitBaseline(workspace);
+  const dirtyFingerprint = gitDirtyFingerprint(workspace);
+  const context = await loadJson<JobContext>(path.join(directory, "context.json"));
+  Object.assign(context, { gitRoot: baseline?.root, baseCommit: baseline?.commit, baseBranch: baseline?.branch, baseDirty: baseline?.dirty, baseStatus: baseline?.status, dirtyFingerprint });
+  await saveJson(path.join(directory, "context.json"), context);
+  const refreshedState = await writeState(workspace, jobId, { baselineDrift: false, dirtyBaselineDrift: false, currentCommit: null, error: null });
+  await writeResult(workspace, jobId, refreshedState);
+  logJobEvent(workspace, jobId, "baseline_refreshed", { baseCommit: baseline?.commit, baseBranch: baseline?.branch, baseDirty: baseline?.dirty });
+  return refreshedState;
+}
+
+async function performContextHandshake(
+  workspace: string,
+  directory: string,
+  context: JobContext,
+  workdir: string,
+  extra: string,
+  label: string,
+  finish: (updates: Json) => Promise<JobState>,
+): Promise<JobState | undefined> {
+  const beforeHandshake = await snapshotDiff(workdir);
+  const handshakePrompt = promptFor(directory, "context handshake", `只确认任务理解，不要修改代码。将 JSON 写入 ${path.join(directory, "understanding.json")}，字段为 interpretedGoal、plannedFiles、acceptanceCriteria、assumptions、blockingQuestions。没有阻塞问题时 blockingQuestions 必须是空数组；需要产品决策、公共契约选择或上下文冲突时写入问题并停止。${extra ? `\n\n主 Agent 补充：\n${extra}` : ""}`, label, existsSync(path.join(directory, "context-snapshot.md")));
+  let handshake: ProcessResult;
+  try { handshake = await invokeExecutor(context.executor, workspace, directory, workdir, handshakePrompt, context.permissionMode, context.maxTurns, context.timeoutMs); }
+  catch (error) { return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: String(error) }); }
+  const afterHandshake = await snapshotDiff(workdir);
+  if (JSON.stringify(beforeHandshake) !== JSON.stringify(afterHandshake)) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "上下文握手阶段修改了工作区。" });
+  if (handshake.code !== 0 || handshake.timedOut || !existsSync(path.join(directory, "understanding.json"))) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "执行代理未能生成有效的 understanding.json。" });
+  const understanding = await loadJson<Understanding>(path.join(directory, "understanding.json"));
+  if (!Array.isArray(understanding.blockingQuestions)) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "understanding.json 缺少 blockingQuestions 数组。" });
+  if (understanding.blockingQuestions.length) return finish({ status: "needs_fix", phase: "awaiting_clarification", contextIssue: true, blockingQuestions: understanding.blockingQuestions, error: "任务存在阻塞性歧义，需要主 Agent 纠偏。" });
+  return undefined;
+}
+
 async function executeJobLocked(workspace: string, jobId: string, extra = "", queueEntryId?: string): Promise<JobState> {
   const directory = jobDir(workspace, jobId);
   const initial = await loadState(workspace, jobId);
@@ -410,28 +458,25 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
   if (context.approvalBeforeRun && initial.approved !== true) {
     return writeState(workspace, jobId, { status: "awaiting_approval", phase: "before_run", approvalRequired: true });
   }
-  const currentBaseline = snapshotGitBaseline(workspace);
-  const currentDirtyFingerprint = gitDirtyFingerprint(workspace);
-  const baselineDrift = Boolean(context.baseCommit && currentBaseline?.commit && context.baseCommit !== currentBaseline.commit);
-  const dirtyBaselineDrift = Boolean(context.dirtyFingerprint && currentDirtyFingerprint && context.dirtyFingerprint !== currentDirtyFingerprint);
+  const drift = evaluateBaselineDrift(context, workspace);
   if (context.isolated && context.baseDirty) {
     const state = await writeState(workspace, jobId, { status: "needs_fix", phase: "dirty_baseline", dirtyBaselineDrift: false, error: "隔离任务无法携带创建时的未提交内容；请先提交或清理工作区后刷新基线。" }, queueEntryId);
     await writeResult(workspace, jobId, state);
     return state;
   }
-  if (!context.isolated && dirtyBaselineDrift) {
+  if (!context.isolated && drift.dirtyDrift) {
     const state = await writeState(workspace, jobId, { status: "needs_fix", phase: "dirty_baseline", dirtyBaselineDrift: true, error: "非隔离工作区未提交内容已偏离任务创建基线；请刷新上下文/基线后继续。" }, queueEntryId);
     await writeResult(workspace, jobId, state);
     return state;
   }
-  if (baselineDrift) {
-    logJobEvent(workspace, jobId, "baseline_drift", { baseCommit: context.baseCommit, currentCommit: currentBaseline?.commit, isolated: context.isolated });
+  if (drift.commitDrift) {
+    logJobEvent(workspace, jobId, "baseline_drift", { baseCommit: context.baseCommit, currentCommit: drift.currentBaseline?.commit, isolated: context.isolated });
     if (!context.isolated) {
-      const state = await writeState(workspace, jobId, { status: "needs_fix", phase: "baseline_drift", baselineDrift: true, currentCommit: currentBaseline?.commit, error: "非隔离工作区 HEAD 已偏离任务创建基线；请刷新上下文/基线后继续。" }, queueEntryId);
+      const state = await writeState(workspace, jobId, { status: "needs_fix", phase: "baseline_drift", baselineDrift: true, currentCommit: drift.currentBaseline?.commit, error: "非隔离工作区 HEAD 已偏离任务创建基线；请刷新上下文/基线后继续。" }, queueEntryId);
       await writeResult(workspace, jobId, state);
       return state;
     }
-    await writeState(workspace, jobId, { baselineDrift: true, currentCommit: currentBaseline?.commit });
+    await writeState(workspace, jobId, { baselineDrift: true, currentCommit: drift.currentBaseline?.commit });
   }
   const worktreeFile = path.join(directory, "worktree.json");
   const recordedWorkdir = existsSync(worktreeFile) ? (await loadJson<{ path: string }>(worktreeFile)).path : "";
@@ -469,17 +514,8 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
   };
 
   if (context.taskContract && !existsSync(path.join(directory, "understanding.json"))) {
-    const beforeHandshake = await snapshotDiff(workdir);
-    const handshakePrompt = promptFor(directory, "context handshake", `只确认任务理解，不要修改代码。将 JSON 写入 ${path.join(directory, "understanding.json")}，字段为 interpretedGoal、plannedFiles、acceptanceCriteria、assumptions、blockingQuestions。没有阻塞问题时 blockingQuestions 必须是空数组；需要产品决策、公共契约选择或上下文冲突时写入问题并停止。${extra ? `\n\n主 Agent 补充：\n${extra}` : ""}`, label, existsSync(path.join(directory, "context-snapshot.md")));
-    let handshake: ProcessResult;
-    try { handshake = await invokeExecutor(context.executor, workspace, directory, workdir, handshakePrompt, context.permissionMode, context.maxTurns, context.timeoutMs); }
-    catch (error) { return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: String(error) }); }
-    const afterHandshake = await snapshotDiff(workdir);
-    if (JSON.stringify(beforeHandshake) !== JSON.stringify(afterHandshake)) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "上下文握手阶段修改了工作区。" });
-    if (handshake.code !== 0 || handshake.timedOut || !existsSync(path.join(directory, "understanding.json"))) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "执行代理未能生成有效的 understanding.json。" });
-    const understanding = await loadJson<Understanding>(path.join(directory, "understanding.json"));
-    if (!Array.isArray(understanding.blockingQuestions)) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "understanding.json 缺少 blockingQuestions 数组。" });
-    if (understanding.blockingQuestions.length) return finish({ status: "needs_fix", phase: "awaiting_clarification", contextIssue: true, blockingQuestions: understanding.blockingQuestions, error: "任务存在阻塞性歧义，需要主 Agent 纠偏。" });
+    const handshakeOutcome = await performContextHandshake(workspace, directory, context, workdir, extra, label, finish);
+    if (handshakeOutcome) return handshakeOutcome;
   }
 
   for (let tryNumber = 1; tryNumber <= maxAttempts; tryNumber += 1) {
@@ -612,7 +648,7 @@ export async function retryQueueJob(workspaceInput: string, jobId: string, prior
   return queue.retryQueueJob(queueRuntime, workspaceInput, jobId, priority);
 }
 
-export async function startBackground(workspaceInput: string, jobId: string, extra = "", priority = 0, contextSnapshot?: string, refreshBaseline = false): Promise<void> {
+export async function startBackground(workspaceInput: string, jobId: string, extra = "", priority = 0, contextSnapshot?: string, shouldRefreshBaseline = false): Promise<void> {
   const workspace = path.resolve(workspaceInput);
   const directory = jobDir(workspace, jobId);
   if (contextSnapshot !== undefined) {
@@ -622,15 +658,8 @@ export async function startBackground(workspaceInput: string, jobId: string, ext
     else await unlink(path.join(directory, "context-snapshot.md")).catch(() => undefined);
   }
   await unlink(path.join(directory, "understanding.json")).catch(() => undefined);
-  if (refreshBaseline) {
-    const baseline = snapshotGitBaseline(workspace);
-    const dirtyFingerprint = gitDirtyFingerprint(workspace);
-    const context = await loadJson<JobContext>(path.join(directory, "context.json"));
-    Object.assign(context, { gitRoot: baseline?.root, baseCommit: baseline?.commit, baseBranch: baseline?.branch, baseDirty: baseline?.dirty, baseStatus: baseline?.status, dirtyFingerprint });
-    await saveJson(path.join(directory, "context.json"), context);
-    const refreshedState = await writeState(workspace, jobId, { baselineDrift: false, dirtyBaselineDrift: false, currentCommit: null, error: null });
-    await writeResult(workspace, jobId, refreshedState);
-    logJobEvent(workspace, jobId, "baseline_refreshed", { baseCommit: baseline?.commit, baseBranch: baseline?.branch, baseDirty: baseline?.dirty });
+  if (shouldRefreshBaseline) {
+    await refreshBaseline(workspace, jobId, directory);
   }
   await enqueueJob(workspaceInput, jobId, extra, priority);
 }

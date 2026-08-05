@@ -1,6 +1,6 @@
 {
   "name": "cbx-orch",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "license": "MIT",
   "private": false,
   "publishConfig": {
@@ -20,7 +20,9 @@
     "url": "https://github.com/zerosloney/cbx-orch.git"
   },
   "homepage": "https://github.com/zerosloney/cbx-orch#readme",
-  "bugs": { "url": "https://github.com/zerosloney/cbx-orch/issues" },
+  "bugs": {
+    "url": "https://github.com/zerosloney/cbx-orch/issues"
+  },
   "bin": {
     "cbx": "dist/src/cli.js"
   },
