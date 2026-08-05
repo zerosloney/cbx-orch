@@ -72,6 +72,8 @@ test("MCP initialize, tools, resources and errors preserve request ids", async (
     assert.ok(tools.some(tool => tool.name === "cbx_artifact"));
     assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.task_contract);
     assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.review_executor);
+    assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.allow_unsafe_permissions);
+    assert.ok(tools.some(tool => tool.name === "cbx_review_gate"));
     const status = await call(3, "tools/call", { name: "cbx_status", arguments: { workspace, job_id: job.jobId } });
     assert.equal((((status.result as { structuredContent: { jobId: string } }).structuredContent).jobId), job.jobId);
     const forbiddenArtifact = await call(31, "tools/call", { name: "cbx_artifact", arguments: { workspace, job_id: job.jobId, artifact: "request.md" } });

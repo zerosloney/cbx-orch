@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { appendFileSync, unlinkSync, writeFileSync } from "node:fs";
 
 export interface ProcessResult { code: number; timedOut: boolean; output: string; }
@@ -8,12 +8,25 @@ export function capture(args: string[], cwd: string, timeout = 30_000): { code: 
   return { code: result.status ?? -1, stdout: String(result.stdout ?? ""), stderr: String(result.stderr ?? result.error ?? "") };
 }
 
-export function killTree(pid: number, signal: NodeJS.Signals = "SIGKILL"): void {
+export function killTree(pid: number, signal: NodeJS.Signals = "SIGKILL", child?: ChildProcess): boolean {
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
-    return;
+    // 先尝试父进程持有的句柄：在某些环境（受限会话/作业对象）下，先执行失败的 taskkill
+    // 会使后续 child.kill 失效（返回 false），因此有句柄时必须优先用它（TerminateProcess）。
+    if (child) {
+      try {
+        if (child.kill("SIGKILL")) return true;
+      } catch { /* 进程已退出 */ }
+    }
+    const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+    if (result.status === 0) return true;
+    try { process.kill(pid, "SIGKILL"); return true; } catch { return false; }
   }
-  try { process.kill(-pid, signal); } catch { try { process.kill(pid, signal); } catch { /* already exited */ } }
+  try { process.kill(-pid, signal); return true; } catch {
+    if (child) {
+      try { return child.kill(signal); } catch { /* 进程已退出 */ }
+    }
+    try { process.kill(pid, signal); return true; } catch { return false; }
+  }
 }
 
 export function runProcess(command: string, args: string[], cwd: string, timeoutMs: number, logFile?: string, pidFile?: string): Promise<ProcessResult> {
@@ -30,7 +43,7 @@ export function runProcess(command: string, args: string[], cwd: string, timeout
     };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
-    const timer = setTimeout(() => { timedOut = true; if (child.pid) killTree(child.pid); }, timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; if (child.pid) killTree(child.pid, "SIGKILL", child); }, timeoutMs);
     child.on("error", error => {
       if (!settled) { settled = true; clearTimeout(timer); if (pidFile) { try { unlinkSync(pidFile); } catch { /* removed */ } } reject(error); }
     });
@@ -53,7 +66,7 @@ export function runShell(command: string, cwd: string, timeoutMs: number): Promi
     const append = (chunk: Buffer) => { output += chunk.toString("utf8"); };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
-    const timer = setTimeout(() => { timedOut = true; if (child.pid) killTree(child.pid); }, timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; if (child.pid) killTree(child.pid, "SIGKILL", child); }, timeoutMs);
     child.on("error", error => { if (!settled) { settled = true; clearTimeout(timer); reject(error); } });
     child.on("close", code => { if (!settled) { settled = true; clearTimeout(timer); resolve({ code: code ?? -1, timedOut, output }); } });
   });

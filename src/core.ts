@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { appendFileSync, existsSync } from "node:fs";
@@ -8,7 +7,7 @@ import { finishSpan, publishEvent, startSpan } from "./observability.js";
 import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from "./executor.js";
 import { findExecutable, resolveExecutor } from "./executors/builtin.js";
 import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, redactText, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, withFileLock, type RuntimeConfig } from "./storage.js";
-import { runProcess, runShell, type ProcessResult } from "./process-runner.js";
+import { killTree, runProcess, runShell, type ProcessResult } from "./process-runner.js";
 import { cleanupRecordedWorktree, collectDiff, commitWorktree, gitDirtyFingerprint, gitRoot, prepareWorktree, snapshotDiff, snapshotGitBaseline, type GitBaseline } from "./git-ops.js";
 import * as queue from "./queue.js";
 import type { QueueEntry, QueueFile, QueueRuntime } from "./queue.js";
@@ -357,7 +356,9 @@ async function saveStateAndQueue(workspace: string, jobId: string, state: Record
 }
 
 export async function readArtifact(workspaceInput: string, jobId: string, artifact: string): Promise<string> {
-  if (!ARTIFACTS.has(artifact)) throw new Error(`不允许读取任务文件：${artifact}`);
+  // 与 listArtifacts 的动态发现保持一致：stage 交接副本 stage-<index>-<name>-handback.md 可读，
+  // 但仍按白名单正则校验，防止路径穿越。
+  if (!ARTIFACTS.has(artifact) && !/^stage-\d+-[A-Za-z0-9._-]+-handback\.md$/.test(artifact)) throw new Error(`不允许读取任务文件：${artifact}`);
   return readFile(path.join(jobDir(path.resolve(workspaceInput), jobId), artifact), "utf8");
 }
 
@@ -715,7 +716,17 @@ export async function executeJob(workspaceInput: string, jobId: string, extra = 
   const lock = path.join(jobDir(workspace, jobId), "run.lock");
   return withFileLock(lock, async () => {
     try {
-      try { await unlink(path.join(jobDir(workspace, jobId), "cancel.requested")); } catch { /* new run clears an old cancellation */ }
+      // 排队中/前台被取消的任务不得启动：保留取消标记并返回终态。
+      // 重新执行必须走 continue/retry（入队时清除取消标记）。
+      const marker = path.join(jobDir(workspace, jobId), "cancel.requested");
+      if (existsSync(marker)) {
+        const current = await loadState(workspace, jobId);
+        if (current.status === "cancelled") {
+          if (queueEntryId) await finishQueueEntry(workspace, queueEntryId);
+          await writeResult(workspace, jobId, current);
+          return current;
+        }
+      }
       const result = await executeJobLocked(workspace, jobId, extra, queueEntryId);
       if (queueEntryId) await dispatchQueue(workspace);
       return result;
@@ -770,6 +781,10 @@ export async function resumeQueue(workspaceInput: string): Promise<QueueFile> {
   return queue.resumeQueue(queueRuntime, workspaceInput);
 }
 
+async function cancelQueueEntries(workspaceInput: string, jobId: string): Promise<QueueFile> {
+  return queue.cancelQueueEntries(queueRuntime, workspaceInput, jobId);
+}
+
 export async function retryQueueJob(workspaceInput: string, jobId: string, priority = 0): Promise<QueueEntry> {
   return queue.retryQueueJob(queueRuntime, workspaceInput, jobId, priority);
 }
@@ -777,6 +792,8 @@ export async function retryQueueJob(workspaceInput: string, jobId: string, prior
 export async function startBackground(workspaceInput: string, jobId: string, extra = "", priority = 0, contextSnapshot?: string, shouldRefreshBaseline = false): Promise<void> {
   const workspace = path.resolve(workspaceInput);
   const directory = jobDir(workspace, jobId);
+  // 显式重新入队（continue/approve/start）：清除上次取消留下的标记。
+  await unlink(path.join(directory, "cancel.requested")).catch(() => undefined);
   if (contextSnapshot !== undefined) {
     const governance = (await loadConfig(workspace)).governance;
     const snapshot = redactText(contextSnapshot, governance?.redactFields, governance?.redactPatterns);
@@ -797,9 +814,9 @@ export async function cancelJob(workspaceInput: string, jobId: string): Promise<
   for (const file of [path.join(directory, "active.pid"), path.join(directory, "pid")]) {
     if (!existsSync(file)) continue;
     const pid = Number(await readFile(file, "utf8"));
-    if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
-    else { try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch { /* already exited */ } } }
+    killTree(pid, "SIGTERM");
   }
   try { await cleanupWorktree(workspace, jobId); } catch (error) { logJobEvent(workspace, jobId, "cleanup_failed", { phase: "cancel", error: error instanceof Error ? error.message : String(error) }); }
+  try { await cancelQueueEntries(workspace, jobId); } catch (error) { logJobEvent(workspace, jobId, "queue_cancel_failed", { error: error instanceof Error ? error.message : String(error) }); }
   return writeState(workspace, jobId, { status: "cancelled", phase: "cancelled", cancelledAt: now() });
 }

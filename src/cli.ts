@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
+import path from "node:path";
 import { approveJob, cancelJob, cleanupWorktree, dispatchQueue, createJob, executeJob, health, jobDir, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, serveQueue, startBackground } from "./core.js";
 import { runReviewGate } from "./review-gate.js";
 import { runTui, startWebUi } from "./ui.js";
@@ -122,6 +123,7 @@ async function main(): Promise<void> {
   if (command === "continue") {
     const message = option(args, "--message", "请根据 review.md 修复问题，完成后重新运行验收命令。")!;
     if (has(args, "--foreground")) {
+      await unlink(path.join(jobDir(workspace, args[0]), "cancel.requested")).catch(() => undefined);
       print(await executeJob(workspace, args[0], message));
       return;
     }

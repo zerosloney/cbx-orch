@@ -150,11 +150,11 @@ node dist/src/cli.js health --workspace .
 
 配置了 `approval.beforeRun` 后，任务会先进入 `awaiting_approval`，批准后才启动执行器。
 
-`git.autoCommit` 要求 `isolated` 为 `true`，完成后会在 `cbx/<job-id>` 分支提交修改。
+`git.autoCommit` 会自动隐含开启 `isolated`（有提示，避免污染主工作区）；仅在 `git.autoBranch` 开启时，修改会提交到 `cbx/<job-id>` 分支，否则落在 worktree 的游离提交上。
 
 后台 worker 是 detached 进程。可使用常驻 `serve` 监护队列；它启动时会回收死 worker，仍可用 `dispatch` 供 cron/计划任务执行。
 
-`notifications.webhook` 接收任务状态事件；事件同时会写入 `.cbx/events.ndjson`。webhook 和 OTLP 都支持 `timeoutMs`、`maxRetries`、`retryBaseMs`，非 2xx 会失败并有限指数退避；最终失败会落到 `.cbx/delivery-failures.ndjson`，不会无限阻塞状态写入。启用 `telemetry` 后，任务 span 会写入 `.cbx/telemetry.ndjson`，并按 OTLP/HTTP JSON 发送到配置的 endpoint。
+`notifications.webhook` 接收任务状态事件；事件同时会写入 `.cbx/events.ndjson`。webhook 和 OTLP 都支持 `timeoutMs`、`maxRetries`、`retryBaseMs`，非 2xx 会失败并有限指数退避；最终失败会落到 `.cbx/delivery-failures.ndjson`，不会无限阻塞状态写入。任务 span 始终写入 `.cbx/telemetry.ndjson` 供本地排查；启用 `telemetry` 后才会按 OTLP/HTTP JSON 发送到配置的 endpoint。
 
 任务状态、队列和通知死信的权威数据存储在 `.cbx/state.sqlite`（WAL 模式、版本化 migration）；首次访问会无损导入旧的 `.cbx/jobs/*/state.json`、`queue.json` 和 `delivery-failures.ndjson`。这些 JSON/NDJSON artifact 会继续保留以便人工查看，但不再作为调度一致性的依据；worker 终态与对应队列条目、以及 retry 的状态重置与重新入队，均在同一 SQLite transaction 提交。常驻 `serve` 使用工作区单实例租约，发现另一个存活实例会拒绝启动。`/healthz` 与 `/api/metrics`、以及 `cbx health` 返回队列深度、任务状态计数、失败/重试与死信计数，且不包含任务正文。
 
@@ -192,9 +192,11 @@ node dist/src/cli.js health --workspace .
 cbx mcp
 ```
 
-提供的工具：`cbx_start`、`cbx_status`、`cbx_review`、`cbx_continue`、`cbx_artifact`、`cbx_cancel`、`cbx_approve`、`cbx_list`、`cbx_logs`、`cbx_result`、`cbx_queue`、`cbx_queue_pause`、`cbx_queue_resume`、`cbx_retry`。
+提供的工具：`cbx_start`、`cbx_status`、`cbx_review`、`cbx_continue`、`cbx_artifact`、`cbx_cancel`、`cbx_approve`、`cbx_list`、`cbx_logs`、`cbx_result`、`cbx_queue`、`cbx_queue_pause`、`cbx_queue_resume`、`cbx_retry`、`cbx_review_gate`（对工作区未提交改动跑独立审查，配合 `reviewGate.enabled` 的 Stop hook）。
 
-MCP 还提供 `resources/list` 和 `resources/read`，可直接读取任务的 `result.json`、`events.ndjson`、`complete.patch`、`review.md` 等产物。
+MCP 还提供 `resources/list` 和 `resources/read`，可直接读取任务的 `result.json`、`events.ndjson`、`complete.patch`、`review.md`、`stage-*-handback.md` 等产物。
+
+`permissionMode` 为 `dontAsk` 时，MCP 的 `cbx_start` 需要显式传 `allow_unsafe_permissions: true`（对应 CLI 的 `--dangerously-skip-permissions`），否则任务创建会被拒绝。
 
 非平凡任务可在 `cbx_start` 中传结构化 `task_contract`（目标、验收标准、非目标、约束、相关文件、决策与假设）。执行器会先生成 `understanding.json`；存在阻塞问题时任务以 `needs_fix / awaiting_clarification` 暂停。创建任务时还会记录 Git commit、branch、dirty 状态及 dirty 内容指纹。`isolated: true` 且创建基线包含未提交内容时，任务会在创建 worktree 前以 `needs_fix / dirty_baseline` 暂停，避免未提交内容被静默遗漏；请先提交或清理这些内容，确认当前基线符合预期后再以 `refresh_baseline: true` 继续。隔离 worktree 随后固定从确认过的 commit 创建。非隔离任务仅在 HEAD 或 dirty 内容指纹相对创建基线发生漂移时暂停，dirty 内容未变时可正常执行。`review_executor` 可指定独立审查 CLI，默认仍沿用 `executor`。
 
@@ -249,7 +251,7 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 ### 前置依赖
 
-npm 发布包包含可直接运行的 `dist/` 编译产物；源码仓库不跟踪该目录。自行 clone 源码后，需先执行 `npm install && npm run build` 生成 `dist/`。还需至少安装一个执行器 CLI（codebuddy/opencode/omp/cline 之一）才能真正执行任务。
+npm 发布包包含可直接运行的 `dist/` 编译产物；源码仓库不跟踪该目录。自行 clone 源码后，需先执行 `npm install && npm run build` 生成 `dist/`。还需至少安装一个执行器 CLI（codebuddy/opencode/omp/cline 之一）才能真正执行任务。注意：ZCode 的 Stop review-gate hook 直接引用插件目录内的 `dist/src/hooks/stop-review-gate.js`，从源码安装插件时同样必须先构建；否则该 hook 不生效（MCP server 不依赖插件目录内的 dist，只依赖全局 `cbx` 命令）。
 
 ## 安全说明
 

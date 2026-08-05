@@ -139,6 +139,13 @@ test("untrusted mode is rejected because a Git worktree is not an OS sandbox", a
   );
 });
 
+test("dontAsk permission mode requires an explicit unsafe opt-in", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-dontask-"));
+  await assert.rejects(() => createJob({ workspace, task: "不安全", review: false, isolated: false, permissionMode: "dontAsk", maxTurns: 5 }), /dangerously-skip-permissions/);
+  const job = await createJob({ workspace, task: "显式放行", review: false, isolated: false, permissionMode: "dontAsk", allowUnsafePermissions: true, maxTurns: 5, jobId: "dontask-ok" });
+  assert.equal(job.jobId, "dontask-ok");
+});
+
 test("end-to-end success runs fake agent, test, and review", async () => {
   const { workspace } = await setupFake();
   spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
@@ -383,6 +390,46 @@ test("background cancellation terminates the task", async () => {
   await new Promise(resolve => setTimeout(resolve, 150));
   const state = await cancelJob(workspace, job.jobId);
   assert.equal(state.status, "cancelled");
+});
+
+test("cancelling a queued job prevents it from running after queue resume", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({ workspace, task: "排队取消", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "queued-cancel" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  await pauseQueue(workspace);
+  await startBackground(workspace, job.jobId);
+  assert.equal((await listQueue(workspace)).entries.find(entry => entry.jobId === job.jobId)?.status, "queued");
+  await cancelJob(workspace, job.jobId);
+  assert.equal((await loadState(workspace, job.jobId)).status, "cancelled");
+  assert.equal((await listQueue(workspace)).entries.find(entry => entry.jobId === job.jobId)?.status, "cancelled");
+  await resumeQueue(workspace);
+  await new Promise(resolve => setTimeout(resolve, 800));
+  assert.equal((await loadState(workspace, job.jobId)).status, "cancelled");
+  assert.equal(existsSync(path.join(workspace, "fake-change.txt")), false);
+});
+
+test("executeJob does not start a cancelled job and continue clears the marker", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({ workspace, task: "取消后不启动", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "no-restart" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  await cancelJob(workspace, job.jobId);
+  assert.equal((await executeJob(workspace, job.jobId)).status, "cancelled");
+  assert.equal(existsSync(path.join(workspace, "fake-change.txt")), false);
+  assert.equal(existsSync(path.join(job.directory, "cancel.requested")), true);
+  // 显式重跑入口（continue/startBackground）在入队时清除取消标记，任务可以再次执行。
+  await startBackground(workspace, job.jobId, "重跑");
+  assert.equal(existsSync(path.join(job.directory, "cancel.requested")), false);
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && (await loadState(workspace, job.jobId)).status !== "done") await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal((await loadState(workspace, job.jobId)).status, "done");
+});
+
+test("stage handback artifacts are readable via readArtifact", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-stage-read-"));
+  const job = await createJob({ workspace, task: "阶段产物", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "stage-read", taskContract: { stages: [{ name: "s1", executor: "codebuddy", task: "t1" }] } });
+  await writeFile(path.join(job.directory, "stage-0-s1-handback.md"), "stage handback", "utf8");
+  assert.equal(await readArtifact(workspace, job.jobId, "stage-0-s1-handback.md"), "stage handback");
+  await assert.rejects(() => readArtifact(workspace, job.jobId, "stage-0-../evil-handback.md"), /不允许读取/);
 });
 
 test("approval gate pauses and resumes a task", async () => {

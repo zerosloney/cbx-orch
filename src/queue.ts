@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireServiceLease, loadPersistedQueue, now, processAlive, savePersistedQueue, withFileLock } from "./storage.js";
@@ -158,6 +158,21 @@ export async function pauseQueue(_runtime: QueueRuntime, workspaceInput: string)
   return withQueueLock(workspace, async () => { const queue = await loadQueue(workspace); queue.paused = true; await saveQueue(workspace, queue); return queue; });
 }
 
+/** 把某任务仍处于 queued/running 的队列条目标记为 cancelled，阻止调度器继续启动它。 */
+export async function cancelQueueEntries(runtime: QueueRuntime, workspaceInput: string, jobId: string): Promise<QueueFile> {
+  const workspace = path.resolve(workspaceInput);
+  return withQueueLock(workspace, async () => {
+    const queue = await loadQueue(workspace);
+    for (const entry of queue.entries.filter(item => item.jobId === jobId && ["queued", "running"].includes(item.status))) {
+      entry.status = "cancelled";
+      entry.finishedAt = now();
+      entry.pid = undefined;
+    }
+    await saveQueue(workspace, queue);
+    return queue;
+  });
+}
+
 export async function resumeQueue(runtime: QueueRuntime, workspaceInput: string): Promise<QueueFile> {
   const workspace = path.resolve(workspaceInput);
   await withQueueLock(workspace, async () => { const queue = await loadQueue(workspace); queue.paused = false; await saveQueue(workspace, queue); });
@@ -168,6 +183,8 @@ export async function retryQueueJob(runtime: QueueRuntime, workspaceInput: strin
   const workspace = path.resolve(workspaceInput);
   const state = await runtime.loadState(workspace, jobId);
   if (["running", "queued"].includes(state.status)) throw new Error(`任务当前仍在执行或排队：${jobId}`);
+  // 显式重跑：清除上一次取消留下的标记，避免 executeJob 再次把任务直接判为 cancelled。
+  try { await unlink(path.join(runtime.jobDir(workspace, jobId), "cancel.requested")); } catch { /* 无待取消标记 */ }
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await dispatchQueue(runtime, workspace);
     const queue = await loadQueue(workspace);
