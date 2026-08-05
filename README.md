@@ -23,6 +23,8 @@ npm install
 npm run build
 ```
 
+源码仓库不包含 `dist/`；以下 `node .../dist/src/cli.js` 示例均以已经执行上述安装和构建命令为前提。若通过 npm 全局安装，则可直接把 `node .../dist/src/cli.js` 替换为 `cbx`。
+
 在目标代码仓库中运行（默认执行器为 `codebuddy`）：
 
 ```powershell
@@ -179,7 +181,7 @@ node dist/src/cli.js health --workspace .
 
 `npm run check` 执行类型 lint、格式检查和测试；`npm run coverage` 运行 Node 测试覆盖率；`npm run audit` 检查高危依赖问题；`npm run sbom` 生成 CycloneDX SBOM。CI 在 Node 20、22 和 24 上执行这些确定性检查并上传测试、覆盖率和 SBOM 工件。
 
-发布遵循 Semantic Versioning；`package.json.files` 明确限定发布内容（仅 `dist/` + 文档，不含源码与测试）。`private` 已设为 `false`，推送 `v*` tag 触发 `.github/workflows/publish.yml` 自动发布到 npm（需在仓库 Secrets 配置 `NPM_TOKEN`）。
+发布遵循 Semantic Versioning。源码仓库不跟踪 `dist/`；推送 `v*` tag 后，`.github/workflows/publish.yml` 会从源码构建它、运行测试，并用 `npm pack --dry-run` 校验待发布包确实包含 `dist/src/cli.js`，然后才发布到 npm（需在仓库 Secrets 配置 `NPM_TOKEN`）。`package.json.files` 仍明确限定 npm 包内容为 `dist/` 和文档，不包含源码与测试；`private` 已设为 `false`。
 
 ## MCP
 
@@ -214,7 +216,7 @@ zcode plugin marketplace add zerosloney/cbx-orch
 zcode plugin install cbx-orch@cbx-orch-marketplace
 ```
 
-安装后重启 ZCode 会话，cbx MCP server 自动以 `cbx` 名注册，工具暴露为 `mcp__cbx__cbx_*`。
+安装后重启 ZCode 会话，插件 manifest 会调用全局安装的 `cbx mcp`，将 MCP server 自动以 `cbx` 名注册；工具暴露为 `mcp__cbx__cbx_*`。因此仅 clone 或安装插件目录并不足以启动 MCP，必须先确保全局 `cbx` 命令可用。
 
 ### 斜杠命令
 
@@ -246,7 +248,7 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 ### 前置依赖
 
-插件依赖仓库 `dist/` 目录的编译产物（已随仓库分发）。若自行 clone 开发，需先 `npm install && npm run build`。还需至少安装一个执行器 CLI（codebuddy/opencode/pi/omp 之一）才能真正执行任务。
+npm 发布包包含可直接运行的 `dist/` 编译产物；源码仓库不跟踪该目录。自行 clone 源码后，需先执行 `npm install && npm run build` 生成 `dist/`。还需至少安装一个执行器 CLI（codebuddy/opencode/pi/omp 之一）才能真正执行任务。
 
 ## 安全说明
 

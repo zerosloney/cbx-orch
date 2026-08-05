@@ -23,6 +23,11 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+      - name: Verify npm package contents
+        shell: bash
+        run: |
+          npm pack --dry-run --json > pack-manifest.json
+          node -e "const pack = require('./pack-manifest.json')[0]; if (!pack.files.some(file => file.path === 'dist/src/cli.js')) throw new Error('npm package is missing dist/src/cli.js')"
       - run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

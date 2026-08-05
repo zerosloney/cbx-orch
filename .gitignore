@@ -1,5 +1,5 @@
 node_modules/
-dist/tests/
+dist/
 __pycache__/
 *.pyc
 .zcode/
