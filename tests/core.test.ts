@@ -454,16 +454,14 @@ test("ESM executor plugin can replace the builtin CLI", async () => {
   assert.match(events, /"sha256":"[a-f0-9]{64}"/);
 });
 
-test("registry resolves codebuddy/cbc/opencode/pi/oh-my-pi/omp", () => {
+test("registry resolves codebuddy/cbc/opencode/omp/oh-my-pi", () => {
   assert.equal(resolveExecutor("codebuddy")?.name, "codebuddy");
   assert.equal(resolveExecutor("cbc")?.name, "codebuddy");
   assert.equal(resolveExecutor("opencode")?.name, "opencode");
-  assert.equal(resolveExecutor("pi")?.name, "pi");
-  assert.equal(resolveExecutor("oh-my-pi")?.name, "pi");
   assert.equal(resolveExecutor("omp")?.name, "omp");
-  assert.equal(resolveExecutor("oh-my-pi-omp")?.name, "omp");
+  assert.equal(resolveExecutor("oh-my-pi")?.name, "omp");
   assert.equal(resolveExecutor("unknown"), undefined);
-  assert.equal(BUILTIN_EXECUTORS.length, 4);
+  assert.equal(BUILTIN_EXECUTORS.length, 3);
 });
 
 test("codebuddy buildArgs uses print/stream-json/max-turns/permission-mode", () => {
@@ -475,12 +473,6 @@ test("opencode buildArgs uses run/format json and auto when permission is auto/d
   const spec = resolveExecutor("opencode")!;
   assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "auto", maxTurns: 5 }), ["run", "--format", "json", "fix", "--auto"]);
   assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "default", maxTurns: 5 }), ["run", "--format", "json", "fix"]);
-});
-
-test("pi buildArgs uses -p/mode json and -a when permission is auto/dontAsk", () => {
-  const spec = resolveExecutor("pi")!;
-  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "dontAsk", maxTurns: 5 }), ["-p", "--mode", "json", "fix", "-a"]);
-  assert.deepEqual(spec.buildArgs({ prompt: "fix", permissionMode: "plan", maxTurns: 5 }), ["-p", "--mode", "json", "fix"]);
 });
 
 test("omp buildArgs uses -p/mode json and ignores permissionMode (no documented flag)", () => {

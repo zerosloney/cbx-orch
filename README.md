@@ -56,21 +56,20 @@ node dist\src\cli.js clean JOB_ID
 
 ## 执行器
 
-`executor` 决定编排器实际调用哪个编码 CLI。内置 4 个适配器，也可指向自定义 ESM 插件。
+`executor` 决定编排器实际调用哪个编码 CLI。内置 3 个适配器，也可指向自定义 ESM 插件。
 
-| 执行器    | 注册名 / 别名          | 二进制      | 一次性调用                                                                    | 安装                                       | 覆盖 env        |
-| --------- | ---------------------- | ----------- | ----------------------------------------------------------------------------- | ------------------------------------------ | --------------- |
-| CodeBuddy | `codebuddy` / `cbc`    | `codebuddy` | `-p "<prompt>" --output-format stream-json --max-turns N --permission-mode M` | `npm i -g @tencent-ai/codebuddy-code`      | `CBX_CODEBUDDY` |
-| OpenCode  | `opencode`             | `opencode`  | `run "<prompt>" --format json [--auto]`                                       | `npm i -g opencode-ai`                     | `CBX_OPENCODE`  |
-| Pi        | `pi` / `oh-my-pi`      | `pi`        | `-p "<prompt>" --mode json [-a]`                                              | `npm i -g @earendil-works/pi-coding-agent` | `CBX_PI`        |
-| omp       | `omp` / `oh-my-pi-omp` | `omp`       | `-p "<prompt>" --mode json`                                                   | `npm i -g @oh-my-pi/pi-coding-agent`       | `CBX_OMP`       |
+| 执行器    | 注册名 / 别名     | 二进制      | 一次性调用                                                                    | 安装                                       | 覆盖 env        |
+| --------- | ----------------- | ----------- | ----------------------------------------------------------------------------- | ------------------------------------------ | --------------- |
+| CodeBuddy | `codebuddy` / `cbc` | `codebuddy` | `-p "<prompt>" --output-format stream-json --max-turns N --permission-mode M` | `npm i -g @tencent-ai/codebuddy-code`      | `CBX_CODEBUDDY` |
+| OpenCode  | `opencode`        | `opencode`  | `run "<prompt>" --format json [--auto]`                                       | `npm i -g opencode-ai`                     | `CBX_OPENCODE`  |
+| Oh My Pi  | `omp` / `oh-my-pi` | `omp`       | `-p "<prompt>" --mode json`                                                   | `npm i -g @oh-my-pi/pi-coding-agent`       | `CBX_OMP`       |
 
 说明：
 
-- `oh-my-pi` 是 Pi 的扩展框架，本身不是独立二进制，因此作为 `pi` 的别名；`omp` 是独立产品（`@oh-my-pi/pi-coding-agent`），与 `pi` 不共享二进制。
-- `--auto`（OpenCode）/ `-a`（Pi）仅在 `permissionMode` 为 `auto` 或 `dontAsk` 时追加；`default`/`acceptEdits`/`plan` 不追加，让 CLI 自行按默认权限行事。
-- omp 的 CLI 文档未公开权限/放行 flag，因此当前不追加任何权限参数，由 omp 非交互 `-p` 默认行为决定；待其暴露后补齐。
-- 四个 CLI 中只有 CodeBuddy 保留 `--max-turns`；其余靠 `--timeout-ms` 兜底。
+- `oh-my-pi` 是 Oh My Pi 的扩展框架，本身不是独立二进制，因此作为 `omp` 的别名。
+- `--auto`（OpenCode）仅在 `permissionMode` 为 `auto` 或 `dontAsk` 时追加；`default`/`acceptEdits`/`plan` 不追加，让 CLI 自行按默认权限行事。
+- Oh My Pi 的 CLI 文档未公开权限/放行 flag，因此当前不追加任何权限参数，由 omp 非交互 `-p` 默认行为决定；待其暴露后补齐。
+- 三个 CLI 中只有 CodeBuddy 保留 `--max-turns`；其余靠 `--timeout-ms` 兜底。
 - 通过对应的 env 变量可覆盖二进制路径，常用于测试或指向自定义脚本。
 - 自定义插件：`executor` 指向一个 ESM 模块路径，模块导出 `run(request)`，返回 `{ code, output, timedOut }`。示例见 `plugins/example-executor.mjs`。
 
@@ -238,7 +237,7 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 | 配置项     | 默认值      | 作用                                          |
 | ---------- | ----------- | --------------------------------------------- |
-| `executor` | `codebuddy` | 默认执行器：`codebuddy`/`opencode`/`pi`/`omp` |
+| `executor` | `codebuddy` | 默认执行器：`codebuddy`/`opencode`/`omp` |
 | `review`   | `true`      | 测试通过后是否跑独立审查                      |
 | `isolated` | `true`      | 是否在 git worktree 中隔离执行                |
 
@@ -248,7 +247,7 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 ### 前置依赖
 
-npm 发布包包含可直接运行的 `dist/` 编译产物；源码仓库不跟踪该目录。自行 clone 源码后，需先执行 `npm install && npm run build` 生成 `dist/`。还需至少安装一个执行器 CLI（codebuddy/opencode/pi/omp 之一）才能真正执行任务。
+npm 发布包包含可直接运行的 `dist/` 编译产物；源码仓库不跟踪该目录。自行 clone 源码后，需先执行 `npm install && npm run build` 生成 `dist/`。还需至少安装一个执行器 CLI（codebuddy/opencode/omp 之一）才能真正执行任务。
 
 ## 安全说明
 

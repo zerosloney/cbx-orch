@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-// 内置执行器适配层：把 codebuddy / opencode / pi 等编码 CLI 收敛到统一的调用契约。
+// 内置执行器适配层：把 codebuddy / opencode / omp 等编码 CLI 收敛到统一的调用契约。
 // 每个 adapter 描述：发现二进制的方式 + 如何把 (prompt, permissionMode, maxTurns) 翻译成 CLI 参数。
 
 export interface BuildArgsOptions {
@@ -11,8 +11,8 @@ export interface BuildArgsOptions {
 
 export interface BuiltinExecutor {
   /** 注册名，写入 .cbx.json 的 executor 字段或 --executor */
-  name: "codebuddy" | "opencode" | "pi" | "omp";
-  /** 别名，resolveExecutor 同样命中（oh-my-pi 是 pi 的扩展框架，非独立二进制） */
+  name: "codebuddy" | "opencode" | "omp";
+  /** 别名，resolveExecutor 同样命中（oh-my-pi 指向 omp，非独立二进制） */
   aliases: string[];
   /** 显示名，注入到提示词与用户可见的错误消息中 */
   label: string;
@@ -24,7 +24,7 @@ export interface BuiltinExecutor {
   buildArgs(opts: BuildArgsOptions): string[];
 }
 
-// permissionMode 中表示「自动放行」的语义值：opencode/pi 用各自的 flag 表达。
+// permissionMode 中表示「自动放行」的语义值：opencode 用 --auto 表达。
 const AUTO_MODES = new Set(["auto", "dontAsk"]);
 
 export const BUILTIN_EXECUTORS: readonly BuiltinExecutor[] = [
@@ -55,21 +55,9 @@ export const BUILTIN_EXECUTORS: readonly BuiltinExecutor[] = [
     },
   },
   {
-    name: "pi",
-    aliases: ["oh-my-pi"], // oh-my-pi 是 pi 的扩展框架，仍由 pi 二进制执行
-    label: "Pi",
-    envVar: "CBX_PI",
-    candidates: ["pi"],
-    buildArgs: ({ prompt, permissionMode }) => {
-      const args = ["-p", "--mode", "json", prompt];
-      if (AUTO_MODES.has(permissionMode)) args.push("-a");
-      return args;
-    },
-  },
-  {
     name: "omp",
-    aliases: ["oh-my-pi-omp"],
-    label: "omp",
+    aliases: ["oh-my-pi"], // oh-my-pi 是 omp 的扩展框架，仍由 omp 二进制执行
+    label: "Oh My Pi",
     envVar: "CBX_OMP",
     candidates: ["omp"],
     // omp 官方 CLI 文档未公开 permission/auto flag；非交互 -p 默认按 omp 自身权限行事。
