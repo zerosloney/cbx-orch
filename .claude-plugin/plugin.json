@@ -1,0 +1,37 @@
+{
+  "name": "cbx-orch",
+  "version": "0.9.0",
+  "description": "Durable coding-agent orchestrator: dispatch tasks to codebuddy/opencode/omp/cline with persistent jobs, queue, review, and rollback.",
+  "author": { "name": "dc", "url": "https://github.com/zerosloney/cbx-orch" },
+  "license": "MIT",
+  "skills": "skills",
+  "commands": "commands",
+  "hooks": "hooks",
+  "mcpServers": {
+    "cbx": {
+      "command": "cbx",
+      "args": ["mcp"],
+      "cwd": "${CLAUDE_PROJECT_DIR}",
+      "env": {
+        "CBX_WORKSPACE": "${CLAUDE_PROJECT_DIR}"
+      }
+    }
+  },
+  "userConfig": {
+    "executor": {
+      "type": "string",
+      "default": "codebuddy",
+      "description": "Default executor: codebuddy / opencode / omp / cline"
+    },
+    "review": {
+      "type": "boolean",
+      "default": true,
+      "description": "Run an independent review phase after tests pass."
+    },
+    "isolated": {
+      "type": "boolean",
+      "default": true,
+      "description": "Run tasks in an isolated git worktree to avoid polluting the main workspace."
+    }
+  }
+}

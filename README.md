@@ -253,6 +253,31 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 npm 发布包包含可直接运行的 `dist/` 编译产物；源码仓库不跟踪该目录。自行 clone 源码后，需先执行 `npm install && npm run build` 生成 `dist/`。还需至少安装一个执行器 CLI（codebuddy/opencode/omp/cline 之一）才能真正执行任务。注意：ZCode 的 Stop review-gate hook 直接引用插件目录内的 `dist/src/hooks/stop-review-gate.js`，从源码安装插件时同样必须先构建；否则该 hook 不生效（MCP server 不依赖插件目录内的 dist，只依赖全局 `cbx` 命令）。
 
+## Claude Code 插件
+
+cbx 同时是 Claude Code 市场插件（仓库含 `.claude-plugin/plugin.json` 与 `.claude-plugin/marketplace.json`，共用根目录 `commands/`、`skills/`、`hooks/`）。安装后自动注册 cbx MCP server，并提供斜杠命令和技能，无需手写 MCP 配置。
+
+### 安装
+
+```powershell
+# 1. 全局安装 cbx CLI（提供 cbx / cbx mcp 命令，依赖由 npm 自动解析）
+npm install -g cbx-orch
+
+# 2. 添加本仓库为市场源
+claude plugin marketplace add zerosloney/cbx-orch
+
+# 3. 安装 cbx-orch 插件
+claude plugin install cbx-orch@cbx-orch-marketplace
+```
+
+安装后重启 Claude Code 会话，插件 manifest 会调用全局安装的 `cbx mcp`，将 MCP server 自动以 `cbx` 名注册；工具暴露为 `mcp__cbx__cbx_*`。因此仅 clone 或安装插件目录并不足以启动 MCP，必须先确保全局 `cbx` 命令可用。
+
+斜杠命令、技能、用户配置与 ZCode 插件完全一致（见上文表格），区别仅在于宿主客户端：`executor` / `review` / `isolated` 在 Claude Code 设置中配置（对应 `userConfig`），工作区定位同样通过 `CBX_WORKSPACE=${CLAUDE_PROJECT_DIR}` 注入。
+
+### 前置依赖
+
+同 ZCode：npm 发布包含 `dist/`；从源码安装需先 `npm install && npm run build`。Claude Code 的 Stop review-gate hook 直接引用插件目录内的 `dist/src/hooks/stop-review-gate.js`，从源码安装时必须先构建；MCP server 只依赖全局 `cbx` 命令，不依赖插件目录内的 dist。
+
 ## 安全说明
 
 - 默认权限模式 `auto`。可通过 `--permission-mode` 或配置覆盖；`dontAsk` 需显式 `--dangerously-skip-permissions`。
