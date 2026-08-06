@@ -4,6 +4,19 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+## 0.10.2 - 2026-08-06
+
+- Fix: 以 `package.json` 作为运行时和 MCP 版本的唯一来源，并同步 Claude Code、ZCode 与 marketplace manifest，避免补丁版本发布漂移。
+- Fix: 取消任务会等待进程树退出，必要时升级为强制终止，只有确认退出后才清理 worktree 并写入 `cancelled`。
+- Fix: 子进程输出完整流式落盘、内存仅保留有界尾部，避免长任务输出耗尽编排器内存。
+- Fix: webhook 与 OTLP 改为 SQLite durable outbox 异步投递；状态写入不再等待网络重试。
+- Fix: `serve` 租约支持续期和 fencing token，worker heartbeat 周期更新并按时间判定失活。
+
+## 0.10.1 - 2026-08-06
+
+- Fix: approval gate 的 job 状态与队列终态在同一 SQLite transaction 中提交，避免后台批准任务被重复拉起。
+- Fix: executor 插件在执行顶层代码前校验 allowlist 和预期 SHA-256，关闭插件内容替换窗口。
+
 ## 0.10.0 - 2026-08-06
 
 - Feature: 新增 `cbx stop-review-gate` 子命令作为 Stop hook 入口，复用 `stopReviewGateHook`（检查 `reviewGate.enabled` / 读 stdin 的 cwd / 输出 decision / 永不非 0 退出的 fail-open 契约）。`hooks/hooks.json` 从 `node "${CLAUDE_PLUGIN_ROOT}/dist/src/hooks/stop-review-gate.js"` 改为 `cbx stop-review-gate`，不再依赖被 gitignore 排除的 dist 目录 —— 从 GitHub 源码安装插件时 Stop hook 不再失效。配套删除孤儿 `src/hooks/stop-review-gate.ts`。

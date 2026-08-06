@@ -3,8 +3,9 @@ import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { approveJob, cancelJob, createJob, jobDir, listArtifacts, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, readEventsIncremental, resumeQueue, retryQueueJob, startBackground, type TaskContract } from "./core.js";
 import { runReviewGate } from "./review-gate.js";
+import { APP_VERSION } from "./version.js";
 
-const serverInfo = { name: "cbx-orch", version: "0.10.0" };
+const serverInfo = { name: "cbx-orch", version: APP_VERSION };
 const EVIDENCE_ARTIFACTS = new Set(["handback.md", "complete.patch", "test.log", "review.md", "understanding.json"]);
 function send(id: unknown, result?: unknown, error?: unknown): void {
   const response: Record<string, unknown> = { jsonrpc: "2.0", id };

@@ -154,9 +154,9 @@ node dist/src/cli.js health --workspace .
 
 后台 worker 是 detached 进程。可使用常驻 `serve` 监护队列；它启动时会回收死 worker，仍可用 `dispatch` 供 cron/计划任务执行。
 
-`notifications.webhook` 接收任务状态事件；事件同时会写入 `.cbx/events.ndjson`。webhook 和 OTLP 都支持 `timeoutMs`、`maxRetries`、`retryBaseMs`，非 2xx 会失败并有限指数退避；最终失败会落到 `.cbx/delivery-failures.ndjson`，不会无限阻塞状态写入。任务 span 始终写入 `.cbx/telemetry.ndjson` 供本地排查；启用 `telemetry` 后才会按 OTLP/HTTP JSON 发送到配置的 endpoint。
+`notifications.webhook` 接收任务状态事件；事件同时会写入 `.cbx/events.ndjson`。webhook 和 OTLP 都支持 `timeoutMs`、`maxRetries`、`retryBaseMs`：待投递消息先进入 SQLite durable outbox，状态写入不等待网络；后台按有限指数退避投递，进程提前退出时由后续 cbx 进程继续处理。最终失败会落到 `.cbx/delivery-failures.ndjson`。任务 span 始终写入 `.cbx/telemetry.ndjson` 供本地排查；启用 `telemetry` 后才会按 OTLP/HTTP JSON 发送到配置的 endpoint。
 
-任务状态、队列和通知死信的权威数据存储在 `.cbx/state.sqlite`（WAL 模式、版本化 migration）；首次访问会无损导入旧的 `.cbx/jobs/*/state.json`、`queue.json` 和 `delivery-failures.ndjson`。这些 JSON/NDJSON artifact 会继续保留以便人工查看，但不再作为调度一致性的依据；worker 终态与对应队列条目、以及 retry 的状态重置与重新入队，均在同一 SQLite transaction 提交。常驻 `serve` 使用工作区单实例租约，发现另一个存活实例会拒绝启动。`/healthz` 与 `/api/metrics`、以及 `cbx health` 返回队列深度、任务状态计数、失败/重试与死信计数，且不包含任务正文。
+任务状态、队列、通知 outbox 和死信的权威数据存储在 `.cbx/state.sqlite`（WAL 模式、版本化 migration）；首次访问会无损导入旧的 `.cbx/jobs/*/state.json`、`queue.json` 和 `delivery-failures.ndjson`。这些 JSON/NDJSON artifact 会继续保留以便人工查看，但不再作为调度一致性的依据；worker 终态与对应队列条目、以及 retry 的状态重置与重新入队，均在同一 SQLite transaction 提交。常驻 `serve` 使用带续期与 fencing token 的工作区单实例租约，发现另一个存活实例会拒绝启动，丢失租约则主动停止。`/healthz` 与 `/api/metrics`、以及 `cbx health` 返回队列深度、任务状态计数、失败/重试、待投递和死信计数，且不包含任务正文。
 
 ## Executor 插件
 

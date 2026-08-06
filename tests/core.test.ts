@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
 import { approveJob, cancelJob, createJob, executeJob, health, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, readEventsIncremental, resumeQueue, retryQueueJob, serveQueue, startBackground } from "../src/core.js";
 import { runReviewGate, stopReviewGateHook } from "../src/review-gate.js";
-import { loadPersistedQueue, loadPersistedState, savePersistedStateAndQueue } from "../src/storage.js";
+import { acquireServiceLease, loadPersistedQueue, loadPersistedState, savePersistedStateAndQueue } from "../src/storage.js";
 import { BUILTIN_EXECUTORS, resolveExecutor } from "../src/executors/builtin.js";
 
 const fakeAgent = `
@@ -408,6 +408,18 @@ test("cancelling a queued job prevents it from running after queue resume", asyn
   assert.equal(existsSync(path.join(workspace, "fake-change.txt")), false);
 });
 
+test("cancelling a non-running job never trusts a stale pid artifact", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({ workspace, task: "陈旧 PID", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "stale-pid" });
+  const unrelated = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { windowsHide: true });
+  try {
+    assert.ok(unrelated.pid);
+    await writeFile(path.join(job.directory, "pid"), String(unrelated.pid), "utf8");
+    assert.equal((await cancelJob(workspace, job.jobId)).status, "cancelled");
+    assert.doesNotThrow(() => process.kill(unrelated.pid!, 0));
+  } finally { unrelated.kill("SIGKILL"); }
+});
+
 test("executeJob does not start a cancelled job and continue clears the marker", async () => {
   const { workspace } = await setupFake();
   const job = await createJob({ workspace, task: "取消后不启动", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "no-restart" });
@@ -754,7 +766,19 @@ test("persistent serve loop reclaims dead workers on startup and stops cleanly",
   }), "utf8");
   const service = await serveQueue(workspace, 50);
   assert.equal((await listQueue(workspace)).entries[0].status, "queued");
+  await assert.rejects(() => serveQueue(workspace, 50), /已有活跃 serve 实例/);
   await service.stop();
+});
+
+test("expired service leases fence the previous owner", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-lease-fencing-"));
+  const first = await acquireServiceLease(workspace, "test-lease", 80);
+  await assert.rejects(() => acquireServiceLease(workspace, "test-lease", 80), /已有活跃 serve 实例/);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const second = await acquireServiceLease(workspace, "test-lease", 80);
+  assert.equal(await first.renew(), false);
+  assert.equal(await second.renew(), true);
+  await second.release();
 });
 
 test("SQLite migrates legacy jobs, queue, and delivery failures without losing artifacts", async () => {
@@ -1017,4 +1041,20 @@ test("dispatchQueue reclaims a running entry whose worker never started (no hear
   const after = (await listQueue(workspace)).entries.find(e => e.queueId === "zombie-entry");
   // 进程虽活但无 heartbeat 且超 grace → 应回收（paused 阻止重 spawn，entry 应落到 queued）
   assert.equal(after?.status, "queued", "stale entry should be reclaimed to queued despite live pid");
+});
+
+test("dispatchQueue reclaims a live pid whose heartbeat stopped advancing", async () => {
+  const { workspace } = await setupFake();
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ maxConcurrent: 1 }), "utf8");
+  const job = await createJob({ workspace, task: "停止心跳", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "stale-heartbeat" });
+  const staleAt = new Date(Date.now() - 120_000);
+  const heartbeat = path.join(job.directory, "worker.heartbeat");
+  await writeFile(heartbeat, staleAt.toISOString(), "utf8");
+  await utimes(heartbeat, staleAt, staleAt);
+  await savePersistedStateAndQueue(workspace, job.jobId, { ...(await loadState(workspace, job.jobId)), status: "running" }, {
+    maxConcurrent: 1, paused: true, updatedAt: new Date().toISOString(),
+    entries: [{ queueId: "stale-heartbeat-entry", jobId: job.jobId, workspace, extra: "", status: "running", createdAt: staleAt.toISOString(), startedAt: staleAt.toISOString(), pid: process.pid, priority: 0 }],
+  });
+  await (await import("../src/core.js")).dispatchQueue(workspace);
+  assert.equal((await listQueue(workspace)).entries.find(entry => entry.queueId === "stale-heartbeat-entry")?.status, "queued");
 });

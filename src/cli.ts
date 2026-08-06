@@ -66,8 +66,21 @@ async function main(): Promise<void> {
       return;
     }
     const queueEntryId = option(args, "--queue-entry-id");
-    if (queueEntryId) await writeFile(path.join(jobDir(workspace, jobId!), "worker.heartbeat"), new Date().toISOString(), "utf8").catch(() => undefined);
-    const result = await executeJob(workspace, jobId!, option(args, "--message", ""), queueEntryId);
+    const workerPidFile = queueEntryId ? path.join(jobDir(workspace, jobId!), "pid") : undefined;
+    const heartbeatFile = queueEntryId ? path.join(jobDir(workspace, jobId!), "worker.heartbeat") : undefined;
+    if (heartbeatFile) await writeFile(heartbeatFile, new Date().toISOString(), "utf8").catch(() => undefined);
+    const heartbeat = heartbeatFile ? setInterval(() => { void writeFile(heartbeatFile, new Date().toISOString(), "utf8").catch(() => undefined); }, 10_000) : undefined;
+    heartbeat?.unref();
+    let result: Awaited<ReturnType<typeof executeJob>>;
+    try { result = await executeJob(workspace, jobId!, option(args, "--message", ""), queueEntryId); }
+    finally {
+      if (heartbeat) clearInterval(heartbeat);
+      if (heartbeatFile) await unlink(heartbeatFile).catch(() => undefined);
+      if (workerPidFile) {
+        const recordedPid = await readFile(workerPidFile, "utf8").catch(() => "");
+        if (Number(recordedPid) === process.pid) await unlink(workerPidFile).catch(() => undefined);
+      }
+    }
     print(result);
     if (has(args, "--ci") && result.status !== "done") process.exitCode = 2;
     return;
@@ -87,10 +100,11 @@ async function main(): Promise<void> {
   if (command === "serve") {
     const service = await serveQueue(workspace, Number(option(args, "--interval-ms", "30000")));
     print({ workspace, status: "serving" });
-    await new Promise<void>(resolve => {
-      const stop = () => { void service.stop().finally(resolve); };
-      process.once("SIGINT", stop); process.once("SIGTERM", stop);
+    const signal = new Promise<void>(resolve => {
+      process.once("SIGINT", () => resolve()); process.once("SIGTERM", () => resolve());
     });
+    await Promise.race([signal, service.done]);
+    await service.stop();
     return;
   }
   if (command === "logs") { console.log(await readArtifact(workspace, args[0], "events.ndjson")); return; }

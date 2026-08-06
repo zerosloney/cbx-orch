@@ -1,7 +1,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { loadRuntimeConfig, recordDeliveryFailure, redactSensitive, type RuntimeConfig } from "./storage.js";
+import { claimPendingDelivery, completeDelivery, enqueueDelivery, loadRuntimeConfig, nextPendingDeliveryAt, recordDeliveryFailure, redactSensitive, rescheduleDelivery, type PendingDelivery, type RuntimeConfig } from "./storage.js";
 
 interface DeliveryConfig { timeoutMs?: number; maxRetries?: number; retryBaseMs?: number; }
 interface NotificationConfig extends DeliveryConfig { webhook?: string; }
@@ -29,26 +29,78 @@ function deliveryOptions(config: DeliveryConfig): Required<DeliveryConfig> {
   return { timeoutMs, maxRetries, retryBaseMs };
 }
 
-async function deliver(workspace: string, channel: "webhook" | "otlp", endpoint: string, body: unknown, deliveryConfig: DeliveryConfig): Promise<void> {
-  const options = deliveryOptions(deliveryConfig);
-  let lastError = "";
-  for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
-    try {
-      const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return;
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      if (attempt < options.maxRetries) await new Promise(resolve => setTimeout(resolve, options.retryBaseMs * 2 ** attempt));
-    } finally { clearTimeout(timeout); }
-  }
-  const runtime = await config(workspace);
-  const failure = redactSensitive({ type: "delivery.failed", at: isoNow(), channel, endpoint, attempts: options.maxRetries + 1, error: lastError, body }, runtime.governance?.redactFields) as Record<string, unknown>;
-  await append(workspace, "delivery-failures.ndjson", failure);
-  await recordDeliveryFailure(workspace, failure);
-  console.error(`cbx: ${channel} 投递失败（已重试 ${options.maxRetries} 次）：${lastError}`);
+async function deliverOnce(delivery: PendingDelivery): Promise<void> {
+  const options = deliveryOptions(delivery.config);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+  try {
+    const response = await fetch(delivery.endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(delivery.body), signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  } finally { clearTimeout(timeout); }
+}
+
+const drainTasks = new Map<string, Promise<number>>();
+const scheduledDrains = new Map<string, { timer: ReturnType<typeof setTimeout>; due: number }>();
+
+function scheduleDeliveryDrain(workspace: string, delayMs = 0): void {
+  const due = Date.now() + Math.max(0, delayMs);
+  const existing = scheduledDrains.get(workspace);
+  if (existing && existing.due <= due) return;
+  if (existing) clearTimeout(existing.timer);
+  const timer = setTimeout(() => {
+    scheduledDrains.delete(workspace);
+    void flushDeliveries(workspace).catch(error => console.error(`cbx: outbox 投递失败：${error instanceof Error ? error.message : error}`));
+  }, Math.max(0, due - Date.now()));
+  timer.unref();
+  scheduledDrains.set(workspace, { timer, due });
+}
+
+/** Drain durable notifications. State transitions only enqueue; callers may await this explicitly for shutdown/tests. */
+export function flushDeliveries(workspace: string, waitForRetries = false, limit = 100): Promise<number> {
+  const current = drainTasks.get(workspace);
+  if (current) return waitForRetries ? current.then(() => flushDeliveries(workspace, true, limit)) : current;
+  const task = (async () => {
+    const owner = `${process.pid}-${id(8)}`;
+    let processed = 0;
+    while (processed < limit) {
+      const delivery = await claimPendingDelivery(workspace, owner, 130_000);
+      if (!delivery) {
+        const next = await nextPendingDeliveryAt(workspace);
+        if (waitForRetries && next !== undefined && next > Date.now()) {
+          await new Promise(resolve => setTimeout(resolve, next - Date.now()));
+          continue;
+        }
+        if (next !== undefined) scheduleDeliveryDrain(workspace, Math.max(0, next - Date.now()));
+        break;
+      }
+      try {
+        await deliverOnce(delivery);
+        await completeDelivery(workspace, delivery.id, owner);
+        processed += 1;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const options = deliveryOptions(delivery.config);
+        const attempts = delivery.attempts + 1;
+        if (attempts > options.maxRetries) {
+          const runtime = await config(workspace);
+          const failure = redactSensitive({ type: "delivery.failed", at: isoNow(), channel: delivery.channel, endpoint: delivery.endpoint, attempts, error: message, body: delivery.body }, runtime.governance?.redactFields) as Record<string, unknown>;
+          await append(workspace, "delivery-failures.ndjson", failure);
+          await recordDeliveryFailure(workspace, failure);
+          await completeDelivery(workspace, delivery.id, owner);
+          console.error(`cbx: ${delivery.channel} 投递失败（已重试 ${options.maxRetries} 次）：${message}`);
+          processed += 1;
+          continue;
+        }
+        const delay = options.retryBaseMs * 2 ** delivery.attempts;
+        await rescheduleDelivery(workspace, delivery.id, owner, attempts, Date.now() + delay, message);
+        if (waitForRetries) await new Promise(resolve => setTimeout(resolve, delay));
+        else { scheduleDeliveryDrain(workspace, delay); break; }
+      }
+    }
+    return processed;
+  })();
+  drainTasks.set(workspace, task);
+  return task.finally(() => { if (drainTasks.get(workspace) === task) drainTasks.delete(workspace); });
 }
 
 const eventChains = new Map<string, Promise<void>>();
@@ -61,7 +113,8 @@ export async function publishEvent(workspace: string, type: string, payload: Rec
     const redacted = redactSensitive(event, current.governance?.redactFields) as typeof event;
     await append(workspace, "events.ndjson", redacted);
     if (current.notifications?.webhook) {
-      await deliver(workspace, "webhook", current.notifications.webhook, redacted, current.notifications);
+      await enqueueDelivery(workspace, { channel: "webhook", endpoint: current.notifications.webhook, body: redacted, config: current.notifications });
+      scheduleDeliveryDrain(workspace);
     }
   });
   eventChains.set(workspace, currentTask);
@@ -84,5 +137,6 @@ export async function finishSpan(workspace: string, span: SpanHandle, status: st
   const endNs = String(endedAt * 1_000_000);
   const attributesList = Object.entries(spanRecord.attributes).map(([key, value]) => ({ key, value: typeof value === "boolean" ? { boolValue: value } : typeof value === "number" ? { intValue: String(value) } : { stringValue: String(value) } }));
   const payload = { resourceSpans: [{ resource: { attributes: [{ key: "service.name", value: { stringValue: current.telemetry.serviceName ?? "cbx-orchestrator" } }] }, scopeSpans: [{ spans: [{ traceId: span.traceId, spanId: span.spanId, name: span.name, startTimeUnixNano: startNs, endTimeUnixNano: endNs, attributes: attributesList, status: { code: status === "ok" ? 1 : 2 } }] }] }] };
-  await deliver(workspace, "otlp", current.telemetry.endpoint, payload, current.telemetry);
+  await enqueueDelivery(workspace, { channel: "otlp", endpoint: current.telemetry.endpoint, body: payload, config: current.telemetry });
+  scheduleDeliveryDrain(workspace);
 }

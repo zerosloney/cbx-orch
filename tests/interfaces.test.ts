@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createJob, executeJob, loadState, readArtifact } from "../src/core.js";
+import { createJob, executeJob, health, loadState, readArtifact } from "../src/core.js";
 import { createWebUiServer } from "../src/ui.js";
-import { finishSpan, publishEvent, startSpan } from "../src/observability.js";
+import { finishSpan, flushDeliveries, publishEvent, startSpan } from "../src/observability.js";
+import { MAX_CAPTURE_BYTES, runProcess, terminateTree } from "../src/process-runner.js";
+import { APP_VERSION } from "../src/version.js";
 
 async function closeServer(server: ReturnType<typeof createWebUiServer>): Promise<void> {
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
@@ -163,6 +165,27 @@ test("events remain ordered and webhook failures do not reject state notificatio
   assert.deepEqual(lines.map(line => line.payload.sequence), Array.from({ length: 12 }, (_, index) => index));
 });
 
+test("webhook delivery is queued without blocking the state event writer", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-async-delivery-"));
+  let requests = 0;
+  const server = createServer((_request, response) => {
+    requests += 1;
+    setTimeout(() => response.end("ok"), 600);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ notifications: { webhook: `http://127.0.0.1:${port}`, timeoutMs: 2_000, maxRetries: 0 } }), "utf8");
+  try {
+    const startedAt = Date.now();
+    await publishEvent(workspace, "test.async", {});
+    assert.ok(Date.now() - startedAt < 400, "publishEvent should not await the remote response");
+    assert.equal((await health(workspace)).metrics.pendingDeliveries, 1);
+    await flushDeliveries(workspace, true);
+    assert.equal(requests, 1);
+    assert.equal((await health(workspace)).metrics.pendingDeliveries, 0);
+  } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+});
+
 test("webhook and OTLP retry non-2xx responses then persist delivery failures", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-delivery-"));
   const requests = { webhook: 0, otlp: 0 };
@@ -180,6 +203,7 @@ test("webhook and OTLP retry non-2xx responses then persist delivery failures", 
   try {
     await publishEvent(workspace, "test.delivery", {});
     await finishSpan(workspace, startSpan("test.delivery"), "ok");
+    await flushDeliveries(workspace, true);
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   assert.equal(requests.webhook, 3);
   assert.equal(requests.otlp, 3);
@@ -195,10 +219,52 @@ test("governance redacts configured fields from event artifacts and webhook payl
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ notifications: { webhook: `http://127.0.0.1:${port}` }, governance: { retentionDays: 7, redactFields: ["token", "password"] } }), "utf8");
-  try { await publishEvent(workspace, "test.redaction", { token: "top-secret", nested: { password: "hidden" } }); }
+  try {
+    await publishEvent(workspace, "test.redaction", { token: "top-secret", nested: { password: "hidden" } });
+    await flushDeliveries(workspace, true);
+  }
   finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   const events = await readFile(path.join(workspace, ".cbx", "events.ndjson"), "utf8");
   assert.doesNotMatch(events, /top-secret|hidden/);
   assert.doesNotMatch(received, /top-secret|hidden/);
   assert.match(events, /\[REDACTED\]/);
+});
+
+test("runtime and plugin manifests share the package patch version", async () => {
+  const root = path.resolve(".");
+  const readVersion = async (file: string, marketplace = false): Promise<string> => {
+    const value = JSON.parse(await readFile(path.join(root, file), "utf8")) as { version?: string; plugins?: Array<{ version?: string }> };
+    return marketplace ? String(value.plugins?.[0]?.version) : String(value.version);
+  };
+  const packageVersion = await readVersion("package.json");
+  assert.equal(APP_VERSION, packageVersion);
+  assert.equal(await readVersion("marketplace.json", true), packageVersion);
+  assert.equal(await readVersion(".claude-plugin/plugin.json"), packageVersion);
+  assert.equal(await readVersion(".claude-plugin/marketplace.json", true), packageVersion);
+  assert.equal(await readVersion(".zcode-plugin/plugin.json"), packageVersion);
+});
+
+test("process output is fully logged while memory capture keeps only a bounded tail", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-output-limit-"));
+  const logFile = path.join(workspace, "process.log");
+  const expectedBytes = MAX_CAPTURE_BYTES + 32_768;
+  const result = await runProcess(process.execPath, ["-e", `process.stdout.write("x".repeat(${expectedBytes}))`], workspace, 10_000, logFile);
+  assert.equal(result.code, 0);
+  assert.equal(result.outputTruncated, true);
+  assert.ok(Buffer.byteLength(result.output) <= MAX_CAPTURE_BYTES);
+  assert.equal((await stat(logFile)).size, expectedBytes);
+});
+
+test("terminateTree escalates and confirms a resistant process has exited", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-terminate-tree-"));
+  const pidFile = path.join(workspace, "active.pid");
+  const running = runProcess(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], workspace, 20_000, undefined, pidFile);
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    try { await stat(pidFile); break; } catch { await new Promise(resolve => setTimeout(resolve, 20)); }
+  }
+  const pid = Number(await readFile(pidFile, "utf8"));
+  assert.equal(await terminateTree(pid, 100, 2_000), true);
+  const result = await running;
+  assert.notEqual(result.code, 0);
 });

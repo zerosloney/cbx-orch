@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { appendFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,10 +7,11 @@ import { finishSpan, publishEvent, startSpan } from "./observability.js";
 import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from "./executor.js";
 import { findExecutable, resolveExecutor } from "./executors/builtin.js";
 import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, redactText, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, withFileLock, type RuntimeConfig } from "./storage.js";
-import { killTree, runProcess, runShell, type ProcessResult } from "./process-runner.js";
+import { runProcess, runShell, terminateTree, type ProcessResult } from "./process-runner.js";
 import { cleanupRecordedWorktree, collectDiff, commitWorktree, gitDirtyFingerprint, gitRoot, prepareWorktree, snapshotDiff, snapshotGitBaseline, type GitBaseline } from "./git-ops.js";
 import * as queue from "./queue.js";
 import type { QueueEntry, QueueFile, QueueRuntime } from "./queue.js";
+import { APP_VERSION } from "./version.js";
 export type { QueueEntry, QueueEntryStatus, QueueFile } from "./queue.js";
 
 export type Json = Record<string, unknown>;
@@ -79,8 +80,6 @@ export interface JobState {
   attempt: number;
   [key: string]: unknown;
 }
-
-const APP_VERSION = "0.10.0";
 
 /** 把降级路径的失败原因落到 job 事件流，避免裸吞导致排障无据。 */
 function logJobEvent(workspace: string, jobId: string, event: string, detail: Record<string, unknown> = {}): void {
@@ -320,15 +319,23 @@ export async function invokeExecutor(executor: string, workspace: string, direct
   appendFileSync(path.join(directory, "events.ndjson"), JSON.stringify({ event: "executor_metadata", source: identity.source, name: identity.name, version: identity.version, apiVersion: identity.apiVersion, capabilities: identity.capabilities, sha256: identity.sha256, at: now() }) + "\n", "utf8");
   appendFileSync(path.join(directory, "events.ndjson"), JSON.stringify({ event: "plugin_started", executor: identity.name, at: now() }) + "\n", "utf8");
   const requestFile = path.join(directory, "plugin-request.json");
+  const resultFile = path.join(directory, "plugin-result.json");
   await saveJson(requestFile, request);
   const host = path.join(path.dirname(fileURLToPath(import.meta.url)), "plugin-host.js");
-  const processResult = await runProcess(process.execPath, [host, executor, workspace, requestFile], workdir, timeoutMs, path.join(directory, "agent.log"), path.join(directory, "active.pid"));
+  const processResult = await runProcess(process.execPath, [host, executor, workspace, requestFile, resultFile], workdir, timeoutMs, path.join(directory, "agent.log"), path.join(directory, "active.pid"));
   let pluginResult: ExecutorResult = { code: processResult.code, timedOut: processResult.timedOut, output: processResult.output };
-  const marker = /CBX_PLUGIN_RESULT=([A-Za-z0-9+/=]+)/g;
-  const matches = [...processResult.output.matchAll(marker)];
-  if (!processResult.timedOut && matches.length) {
-    try { pluginResult = JSON.parse(Buffer.from(matches.at(-1)![1], "base64").toString("utf8")) as ExecutorResult; }
+  if (!processResult.timedOut && existsSync(resultFile)) {
+    try { pluginResult = JSON.parse(await readFile(resultFile, "utf8")) as ExecutorResult; }
     catch { pluginResult = { code: -1, output: "executor plugin returned an invalid result" }; }
+    finally { await unlink(resultFile).catch(() => undefined); }
+  } else {
+    // Compatibility fallback for an older plugin-host.js left in a development dist directory.
+    const marker = /CBX_PLUGIN_RESULT=([A-Za-z0-9+/=]+)/g;
+    const matches = [...processResult.output.matchAll(marker)];
+    if (!processResult.timedOut && matches.length) {
+      try { pluginResult = JSON.parse(Buffer.from(matches.at(-1)![1], "base64").toString("utf8")) as ExecutorResult; }
+      catch { pluginResult = { code: -1, output: "executor plugin returned an invalid result" }; }
+    }
   }
   const normalized = { code: Number(pluginResult.code ?? processResult.code), timedOut: processResult.timedOut || Boolean(pluginResult.timedOut), output: String(pluginResult.output ?? processResult.output) };
   appendFileSync(path.join(directory, "events.ndjson"), JSON.stringify({ event: "plugin_finished", executor, code: normalized.code, timedOut: normalized.timedOut, at: now() }) + "\n", "utf8");
@@ -337,8 +344,10 @@ export async function invokeExecutor(executor: string, workspace: string, direct
 
 async function runTest(directory: string, workdir: string, command: string | undefined, timeoutMs: number): Promise<ProcessResult> {
   if (!command) { await writeFile(path.join(directory, "test.log"), "未指定测试命令。\n", "utf8"); return { code: 0, timedOut: false, output: "" }; }
-  const result = await runShell(command, workdir, timeoutMs);
-  await writeFile(path.join(directory, "test.log"), `$ ${command}\n\n${result.output}\n退出码：${result.code}\n超时：${result.timedOut}\n`, "utf8");
+  const logFile = path.join(directory, "test.log");
+  await writeFile(logFile, `$ ${command}\n\n`, "utf8");
+  const result = await runShell(command, workdir, timeoutMs, logFile, path.join(directory, "active.pid"));
+  await appendFile(logFile, `\n退出码：${result.code}\n超时：${result.timedOut}\n内存输出已截断：${Boolean(result.outputTruncated)}\n`, "utf8");
   return result;
 }
 
@@ -813,13 +822,28 @@ export async function startBackground(workspaceInput: string, jobId: string, ext
 export async function cancelJob(workspaceInput: string, jobId: string): Promise<JobState> {
   const workspace = path.resolve(workspaceInput);
   const directory = jobDir(workspace, jobId);
+  const stateBeforeCancel = await loadState(workspace, jobId);
+  const processIds = new Set<number>();
+  if (stateBeforeCancel.status === "running") {
+    const activePid = Number(await readFile(path.join(directory, "active.pid"), "utf8").catch(() => ""));
+    if (Number.isSafeInteger(activePid) && activePid > 0) processIds.add(activePid);
+  }
+  try {
+    const queueBeforeCancel = await listQueue(workspace);
+    for (const entry of queueBeforeCancel.entries.filter(item => item.jobId === jobId && item.status === "running")) {
+      if (Number.isSafeInteger(entry.pid) && Number(entry.pid) > 0) processIds.add(Number(entry.pid));
+    }
+  } catch (error) { logJobEvent(workspace, jobId, "queue_snapshot_failed", { error: error instanceof Error ? error.message : String(error) }); }
   await writeFile(path.join(directory, "cancel.requested"), now(), "utf8");
-  for (const file of [path.join(directory, "active.pid"), path.join(directory, "pid")]) {
-    if (!existsSync(file)) continue;
-    const pid = Number(await readFile(file, "utf8"));
-    killTree(pid, "SIGTERM");
+  try { await cancelQueueEntries(workspace, jobId); } catch (error) { logJobEvent(workspace, jobId, "queue_cancel_failed", { error: error instanceof Error ? error.message : String(error) }); }
+  const survivors: number[] = [];
+  for (const pid of processIds) {
+    if (!await terminateTree(pid)) survivors.push(pid);
+  }
+  if (survivors.length > 0) {
+    logJobEvent(workspace, jobId, "cancel_process_survived", { pids: survivors });
+    return writeState(workspace, jobId, { status: "needs_fix", phase: "cancel_failed", error: `无法确认进程树已退出：${survivors.join(", ")}` });
   }
   try { await cleanupWorktree(workspace, jobId); } catch (error) { logJobEvent(workspace, jobId, "cleanup_failed", { phase: "cancel", error: error instanceof Error ? error.message : String(error) }); }
-  try { await cancelQueueEntries(workspace, jobId); } catch (error) { logJobEvent(workspace, jobId, "queue_cancel_failed", { error: error instanceof Error ? error.message : String(error) }); }
   return writeState(workspace, jobId, { status: "cancelled", phase: "cancelled", cancelledAt: now() });
 }

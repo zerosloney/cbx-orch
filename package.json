@@ -1,6 +1,6 @@
 {
   "name": "cbx-orch",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "license": "MIT",
   "private": false,
   "publishConfig": {
@@ -49,5 +49,8 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
   }
 }

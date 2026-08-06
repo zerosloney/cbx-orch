@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync } from "node:fs";
-import { unlink, writeFile } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
+import { stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireServiceLease, loadPersistedQueue, now, processAlive, savePersistedQueue, withFileLock } from "./storage.js";
@@ -27,7 +27,7 @@ export interface QueueRuntime {
   jobDir(workspace: string, jobId: string): string;
 }
 
-export interface QueueService { stop(): Promise<void>; }
+export interface QueueService { done: Promise<void>; stop(): Promise<void>; }
 
 function queueLockFile(workspace: string): string { return path.join(workspace, ".cbx", "queue.lock"); }
 
@@ -56,6 +56,8 @@ function configuredConcurrency(value: number | undefined): number {
 
 // intentional-simple: worker 起步 + worktree 创建 + executor spawn 应 < 60s。超过仍无 heartbeat 视为僵尸（pid 复用或 spawn ENOENT 后 pid 被复用）。
 const WORKER_HEARTBEAT_GRACE_MS = 60_000;
+const WORKER_HEARTBEAT_STALE_MS = 45_000;
+const SERVICE_LEASE_TTL_MS = 45_000;
 
 async function spawnQueueWorker(runtime: QueueRuntime, workspace: string, entry: QueueEntry): Promise<number> {
   const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli.js");
@@ -77,8 +79,12 @@ export async function dispatchQueue(runtime: QueueRuntime, workspaceInput: strin
       for (const entry of queue.entries.filter(item => item.status === "running")) {
         // 双重回收校验：pid 不存活 OR 有 pid 但无 heartbeat 且超 grace（pid 复用 / spawn ENOENT 后 pid 被复用）。
         const heartbeatFile = path.join(runtime.jobDir(workspace, entry.jobId), "worker.heartbeat");
+        let heartbeatModifiedAt: number | undefined;
+        try { heartbeatModifiedAt = (await stat(heartbeatFile)).mtimeMs; } catch { /* worker may not have started */ }
+        const startedAt = Date.parse(entry.startedAt ?? entry.createdAt);
         const stale = !processAlive(entry.pid)
-          || (!existsSync(heartbeatFile) && entry.startedAt && Date.now() - Date.parse(entry.startedAt) > WORKER_HEARTBEAT_GRACE_MS);
+          || (heartbeatModifiedAt === undefined && Number.isFinite(startedAt) && Date.now() - startedAt > WORKER_HEARTBEAT_GRACE_MS)
+          || (heartbeatModifiedAt !== undefined && Date.now() - heartbeatModifiedAt > WORKER_HEARTBEAT_STALE_MS);
         if (!stale) continue;
         try {
           const state = await runtime.loadState(workspace, entry.jobId);
@@ -110,7 +116,9 @@ export async function dispatchQueue(runtime: QueueRuntime, workspaceInput: strin
 export async function serveQueue(runtime: QueueRuntime, workspaceInput: string, intervalMs = 30_000): Promise<QueueService> {
   if (!Number.isInteger(intervalMs) || intervalMs < 50) throw new Error("serve intervalMs 必须是不小于 50ms 的整数。");
   let stopping = false;
-  const releaseLease = await acquireServiceLease(workspaceInput, "queue-serve");
+  let resolveDone!: () => void;
+  const done = new Promise<void>(resolve => { resolveDone = resolve; });
+  const lease = await acquireServiceLease(workspaceInput, "queue-serve", SERVICE_LEASE_TTL_MS);
   let inFlight: Promise<void> | undefined;
   const tick = (): Promise<void> => {
     if (stopping || inFlight) return inFlight ?? Promise.resolve();
@@ -122,7 +130,18 @@ export async function serveQueue(runtime: QueueRuntime, workspaceInput: string, 
   };
   await tick();
   const timer = setInterval(() => { void tick(); }, intervalMs);
-  return { async stop(): Promise<void> { stopping = true; clearInterval(timer); await inFlight; await releaseLease(); } };
+  const leaseTimer = setInterval(() => {
+    void lease.renew().then(owned => {
+      if (owned || stopping) return;
+      stopping = true;
+      clearInterval(timer);
+      clearInterval(leaseTimer);
+      console.error("cbx: serve 租约已丢失，停止调度以避免双主。");
+      resolveDone();
+    }).catch(error => console.error(`cbx: serve 租约续期失败：${error instanceof Error ? error.message : error}`));
+  }, Math.floor(SERVICE_LEASE_TTL_MS / 3));
+  leaseTimer.unref();
+  return { done, async stop(): Promise<void> { stopping = true; clearInterval(timer); clearInterval(leaseTimer); await inFlight; await lease.release(); resolveDone(); } };
 }
 
 export async function enqueueJob(runtime: QueueRuntime, workspaceInput: string, jobId: string, extra = "", priority = 0): Promise<QueueEntry> {
@@ -170,12 +189,12 @@ export async function pauseQueue(_runtime: QueueRuntime, workspaceInput: string)
   return withQueueLock(workspace, async () => { const queue = await loadQueue(workspace); queue.paused = true; await saveQueue(workspace, queue); return queue; });
 }
 
-/** 把某任务仍处于 queued/running 的队列条目标记为 cancelled，阻止调度器继续启动它。 */
+/** 把某任务仍处于 queued/running/awaiting_approval 的队列条目标记为 cancelled。 */
 export async function cancelQueueEntries(runtime: QueueRuntime, workspaceInput: string, jobId: string): Promise<QueueFile> {
   const workspace = path.resolve(workspaceInput);
   return withQueueLock(workspace, async () => {
     const queue = await loadQueue(workspace);
-    for (const entry of queue.entries.filter(item => item.jobId === jobId && ["queued", "running"].includes(item.status))) {
+    for (const entry of queue.entries.filter(item => item.jobId === jobId && ["queued", "running", "awaiting_approval"].includes(item.status))) {
       entry.status = "cancelled";
       entry.finishedAt = now();
       entry.pid = undefined;
