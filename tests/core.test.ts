@@ -8,7 +8,7 @@ import test from "node:test";
 import Database from "better-sqlite3";
 import { approveJob, cancelJob, createJob, executeJob, health, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, readEventsIncremental, resumeQueue, retryQueueJob, serveQueue, startBackground } from "../src/core.js";
 import { runReviewGate, stopReviewGateHook } from "../src/review-gate.js";
-import { loadPersistedQueue, savePersistedStateAndQueue } from "../src/storage.js";
+import { loadPersistedQueue, loadPersistedState, savePersistedStateAndQueue } from "../src/storage.js";
 import { BUILTIN_EXECUTORS, resolveExecutor } from "../src/executors/builtin.js";
 
 const fakeAgent = `
@@ -855,6 +855,13 @@ test("reviewGate config field is accepted and rejects unknown nested keys", asyn
   await assert.rejects(() => loadConfig(workspace), /reviewGate 不支持字段：unknown/);
 });
 
+test("stopReviewGateHook fail-open 放行当 .cbx.json 非法（loadConfig 抛异常不逃逸）", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-gate-bad-config-"));
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ reviewGate: { unknown: 1 } }), "utf8");
+  const decision = await stopReviewGateHook(workspace);
+  assert.equal(decision, null);
+});
+
 test("multi-stage chain runs each stage with its own executor and accumulates stage reports", async () => {
   const { workspace, script } = await setupFake();
   process.env.CBX_OPENCODE = script;
@@ -929,4 +936,61 @@ test("mid-chain stage failure preserves earlier stage reports in result.json", a
   assert.equal(result.stages[0].exitCode, 0);
   assert.equal(result.stages[1].name, "b");
   assert.equal(result.stages[1].exitCode, 1);
+});
+
+test("createJob rejects jobId that exists in SQLite but has no directory (legacy import collision)", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-collision-"));
+  // 先建一个 job，让它在 SQLite 里有记录
+  const first = await createJob({ workspace, task: "原始", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "collide" });
+  assert.ok((await loadPersistedState(workspace, "collide")));
+  // 模拟用户手清目录但 SQLite 记录仍在
+  const { rmSync } = await import("node:fs");
+  rmSync(first.directory, { recursive: true, force: true });
+  assert.equal(existsSync(first.directory), false);
+  // 同 jobId 建新 job 应拒绝，而非静默覆盖
+  await assert.rejects(
+    () => createJob({ workspace, task: "覆盖", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "collide" }),
+    /任务已存在（SQLite 有记录但目录缺失）/,
+  );
+  // 确认未覆盖：旧 state 仍在（虽然目录没了，SQLite 记录未被新 createJob 改动）
+  const stillThere = await loadPersistedState<{ task?: string }>(workspace, "collide");
+  assert.ok(stillThere, "SQLite record should remain untouched");
+});
+
+test("retryQueueJob produces no duplicate entries for the same jobId", async () => {
+  const { workspace } = await setupFake();
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ maxConcurrent: 1 }), "utf8");
+  await pauseQueue(workspace);
+  const job = await createJob({ workspace, task: "重试无重复", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "no-dup" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  process.env.FAKE_EXIT_SEQUENCE = "1";
+  await startBackground(workspace, job.jobId);
+  await resumeQueue(workspace);
+  const failedDeadline = Date.now() + 5_000;
+  while (Date.now() < failedDeadline && (await loadState(workspace, job.jobId)).status !== "failed") await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal((await loadState(workspace, job.jobId)).status, "failed");
+  process.env.FAKE_EXIT_SEQUENCE = "0";
+  const retry = await retryQueueJob(workspace, job.jobId);
+  assert.equal(retry.status, "queued");
+  // 该 jobId 的 queued/running entry 必须恰好 1 个（无老 entry 并存）
+  const active = (await listQueue(workspace)).entries.filter(e => e.jobId === job.jobId && ["queued", "running"].includes(e.status));
+  assert.equal(active.length, 1, "should have exactly one active entry after retry");
+});
+
+test("dispatchQueue reclaims a running entry whose worker never started (no heartbeat, past grace)", async () => {
+  const { workspace } = await setupFake();
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ maxConcurrent: 1 }), "utf8");
+  const job = await createJob({ workspace, task: "僵尸 worker", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "zombie" });
+  // 手工注入一个 running entry，pid 指向当前进程（processAlive=true）但无 heartbeat 且 startedAt 远超 grace
+  const fakeOldStartedAt = new Date(Date.now() - 120_000).toISOString();
+  await savePersistedStateAndQueue(workspace, job.jobId, { ...(await loadState(workspace, job.jobId)), status: "running" }, {
+    maxConcurrent: 1, paused: true, updatedAt: new Date().toISOString(),
+    entries: [{ queueId: "zombie-entry", jobId: job.jobId, workspace, extra: "", status: "running", createdAt: fakeOldStartedAt, startedAt: fakeOldStartedAt, pid: process.pid, priority: 0 }],
+  });
+  // 确认无 heartbeat 文件
+  assert.equal(existsSync(path.join(job.directory, "worker.heartbeat")), false);
+  await (await import("../src/core.js")).dispatchQueue(workspace);
+  const after = (await listQueue(workspace)).entries.find(e => e.queueId === "zombie-entry");
+  // 进程虽活但无 heartbeat 且超 grace → 应回收（paused 阻止重 spawn，entry 应落到 queued）
+  assert.equal(after?.status, "queued", "stale entry should be reclaimed to queued despite live pid");
 });

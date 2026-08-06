@@ -251,7 +251,7 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 ### 前置依赖
 
-npm 发布包包含可直接运行的 `dist/` 编译产物；源码仓库不跟踪该目录。自行 clone 源码后，需先执行 `npm install && npm run build` 生成 `dist/`。还需至少安装一个执行器 CLI（codebuddy/opencode/omp/cline 之一）才能真正执行任务。注意：ZCode 的 Stop review-gate hook 直接引用插件目录内的 `dist/src/hooks/stop-review-gate.js`，从源码安装插件时同样必须先构建；否则该 hook 不生效（MCP server 不依赖插件目录内的 dist，只依赖全局 `cbx` 命令）。
+npm 发布包包含可直接运行的 `dist/` 编译产物；源码仓库不跟踪该目录。自行 clone 源码后，需先执行 `npm install && npm run build` 生成 `dist/`。还需至少安装一个执行器 CLI（codebuddy/opencode/omp/cline 之一）才能真正执行任务。Stop review-gate hook 通过 `cbx stop-review-gate` 子命令调用，只依赖全局 `cbx` 命令，不依赖插件目录内的 dist；MCP server 同样只依赖全局 `cbx` 命令。
 
 ## Claude Code 插件
 
@@ -276,7 +276,7 @@ claude plugin install cbx-orch@cbx-orch-marketplace
 
 ### 前置依赖
 
-同 ZCode：npm 发布包含 `dist/`；从源码安装需先 `npm install && npm run build`。Claude Code 的 Stop review-gate hook 直接引用插件目录内的 `dist/src/hooks/stop-review-gate.js`，从源码安装时必须先构建；MCP server 只依赖全局 `cbx` 命令，不依赖插件目录内的 dist。
+同 ZCode：npm 发布包含 `dist/`；从源码安装需先 `npm install && npm run build`。Stop review-gate hook 通过 `cbx stop-review-gate` 子命令调用，只依赖全局 `cbx` 命令，不依赖插件目录内的 dist；MCP server 同样只依赖全局 `cbx` 命令。
 
 ## 安全说明
 

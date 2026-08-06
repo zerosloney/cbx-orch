@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/src/hooks/stop-review-gate.js\"",
+            "command": "cbx stop-review-gate",
             "timeout": 900
           }
         ]

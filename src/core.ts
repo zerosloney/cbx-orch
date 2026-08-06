@@ -251,6 +251,9 @@ export async function createJob(options: {
   const jobId = normalizeJobId(options.jobId);
   const directory = jobDir(workspace, jobId);
   if (existsSync(directory)) throw new Error(`任务已存在：${jobId}`);
+  // legacy 导入可能把 .cbx/jobs/<id>/ 目录清掉但 SQLite 记录仍在；仅查目录会让同 jobId 静默覆盖旧 state。
+  const persisted = await loadPersistedState<unknown>(workspace, jobId);
+  if (persisted) throw new Error(`任务已存在（SQLite 有记录但目录缺失）：${jobId}`);
   await mkdir(directory, { recursive: true });
   const request = `# 任务\n\n## 目标\n\n${taskContract?.goal ?? options.task.trim()}\n\n## 验收标准\n\n${taskContract?.acceptanceCriteria?.map(item => `- ${item}`).join("\n") || "- 以目标和验收命令为准。"}\n\n## 非目标\n\n${taskContract?.nonGoals?.map(item => `- ${item}`).join("\n") || "- 未指定。"}\n\n## 约束\n\n${taskContract?.constraints?.map(item => `- ${item}`).join("\n") || "- 只修改完成目标所需的文件。"}\n\n## 验收命令\n\n${options.testCommand ?? "未指定；请根据项目现有脚本选择最相关的检查。"}\n\n## 执行规则\n\n- 先检查项目结构和现有测试，再修改。\n- 完成后运行验收命令。\n- 将修改摘要、测试命令、测试结果和遗留问题写入 handback.md。\n`;
   await writeFile(path.join(directory, "request.md"), request, "utf8");
@@ -746,7 +749,7 @@ export async function approveJob(workspaceInput: string, jobId: string): Promise
   return writeState(workspace, jobId, { status: "queued", phase: "queued", approved: true, approvalRequired: false });
 }
 
-const queueRuntime: QueueRuntime = { loadConfig, loadState, writeState, saveStateAndQueue, jobDir };
+const queueRuntime: QueueRuntime = { loadConfig, loadState, writeState, saveStateAndQueue, finishQueueEntryPersisted: savePersistedStateAndFinishQueue, jobDir };
 
 export async function dispatchQueue(workspaceInput: string): Promise<QueueFile> {
   return queue.dispatchQueue(queueRuntime, workspaceInput);

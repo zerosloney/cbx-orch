@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,7 @@ export interface QueueRuntime {
   loadState(workspace: string, jobId: string): Promise<{ status: string; [key: string]: unknown }>;
   writeState(workspace: string, jobId: string, updates: Record<string, unknown>): Promise<unknown>;
   saveStateAndQueue(workspace: string, jobId: string, state: Record<string, unknown>, queue: QueueFile): Promise<void>;
+  finishQueueEntryPersisted(workspace: string, jobId: string, state: Record<string, unknown>, queueId: string): Promise<void>;
   jobDir(workspace: string, jobId: string): string;
 }
 
@@ -53,6 +54,9 @@ function configuredConcurrency(value: number | undefined): number {
   return maximum;
 }
 
+// intentional-simple: worker 起步 + worktree 创建 + executor spawn 应 < 60s。超过仍无 heartbeat 视为僵尸（pid 复用或 spawn ENOENT 后 pid 被复用）。
+const WORKER_HEARTBEAT_GRACE_MS = 60_000;
+
 async function spawnQueueWorker(runtime: QueueRuntime, workspace: string, entry: QueueEntry): Promise<number> {
   const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli.js");
   const args = [cli, "run", "--workspace", workspace, "--job-id", entry.jobId, "--queue-entry-id", entry.queueId];
@@ -70,7 +74,12 @@ export async function dispatchQueue(runtime: QueueRuntime, workspaceInput: strin
       const maxConcurrent = configuredConcurrency((await runtime.loadConfig(workspace)).maxConcurrent);
       const queue = await loadQueue(workspace);
       queue.maxConcurrent = maxConcurrent;
-      for (const entry of queue.entries.filter(item => item.status === "running" && !processAlive(item.pid))) {
+      for (const entry of queue.entries.filter(item => item.status === "running")) {
+        // 双重回收校验：pid 不存活 OR 有 pid 但无 heartbeat 且超 grace（pid 复用 / spawn ENOENT 后 pid 被复用）。
+        const heartbeatFile = path.join(runtime.jobDir(workspace, entry.jobId), "worker.heartbeat");
+        const stale = !processAlive(entry.pid)
+          || (!existsSync(heartbeatFile) && entry.startedAt && Date.now() - Date.parse(entry.startedAt) > WORKER_HEARTBEAT_GRACE_MS);
+        if (!stale) continue;
         try {
           const state = await runtime.loadState(workspace, entry.jobId);
           entry.status = state.status === "done" ? "done" : state.status === "cancelled" ? "cancelled" : "queued";
@@ -140,13 +149,16 @@ export async function finishQueueEntry(runtime: QueueRuntime, workspaceInput: st
     const queue = await loadQueue(workspace);
     const entry = queue.entries.find(item => item.queueId === queueId);
     if (!entry) return;
-    let status: QueueEntryStatus = "failed";
-    try {
-      const state = await runtime.loadState(workspace, entry.jobId);
-      status = state.status === "done" ? "done" : state.status === "cancelled" ? "cancelled" : state.status === "awaiting_approval" ? "awaiting_approval" : "failed";
-    } catch (error) { entry.error = String(error); }
-    entry.status = status; entry.finishedAt = now(); entry.pid = undefined;
-    await saveQueue(workspace, queue);
+    let state: Record<string, unknown>;
+    try { state = await runtime.loadState(workspace, entry.jobId); }
+    catch (error) {
+      // loadState 失败时降级手写 failed，与历史行为一致；映射逻辑权威来源仍是 finishQueueEntryPersisted。
+      entry.status = "failed"; entry.error = String(error); entry.finishedAt = now(); entry.pid = undefined;
+      await saveQueue(workspace, queue);
+      return;
+    }
+    // 状态映射收敛到 storage 层 finishQueueEntryPersisted，queue 层不再存副本。
+    await runtime.finishQueueEntryPersisted(workspace, entry.jobId, state, queueId);
   });
   await dispatchQueue(runtime, workspace);
 }
@@ -185,16 +197,11 @@ export async function retryQueueJob(runtime: QueueRuntime, workspaceInput: strin
   if (["running", "queued"].includes(state.status)) throw new Error(`任务当前仍在执行或排队：${jobId}`);
   // 显式重跑：清除上一次取消留下的标记，避免 executeJob 再次把任务直接判为 cancelled。
   try { await unlink(path.join(runtime.jobDir(workspace, jobId), "cancel.requested")); } catch { /* 无待取消标记 */ }
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await dispatchQueue(runtime, workspace);
-    const queue = await loadQueue(workspace);
-    if (!queue.entries.some(entry => entry.jobId === jobId && ["queued", "running"].includes(entry.status))) break;
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
+  // 单事务完成：老 queued/running entry 标 cancelled + 插新 entry + 状态重置。删外层 busy-wait，避免 dispatch 锁竞争时新老 entry 并存。
   const replacement = await withQueueLock(workspace, async () => {
     const queue = await loadQueue(workspace);
     for (const entry of queue.entries.filter(item => item.jobId === jobId && ["queued", "running"].includes(item.status))) {
-      entry.status = "failed"; entry.finishedAt = now(); entry.error = "被新的 retry 请求取代"; entry.pid = undefined;
+      entry.status = "cancelled"; entry.finishedAt = now(); entry.error = "被新的 retry 请求取代"; entry.pid = undefined;
     }
     const current = await runtime.loadState(workspace, jobId);
     const created: QueueEntry = { queueId: `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`, jobId, workspace, extra: "请读取已有的 test.log、review.md 和 result.json，修复失败原因后重新执行。", status: "queued", createdAt: now(), priority };

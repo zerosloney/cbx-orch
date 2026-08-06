@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { readFile, unlink } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { approveJob, cancelJob, cleanupWorktree, dispatchQueue, createJob, executeJob, health, jobDir, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, serveQueue, startBackground } from "./core.js";
-import { runReviewGate } from "./review-gate.js";
+import { runReviewGate, stopReviewGateHook } from "./review-gate.js";
 import { runTui, startWebUi } from "./ui.js";
 
 function option(args: string[], name: string, fallback?: string): string | undefined {
@@ -66,6 +66,7 @@ async function main(): Promise<void> {
       return;
     }
     const queueEntryId = option(args, "--queue-entry-id");
+    if (queueEntryId) await writeFile(path.join(jobDir(workspace, jobId!), "worker.heartbeat"), new Date().toISOString(), "utf8").catch(() => undefined);
     const result = await executeJob(workspace, jobId!, option(args, "--message", ""), queueEntryId);
     print(result);
     if (has(args, "--ci") && result.status !== "done") process.exitCode = 2;
@@ -146,7 +147,25 @@ async function main(): Promise<void> {
     if (!result.pass) process.exitCode = 2;
     return;
   }
-  console.log("用法：cbx run|start|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui|review-gate ...");
+  if (command === "stop-review-gate") {
+    // Stop hook 入口：复用 stopReviewGateHook，保持「检查 reviewGate.enabled / 读 stdin 的 cwd / 输出 decision / 永不非 0 退出（fail-open）」契约。
+    // 与原 dist/src/hooks/stop-review-gate.js 行为一致，避免从 GitHub 安装插件时 dist/ 缺失导致 hook 失效。
+    const raw = await new Promise<string>(resolve => {
+      let data = "";
+      if (process.stdin.isTTY) return resolve("");
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", chunk => { data += chunk; });
+      process.stdin.on("end", () => resolve(data));
+      process.stdin.on("error", () => resolve(""));
+    });
+    let input: { cwd?: string } = {};
+    if (raw.trim()) { try { input = JSON.parse(raw) as { cwd?: string }; } catch { /* 忽略非 JSON stdin */ } }
+    const hookWorkspace = input.cwd ?? process.env.CBX_WORKSPACE ?? process.cwd();
+    const decision = await stopReviewGateHook(hookWorkspace);
+    if (decision) process.stdout.write(JSON.stringify(decision) + "\n");
+    return;
+  }
+  console.log("用法：cbx run|start|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui|review-gate|stop-review-gate ...");
 }
 
 main().catch((error) => { console.error(error instanceof Error ? error.message : error); process.exitCode = 1; });

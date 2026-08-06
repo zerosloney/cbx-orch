@@ -82,8 +82,9 @@ export async function shouldRunGate(workspace: string): Promise<boolean> {
 /** 供 hooks/stop-review-gate.js 调用的入口：返回 JSON decision 或 null（放行）。fail-open。 */
 export async function stopReviewGateHook(workspaceInput: string): Promise<{ decision: "block"; reason: string } | null> {
   const workspace = path.resolve(workspaceInput);
-  if (!(await shouldRunGate(workspace))) return null;
   try {
+    // shouldRunGate 内部读 .cbx.json；配置非法（如未知字段）会让 loadConfig 抛异常，必须纳入 fail-open，否则 hook 逃逸为 exitCode=1 破坏放行契约
+    if (!(await shouldRunGate(workspace))) return null;
     const result = await runReviewGate(workspace);
     return stopGateDecision(result);
   } catch (error) {
