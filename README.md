@@ -133,6 +133,17 @@ node dist/src/cli.js watch JOB_ID --ci --workspace .
 node dist/src/cli.js ui --workspace . --port 4173
 node dist/src/cli.js tui --workspace .
 
+# 多 workspace 模式:一个 UI 看多个项目,顶部 workspace 选择器 + Dashboard 卡片
+node dist/src/cli.js ui --workspace ~/code/proj-a --workspace ~/code/proj-b --port 4173
+node dist/src/cli.js ui --workspaces-dir ~/code --port 4173
+# 单 workspace 时 ws-list 自动隐藏;Dashboard 卡片和实时秒表对单/多模式都生效
+
+# Web UI 新接口(直接可读)
+curl http://127.0.0.1:4173/api/workspaces              # 所有 workspace 状态摘要
+curl http://127.0.0.1:4173/api/jobs/<id>/timeline      # 阶段时间线(stages + currentStage + elapsedSec)
+curl http://127.0.0.1:4173/api/jobs/<id>/executor      # PID/heartbeat/命令 + 进程是否还活
+curl http://127.0.0.1:4173/api/jobs/<id>/agent.log?since=0  # agent.log 增量(默认 256KB)
+
 # CI 模式：任务失败时返回非 0 退出码
 node dist/src/cli.js run --ci --workspace . --task "实现某功能" --test "npm test"
 
