@@ -161,29 +161,33 @@ function startEventTailer(workspace: string, onEvent: (event: Record<string, unk
   return () => clearInterval(timer);
 }
 
-export function createWebUiServer(workspace: string, host = "127.0.0.1", port = 4173): Server {
+export function createWebUiServer(workspace: string | string[], host = "127.0.0.1", port = 4173): Server {
   if (!new Set(["127.0.0.1", "localhost", "::1"]).has(host)) throw new Error("Web UI 仅允许绑定到本机回环地址；远程访问需要在受认证的反向代理后显式实现。");
+  // commit 1 兼容层:支持 string | string[]。单值原样,数组取第一个作为 active workspace(用于事件流 tailer);
+  // 完整多 workspace 路由在 commit 2 加上,这里先确保向后兼容(所有调用走原路径)。
+  const workspaces = Array.isArray(workspace) ? workspace : [workspace];
+  const activeWorkspace = workspaces[0] ?? ".";
   const clients = new Set<ServerResponse>();
   const broadcast = (event: Record<string, unknown>): void => {
     const message = `data: ${JSON.stringify(event)}\n\n`;
     for (const client of clients) client.write(message);
   };
-  const stopTailer = startEventTailer(workspace, broadcast);
+  const stopTailer = startEventTailer(activeWorkspace, broadcast);
   const server = createServer(async (req, res) => {
     try {
       if (req.method !== "GET") return json(res, { error: "method not allowed" }, 405);
       const url = new URL(req.url ?? "/", `http://${host}:${port}`);
       if (url.pathname === "/") return text(res, page, "text/html; charset=utf-8");
       if (url.pathname === "/events") { res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }); clients.add(res); res.write(`data: ${JSON.stringify({ at: new Date().toISOString(), type: "connected" })}\n\n`); req.on("close", () => clients.delete(res)); return; }
-      if (url.pathname === "/api/jobs") return json(res, await listJobs(workspace));
-      if (url.pathname === "/api/queue") return json(res, await listQueue(workspace));
-      if (url.pathname === "/healthz" || url.pathname === "/api/metrics") return json(res, await health(workspace));
+      if (url.pathname === "/api/jobs") return json(res, await listJobs(activeWorkspace));
+      if (url.pathname === "/api/queue") return json(res, await listQueue(activeWorkspace));
+      if (url.pathname === "/healthz" || url.pathname === "/api/metrics") return json(res, await health(activeWorkspace));
       const job = /^\/api\/jobs\/([^/]+)$/.exec(url.pathname);
-      if (job) return json(res, await loadState(workspace, job[1]));
+      if (job) return json(res, await loadState(activeWorkspace, job[1]));
       const artifacts = /^\/api\/jobs\/([^/]+)\/artifacts$/.exec(url.pathname);
-      if (artifacts) return json(res, await listArtifacts(workspace, artifacts[1]));
+      if (artifacts) return json(res, await listArtifacts(activeWorkspace, artifacts[1]));
       const artifact = /^\/api\/jobs\/([^/]+)\/artifact\/([^/]+)$/.exec(url.pathname);
-      if (artifact) return text(res, await readArtifact(workspace, artifact[1], artifact[2]));
+      if (artifact) return text(res, await readArtifact(activeWorkspace, artifact[1], artifact[2]));
       return json(res, { error: "not found" }, 404);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -198,7 +202,7 @@ export function createWebUiServer(workspace: string, host = "127.0.0.1", port = 
   return server;
 }
 
-export async function startWebUi(workspace: string, port = 4173, host = "127.0.0.1"): Promise<void> {
+export async function startWebUi(workspace: string | string[], port = 4173, host = "127.0.0.1"): Promise<void> {
   const server = createWebUiServer(workspace, host, port);
   await new Promise<void>(resolve => server.listen(port, host, resolve));
   console.log(`CBX UI: http://${host}:${port}`);

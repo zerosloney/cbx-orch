@@ -11,6 +11,46 @@ function option(args: string[], name: string, fallback?: string): string | undef
 }
 
 function has(args: string[], name: string): boolean { return args.includes(name); }
+
+/** 收集同一 flag 多次出现的值,用于 `cbx ui --workspace A --workspace B`。 */
+function collectAll(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i += 1) if (args[i] === name && i + 1 < args.length) values.push(args[i + 1]);
+  return values;
+}
+
+/** 扫描根目录下含 .cbx/ 的直接子目录(1 层深度,不递归)。返回绝对路径列表。 */
+async function discoverWorkspaces(root: string): Promise<string[]> {
+  const { readdir, stat } = await import("node:fs/promises");
+  const resolvedRoot = path.resolve(root);
+  let names: string[];
+  try { names = await readdir(resolvedRoot); }
+  catch { return []; }
+  const out: string[] = [];
+  for (const name of names) {
+    if (name.startsWith(".") || name === "node_modules") continue;
+    const candidate = path.join(resolvedRoot, name);
+    let dirStat, cbxStat;
+    try { dirStat = await stat(candidate); } catch { continue; }
+    if (!dirStat.isDirectory()) continue;
+    try { cbxStat = await stat(path.join(candidate, ".cbx")); } catch { continue; }
+    if (cbxStat.isDirectory()) out.push(candidate);
+  }
+  return out;
+}
+
+/** 按 path.resolve 后的字符串去重,保留首次出现顺序。 */
+function dedupWorkspaces(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of paths) {
+    const resolved = path.resolve(p);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    out.push(resolved);
+  }
+  return out;
+}
 function print(value: unknown): void { console.log(JSON.stringify(value, null, 2)); }
 
 async function main(): Promise<void> {
@@ -128,7 +168,20 @@ async function main(): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, interval));
     }
   }
-  if (command === "ui") { await startWebUi(workspace, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1")); return; }
+  if (command === "ui") {
+    // ui 支持多 workspace 模式:`--workspace` 可多次,或 `--workspaces-dir <dir>` 扫描根目录下所有含 .cbx/ 的子目录。
+    // 显式列出的 workspace 优先,扫到的追加在后,去重保留首次出现顺序。
+    const explicit = collectAll(args, "--workspace");
+    const scanRoot = option(args, "--workspaces-dir");
+    const workspaces = dedupWorkspaces([...explicit, ...(scanRoot ? await discoverWorkspaces(scanRoot) : [])]);
+    if (workspaces.length === 0) {
+      // 向后兼容:无显式参数时退化为 cwd 单 workspace,与旧版一致。
+      await startWebUi(workspace, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1"));
+      return;
+    }
+    await startWebUi(workspaces, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1"));
+    return;
+  }
   if (command === "tui") { await runTui(workspace, Number(option(args, "--interval-ms", "1000"))); return; }
   if (command === "review") {
     try { console.log(await readFile(`${jobDir(workspace, args[0])}/review.md`, "utf8")); }
