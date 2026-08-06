@@ -271,10 +271,11 @@ pre.art-view{white-space:pre-wrap;background:#080b11;padding:10px;border-radius:
 <h2>事件流</h2>
 <div id="stream"></div>
 <script>
+console.log('cbx-ui: script start, page loaded at', new Date().toISOString());
 var allWorkspaces=[];
 var currentWorkspace=null;
 var selected=null;
-function rowAttr(id){return String(id).replace(/[^\w-]/g,function(c){return'\\'+c})}
+function rowAttr(id){return String(id).replace(/[^\w-]/g,function(c){return'\\\\'+c})}
 function totalJobs(w){return Object.values(w.jobsByStatus||{}).reduce(function(a,b){return a+b;},0)}
 function fmt(iso){try{return new Date(iso).toLocaleTimeString()}catch(e){return iso}}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
@@ -303,10 +304,24 @@ function updateCards(jobs,q){
   health.className='card-value'+(q.paused?' s-running':failed>0?' s-failed':active>0?' s-running':' s-done');
 }
 async function loadWorkspaces(){
-  try{var data=await fetch('/api/workspaces').then(function(r){return r.json()});allWorkspaces=data.workspaces||[];currentWorkspace=data.default;}catch(e){return}
+  console.log('cbx-ui: loadWorkspaces called');
+  try{
+    var response=await fetch('/api/workspaces');
+    console.log('cbx-ui: fetch status', response.status);
+    if(!response.ok) throw new Error('HTTP '+response.status);
+    var data=await response.json();
+    console.log('cbx-ui: got data', data.workspaces ? data.workspaces.length+' workspaces' : 'NO workspaces');
+    allWorkspaces=data.workspaces||[];
+    currentWorkspace=data.default;
+  }catch(e){
+    console.error('cbx-ui: loadWorkspaces error', e);
+    document.querySelector('#ws-name').textContent='fetch error: '+(e instanceof Error?e.message:String(e));
+    return;
+  }
   var qs=new URLSearchParams(location.search);
   var req=qs.get('workspace');
   if(req&&allWorkspaces.some(function(w){return w.path===req;}))currentWorkspace=req;
+  console.log('cbx-ui: calling renderWorkspaces, currentWorkspace=', currentWorkspace);
   renderWorkspaces();
 }
 function renderWorkspaces(){
