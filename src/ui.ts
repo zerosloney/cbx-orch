@@ -80,23 +80,102 @@ tr.job.selected{background:#1c2840;border-left:3px solid #9ecbff}
 pre.art-view{white-space:pre-wrap;background:#080b11;padding:10px;border-radius:6px;max-height:350px;overflow:auto;font-size:12px;border:1px solid #2a3140;margin:0;font-family:ui-monospace,monospace}
 #stream{white-space:pre-wrap;background:#0d1117;padding:10px;border-radius:6px;max-height:260px;overflow:auto;font-size:12px;margin-top:8px;border:1px solid #2a3140;font-family:ui-monospace,monospace}
 .evt{padding:2px 0}.evt .t{color:#555;margin-right:8px}
+.topbar{display:flex;align-items:center;gap:12px;margin:4px 0 12px;font-size:13px}
+.topbar h1{margin:0;display:inline}
+.ws-pill{padding:5px 12px;background:#171c26;border-radius:6px;display:inline-flex;align-items:center;gap:8px}
+.ws-pill .ws-name{font-weight:bold;color:#9ecbff}
+.ws-pill .ws-count{color:#888;font-size:12px}
+.ws-list{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.ws-chip{padding:5px 10px;border-radius:4px;background:#171c26;border:1px solid #2a3140;cursor:pointer;font:inherit;font-size:12px;color:inherit;display:inline-flex;align-items:center;gap:6px}
+.ws-chip:hover{background:#1c2430}
+.ws-chip.active{border-color:#9ecbff;background:#1c2840;color:#9ecbff}
+.ws-chip .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:16px}
+.card{background:#171c26;padding:10px 14px;border-radius:6px;border:1px solid #2a3140;min-width:0}
+.card-label{color:#888;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-value{font-size:18px;font-weight:bold;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-value.s-failed,.card-value.s-review_failed{color:#ff8d8d}
+.card-value.s-running,.card-value.s-awaiting_approval{color:#ffd166}
+.card-value.s-done{color:#70e090}
 </style></head><body>
-<h1>CBX Orchestrator</h1>
-<div class="bar" id="bar"></div>
+<div class="topbar"><h1>CBX Orchestrator</h1><span class="ws-pill"><span class="ws-name" id="ws-name">—</span><span class="ws-count" id="ws-count"></span></span></div>
+<div class="ws-list" id="ws-list" hidden></div>
+<div class="cards" id="cards">
+  <div class="card"><div class="card-label">总任务</div><div class="card-value" id="c-total">—</div></div>
+  <div class="card"><div class="card-label">运行中 / 并发</div><div class="card-value" id="c-running">—</div></div>
+  <div class="card"><div class="card-label">失败</div><div class="card-value" id="c-failed">—</div></div>
+  <div class="card"><div class="card-label">队列</div><div class="card-value" id="c-queue">—</div></div>
+  <div class="card"><div class="card-label">最后活动</div><div class="card-value" id="c-last">—</div></div>
+  <div class="card"><div class="card-label">健康</div><div class="card-value" id="c-health">—</div></div>
+</div>
+<div class="bar" id="bar" hidden></div>
 <table><thead><tr><th>Job</th><th>Status</th><th>Phase</th><th>Attempt</th><th>Review</th><th>Updated</th></tr></thead>
 <tbody id="jobs"></tbody></table>
 <div id="detail-panel"><h2 style="margin-top:0">任务详情</h2><div id="detail-body"><p class="hint">点击上方任务行查看详情</p></div></div>
 <h2>事件流</h2>
 <div id="stream"></div>
 <script>
+var allWorkspaces=[];
+var currentWorkspace=null;
 var selected=null;
+function rowAttr(id){return String(id).replace(/[^\w-]/g,function(c){return'\\'+c})}
+function totalJobs(w){return Object.values(w.jobsByStatus||{}).reduce(function(a,b){return a+b;},0)}
 function fmt(iso){try{return new Date(iso).toLocaleTimeString()}catch(e){return iso}}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 async function refresh(){
-  var jobs=await fetch('/api/jobs').then(function(r){return r.json()});
-  var q=await fetch('/api/queue').then(function(r){return r.json()});
-  document.querySelector('#bar').textContent='\\u961f\\u5217\\uff1a'+(q.paused?'\\u5df2\\u6682\\u505c':'\\u8fd0\\u884c\\u4e2d')+' \\u00b7 \\u5e76\\u53d1 '+q.maxConcurrent+' \\u00b7 '+q.entries.filter(function(x){return x.status==='running'}).length+' active \\u00b7 \\u5171 '+jobs.length+' \\u4efb\\u52a1';
+  var ws=encodeURIComponent(currentWorkspace||'');
+  var jobs=await fetch('/api/jobs?workspace='+ws).then(function(r){return r.json()});
+  var q=await fetch('/api/queue?workspace='+ws).then(function(r){return r.json()});
+  updateCards(jobs,q);
   document.querySelector('#jobs').innerHTML=jobs.map(rowHtml).join('');
+  if(selected){var row=document.querySelector('tr.job[data-id="'+rowAttr(selected)+'"]');if(row)row.classList.add('selected');}
+}
+function updateCards(jobs,q){
+  var total=jobs.length;
+  var running=jobs.filter(function(j){return j.status==='running';}).length;
+  var failed=jobs.filter(function(j){return['failed','review_failed','needs_fix'].indexOf(j.status)>=0;}).length;
+  var active=(q.entries||[]).filter(function(e){return e.status==='running';}).length;
+  var depth=(q.entries||[]).filter(function(e){return['queued','running','awaiting_approval'].indexOf(e.status)>=0;}).length;
+  var last=jobs.reduce(function(m,j){return j.updatedAt>m?j.updatedAt:m;},'');
+  var cTotal=document.querySelector('#c-total');cTotal.textContent=total;cTotal.className='card-value';
+  var cRun=document.querySelector('#c-running');cRun.textContent=running+' / '+(q.maxConcurrent||'\u2014');cRun.className='card-value'+(running>0?' s-running':'');
+  var cFail=document.querySelector('#c-failed');cFail.textContent=failed;cFail.className='card-value'+(failed>0?' s-failed':'');
+  var cQ=document.querySelector('#c-queue');cQ.textContent=depth+(q.paused?' (\u6682\u505c)':'');cQ.className='card-value'+(q.paused?' s-running':'');
+  document.querySelector('#c-last').textContent=last?fmt(last):'\u2014';
+  var health=document.querySelector('#c-health');
+  health.textContent=(q.paused?'\u6682\u505c':failed>0?failed+'\u4e2a\u5931\u8d25':active>0?'\u8fd0\u884c\u4e2d':'\u7a7a\u95f2');
+  health.className='card-value'+(q.paused?' s-running':failed>0?' s-failed':active>0?' s-running':' s-done');
+}
+async function loadWorkspaces(){
+  try{var data=await fetch('/api/workspaces').then(function(r){return r.json()});allWorkspaces=data.workspaces||[];currentWorkspace=data.default;}catch(e){return}
+  var qs=new URLSearchParams(location.search);
+  var req=qs.get('workspace');
+  if(req&&allWorkspaces.some(function(w){return w.path===req;}))currentWorkspace=req;
+  renderWorkspaces();
+}
+function renderWorkspaces(){
+  var list=document.querySelector('#ws-list');
+  if(allWorkspaces.length>1){
+    list.hidden=false;
+    list.innerHTML=allWorkspaces.map(function(w){
+      var t=totalJobs(w);var failed=(w.jobsByStatus&&w.jobsByStatus.failed)||0;
+      var dot=failed>0?'#ff8d8d':(w.activeExecutors>0?'#ffd166':'#70e090');
+      var active=w.path===currentWorkspace?' active':'';
+      return '<button class="ws-chip'+active+'" data-path="'+esc(w.path)+'"><span class="dot" style="background:'+dot+'"></span><span>'+esc(w.name)+'</span><span style="color:#888">'+t+(failed>0?' \u00b7 '+failed+' fail':'')+'</span></button>';
+    }).join('');
+    list.querySelectorAll('.ws-chip').forEach(function(b){b.addEventListener('click',function(){switchWorkspace(b.dataset.path);});});
+  } else { list.hidden=true; }
+  var cur=allWorkspaces.find(function(w){return w.path===currentWorkspace;});
+  document.querySelector('#ws-name').textContent=cur?cur.name:(currentWorkspace||'\u2014');
+  document.querySelector('#ws-count').textContent=cur?'('+totalJobs(cur)+')':'';
+}
+function switchWorkspace(path){
+  if(path===currentWorkspace||!allWorkspaces.some(function(w){return w.path===path;}))return;
+  currentWorkspace=path;
+  var qs=new URLSearchParams(location.search);qs.set('workspace',path);
+  history.replaceState(null,'','?'+qs.toString());
+  selected=null;renderWorkspaces();refresh();
+  document.querySelector('#detail-body').innerHTML='<p class="hint">\u70b9\u51fb\u4e0a\u65b9\u4efb\u52a1\u884c\u67e5\u770b\u8be6\u60c5</p>';
 }
 function rowHtml(j){
   var cls='job'+(selected===j.jobId?' selected':'');
@@ -147,7 +226,8 @@ async function loadDetail(id){
 document.querySelector('#jobs').addEventListener('click',function(e){
   var row=e.target.closest('tr.job');if(row)selectJob(row.dataset.id);
 });
-refresh();setInterval(refresh,1500);
+loadWorkspaces().then(refresh);
+setInterval(refresh,1500);
 var stream=document.querySelector('#stream');
 var es=new EventSource('/events');
 es.onmessage=function(e){
