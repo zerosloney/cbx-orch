@@ -41,6 +41,27 @@ test("buildTimeline parses queued → running → done state changes with phases
   assert.equal(timeline.finishedAt, "2026-08-06T10:00:30.000Z");
 });
 
+test("buildTimeline falls back to stage_started/finished for legacy jobs (pre-0.10.2)", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-ui-"));
+  const jobId = "job-tl-legacy";
+  const dir = jobDir(workspace, jobId);
+  await mkdir(dir, { recursive: true });
+  // 老格式:0.10.2 之前的 jobs 只写 stage_started/stage_finished,没有 job.state_changed
+  const events = [
+    { event: "executor_metadata", source: "builtin", name: "codebuddy", at: "2026-08-06T10:00:00.000Z" },
+    { event: "process_started", command: ["codebuddy"], at: "2026-08-06T10:00:00.000Z" },
+    { event: "stage_started", jobId, stage: "implementation", executor: "codebuddy", index: 0, total: 1, at: "2026-08-06T10:00:01.000Z" },
+    { event: "stage_finished", jobId, stage: "implementation", executor: "codebuddy", index: 0, exitCode: 0, reviewVerdict: "PASS", at: "2026-08-06T10:00:30.000Z" },
+  ];
+  await writeFile(path.join(dir, "events.ndjson"), events.map((event) => JSON.stringify(event)).join("\n") + "\n", "utf8");
+  const timeline = await buildTimeline(workspace, jobId);
+  assert.equal(timeline.stages.length, 1);
+  assert.equal(timeline.stages[0].name, "implementation");
+  assert.equal(timeline.stages[0].durationMs, 29000);
+  assert.match(timeline.stages[0].phase ?? "", /codebuddy.*PASS/);
+  assert.equal(timeline.finishedAt, "2026-08-06T10:00:30.000Z");
+});
+
 test("readExecutorStatus reads pid/heartbeat and reports no process when files are missing", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-ui-"));
   const jobId = "job-exec";

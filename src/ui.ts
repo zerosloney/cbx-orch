@@ -56,38 +56,66 @@ interface JobTimeline { stages: TimelineStage[]; currentStage: string | null; st
 
 const TERMINAL_STATUSES = new Set(["done", "failed", "review_failed", "cancelled"]);
 
-/** 从 events.ndjson 解析 job.state_changed 序列,推导出阶段时间线。 */
+/**
+ * 从 events.ndjson 推导阶段时间线。兼容两套事件:
+ * - 新格式(0.10.2+):job.state_changed 事件携带 status 维度
+ * - 老格式(<=0.10.1):stage_started / stage_finished 配对携带 stage 维度
+ * 优先用新格式;若不存在则用老格式配对构造。
+ */
 export async function buildTimeline(workspace: string, jobId: string): Promise<JobTimeline> {
   const eventsFile = path.join(jobDir(workspace, jobId), "events.ndjson");
   let raw = "";
   try { raw = await readFile(eventsFile, "utf8"); } catch { /* 任务还没产生事件 */ }
   const stateChanges: Array<{ status: string; phase?: string; at: string }> = [];
+  const stageStarts: Array<{ stage: string; executor: string; index: number; at: string }> = [];
+  const stageEnds: Array<{ stage: string; index: number; exitCode?: number; reviewVerdict?: string; at: string }> = [];
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     let event: Record<string, unknown>;
     try { event = JSON.parse(trimmed); } catch { continue; }
-    if (event.event !== "job.state_changed" || typeof event.status !== "string") continue;
-    stateChanges.push({
-      status: String(event.status),
-      phase: typeof event.phase === "string" ? event.phase : undefined,
-      at: String(event.at ?? ""),
+    const at = String(event.at ?? "");
+    if (event.event === "job.state_changed" && typeof event.status === "string") {
+      stateChanges.push({ status: String(event.status), phase: typeof event.phase === "string" ? event.phase : undefined, at });
+    } else if (event.event === "stage_started" && typeof event.stage === "string") {
+      stageStarts.push({ stage: String(event.stage), executor: String(event.executor ?? ""), index: Number(event.index ?? 0), at });
+    } else if (event.event === "stage_finished" && typeof event.stage === "string") {
+      stageEnds.push({ stage: String(event.stage), index: Number(event.index ?? 0), exitCode: typeof event.exitCode === "number" ? event.exitCode : undefined, reviewVerdict: typeof event.reviewVerdict === "string" ? event.reviewVerdict : undefined, at });
+    }
+  }
+  // 优先用 state_changes(更新更详细);老格式 jobs 没有 state_change,用 stage_started/finished 配对
+  let stages: TimelineStage[];
+  let currentStage: string | null;
+  let startedAt: string | null;
+  let finishedAt: string | null;
+  if (stateChanges.length) {
+    stages = [];
+    for (let i = 0; i < stateChanges.length; i += 1) {
+      const cur = stateChanges[i];
+      const next = stateChanges[i + 1];
+      const end = next ? next.at : null;
+      const durationMs = end && cur.at ? Date.parse(end) - Date.parse(cur.at) : null;
+      stages.push({ name: cur.status, phase: cur.phase, startedAt: cur.at, endedAt: end, durationMs });
+    }
+    const last = stateChanges[stateChanges.length - 1];
+    currentStage = last ? last.status : null;
+    startedAt = stateChanges[0]?.at ?? null;
+    finishedAt = currentStage && TERMINAL_STATUSES.has(currentStage) ? last?.at ?? null : null;
+  } else {
+    // 老格式配对:用 stage_started/finished 构造 timeline
+    stages = stageStarts.map((start) => {
+      const end = stageEnds.find((finish) => finish.stage === start.stage && finish.index === start.index);
+      const endAt = end?.at ?? null;
+      const durationMs = endAt ? Date.parse(endAt) - Date.parse(start.at) : null;
+      const verdict = end?.reviewVerdict;
+      return { name: start.stage, phase: verdict ? `${start.executor} (${verdict})` : start.executor, startedAt: start.at, endedAt: endAt, durationMs };
     });
+    const lastEnd = stageEnds[stageEnds.length - 1];
+    const firstStart = stageStarts[0];
+    currentStage = lastEnd ? `${lastEnd.stage} (${lastEnd.reviewVerdict ?? "done"})` : (firstStart?.stage ?? null);
+    startedAt = firstStart?.at ?? null;
+    finishedAt = lastEnd?.at ?? null;
   }
-  const stages: TimelineStage[] = [];
-  for (let i = 0; i < stateChanges.length; i += 1) {
-    const cur = stateChanges[i];
-    const next = stateChanges[i + 1];
-    const startedAt = cur.at;
-    const endedAt = next ? next.at : null;
-    const durationMs = endedAt && startedAt ? Date.parse(endedAt) - Date.parse(startedAt) : null;
-    stages.push({ name: cur.status, phase: cur.phase, startedAt, endedAt, durationMs });
-  }
-  const last = stateChanges[stateChanges.length - 1];
-  const first = stateChanges[0];
-  const currentStage = last ? last.status : null;
-  const startedAt = first?.at ?? null;
-  const finishedAt = currentStage && TERMINAL_STATUSES.has(currentStage) ? last?.at ?? null : null;
   const elapsedSec = startedAt ? Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000)) : 0;
   return { stages, currentStage, startedAt, finishedAt, elapsedSec };
 }
