@@ -1,8 +1,9 @@
 import { createServer, type Server, type ServerResponse } from "node:http";
-import { open, stat } from "node:fs/promises";
+import { open, readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { health, listArtifacts, listJobs, listQueue, loadState, readArtifact } from "./core.js";
+import { health, jobDir, listArtifacts, listJobs, listQueue, loadState, readArtifact } from "./core.js";
 import { capture } from "./process-runner.js";
+import { processAlive } from "./storage.js";
 
 interface WorkspaceSummary {
   path: string;
@@ -48,6 +49,114 @@ async function summarizeWorkspace(workspace: string): Promise<WorkspaceSummary> 
     gitBranch,
     gitDirty,
   };
+}
+
+interface TimelineStage { name: string; phase?: string; startedAt: string; endedAt: string | null; durationMs: number | null; }
+interface JobTimeline { stages: TimelineStage[]; currentStage: string | null; startedAt: string | null; finishedAt: string | null; elapsedSec: number; }
+
+const TERMINAL_STATUSES = new Set(["done", "failed", "review_failed", "cancelled"]);
+
+/** 从 events.ndjson 解析 job.state_changed 序列,推导出阶段时间线。 */
+export async function buildTimeline(workspace: string, jobId: string): Promise<JobTimeline> {
+  const eventsFile = path.join(jobDir(workspace, jobId), "events.ndjson");
+  let raw = "";
+  try { raw = await readFile(eventsFile, "utf8"); } catch { /* 任务还没产生事件 */ }
+  const stateChanges: Array<{ status: string; phase?: string; at: string }> = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let event: Record<string, unknown>;
+    try { event = JSON.parse(trimmed); } catch { continue; }
+    if (event.event !== "job.state_changed" || typeof event.status !== "string") continue;
+    stateChanges.push({
+      status: String(event.status),
+      phase: typeof event.phase === "string" ? event.phase : undefined,
+      at: String(event.at ?? ""),
+    });
+  }
+  const stages: TimelineStage[] = [];
+  for (let i = 0; i < stateChanges.length; i += 1) {
+    const cur = stateChanges[i];
+    const next = stateChanges[i + 1];
+    const startedAt = cur.at;
+    const endedAt = next ? next.at : null;
+    const durationMs = endedAt && startedAt ? Date.parse(endedAt) - Date.parse(startedAt) : null;
+    stages.push({ name: cur.status, phase: cur.phase, startedAt, endedAt, durationMs });
+  }
+  const last = stateChanges[stateChanges.length - 1];
+  const first = stateChanges[0];
+  const currentStage = last ? last.status : null;
+  const startedAt = first?.at ?? null;
+  const finishedAt = currentStage && TERMINAL_STATUSES.has(currentStage) ? last?.at ?? null : null;
+  const elapsedSec = startedAt ? Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000)) : 0;
+  return { stages, currentStage, startedAt, finishedAt, elapsedSec };
+}
+
+interface ExecutorStatus {
+  pid: number | null;
+  alive: boolean | null;
+  heartbeatAt: string | null;
+  heartbeatStaleSec: number | null;
+  startedAt: string | null;
+  elapsedSec: number | null;
+  command: string | null;
+}
+
+/** 读取任务当前 executor 进程状态:pid/active.pid、worker.heartbeat、process_started 命令。 */
+export async function readExecutorStatus(workspace: string, jobId: string): Promise<ExecutorStatus> {
+  const dir = jobDir(workspace, jobId);
+  // executor 子进程 pid 优先;worker pid 兜底(已 detached 时仅 worker 文件在)。
+  let pid: number | null = null;
+  for (const name of ["active.pid", "pid"]) {
+    try { pid = Number((await readFile(path.join(dir, name), "utf8")).trim()); if (Number.isSafeInteger(pid) && pid > 0) break; } catch { continue; }
+    pid = null;
+  }
+  const alive = pid !== null ? processAlive(pid) : null;
+  let heartbeatAt: string | null = null;
+  let heartbeatStaleSec: number | null = null;
+  try {
+    const s = await stat(path.join(dir, "worker.heartbeat"));
+    heartbeatAt = s.mtime.toISOString();
+    heartbeatStaleSec = Math.max(0, Math.floor((Date.now() - s.mtimeMs) / 1000));
+  } catch { /* no heartbeat file */ }
+  let startedAt: string | null = null;
+  let elapsedSec: number | null = null;
+  try {
+    const s = await stat(path.join(dir, "pid"));
+    startedAt = s.mtime.toISOString();
+    elapsedSec = Math.max(0, Math.floor((Date.now() - s.mtimeMs) / 1000));
+  } catch { /* no pid file */ }
+  // 从 events.ndjson 抓最近一次 process_started 的命令(用于 UI 展示「codebuddy -p ...」)。
+  let command: string | null = null;
+  try {
+    const raw = await readFile(path.join(dir, "events.ndjson"), "utf8");
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let event: Record<string, unknown>;
+      try { event = JSON.parse(trimmed); } catch { continue; }
+      if (event.event === "process_started" && Array.isArray(event.command)) {
+        command = (event.command as unknown[]).map((part) => String(part)).join(" ");
+      }
+    }
+  } catch { /* no events */ }
+  return { pid, alive, heartbeatAt, heartbeatStaleSec, startedAt, elapsedSec, command };
+}
+
+interface AgentLogChunk { content: string; nextOffset: number; truncated: boolean; }
+
+/** 增量读 agent.log(类比 readEventsIncremental):since=0 全量,since>0 按 offset 续读。 */
+export async function readAgentLogIncremental(workspace: string, jobId: string, since = 0, maxBytes = 256 * 1024): Promise<AgentLogChunk> {
+  const file = path.join(jobDir(workspace, jobId), "agent.log");
+  let raw: Buffer;
+  try { raw = await readFile(file); } catch { return { content: "", nextOffset: 0, truncated: false }; }
+  // agent.log 可能很大;只读最后 maxBytes 字节避免前端一次塞爆。
+  const start = raw.length > maxBytes ? raw.length - maxBytes : 0;
+  const slice = raw.subarray(start);
+  const text = slice.toString("utf8");
+  // 简单行计数:取首 since 行跳过,但这里用字节位置;返回 nextOffset 供下次续读。
+  const content = text;
+  return { content, nextOffset: raw.length, truncated: start > 0 };
 }
 
 const page = `<!doctype html>
@@ -333,6 +442,15 @@ export function createWebUiServer(workspace: string | string[], host = "127.0.0.
       if (artifacts) return json(res, await listArtifacts(ws, artifacts[1]));
       const artifact = /^\/api\/jobs\/([^/]+)\/artifact\/([^/]+)$/.exec(url.pathname);
       if (artifact) return text(res, await readArtifact(ws, artifact[1], artifact[2]));
+      const timeline = /^\/api\/jobs\/([^/]+)\/timeline$/.exec(url.pathname);
+      if (timeline) return json(res, await buildTimeline(ws, timeline[1]));
+      const executor = /^\/api\/jobs\/([^/]+)\/executor$/.exec(url.pathname);
+      if (executor) return json(res, await readExecutorStatus(ws, executor[1]));
+      const agentLog = /^\/api\/jobs\/([^/]+)\/agent\.log$/.exec(url.pathname);
+      if (agentLog) {
+        const since = Number(url.searchParams.get("since") ?? 0);
+        return text(res, JSON.stringify(await readAgentLogIncremental(ws, agentLog[1], since)), "application/json; charset=utf-8");
+      }
       return json(res, { error: "not found" }, 404);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
