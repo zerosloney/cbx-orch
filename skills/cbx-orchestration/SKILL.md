@@ -19,6 +19,19 @@ Do NOT use cbx for:
 - Single-file edits or trivial fixes you can do inline faster.
 - Tasks that require interactive Q&A with the user mid-execution (cbx runs non-interactively).
 
+### Quick decision (use this before dispatching)
+
+Tick at least one box per axis. If every axis points to "use cbx", dispatch it. If any axis points away, prefer inline work.
+
+| Axis | Use cbx | Stay inline |
+|---|---|---|
+| Scope | multi-file or cross-module | single file, < 50 lines |
+| Verification | user wants tests + review | trivial enough to verify by re-read |
+| Duration | long-running (>2 min) | quick fix |
+| Mode preference | background OK ("后台"/"异步"/"fire-and-forget") | user needs to watch live ("实时"/"流式") |
+
+If two or more axes point to "use cbx", dispatch. If unsure, ask the user whether they want background processing.
+
 ## Execution mode: background (MCP) vs realtime (CLI)
 
 cbx supports two execution modes. Pick one before dispatching a task:
@@ -58,6 +71,144 @@ cbx's MCP server is registered under the name `cbx`. In ZCode its tools appear a
    - Omitting `since` returns the legacy full `{ logs: string }` shape — use it only for one-shot full reads, not in the poll loop.
 3. **Collect**: on `done`, call `cbx_result`, then read `handback.md`, `complete.patch`, `test.log`, and (when requested) `review.md` with `cbx_artifact`. Compare these primary artifacts before summarizing; `result.json` alone is not sufficient evidence. On failure, read the available evidence plus `cbx_review` + `cbx_logs`.
 4. **Rework** (if needed): `cbx_continue` with a fix message and refreshed `context_snapshot` re-queues the job. For `baseline_drift` or `dirty_baseline`, use `refresh_baseline: true` only after the main Agent confirms the current HEAD and dirty state are intended. An isolated dirty baseline must be committed or cleaned first.
+
+### Task contract template
+
+For non-trivial tasks, pass `task_contract` to `cbx_start`. This enables a plan-only `understanding.json` handshake — blocking ambiguity stops as `needs_fix / awaiting_clarification` instead of being guessed. Always fill at least `goal`, `acceptance_criteria`, and `constraints`; the rest are optional but recommended.
+
+```json
+{
+  "task_contract": {
+    "goal": "实现用户登录功能（POST /api/auth/login）",
+    "acceptance_criteria": [
+      "npm test 通过（覆盖率 ≥ 80%）",
+      "新接口出现在 OpenAPI 文档里",
+      "密码字段不回显到日志"
+    ],
+    "non_goals": [
+      "不做 SSO/三方登录",
+      "不改现有用户表 schema"
+    ],
+    "constraints": [
+      "禁止在源代码里硬编码任何 secret",
+      "只能改 src/auth/ 下的文件"
+    ],
+    "relevant_files": [
+      "src/auth/login.ts",
+      "src/middleware/session.ts",
+      "tests/auth/login.test.ts"
+    ],
+    "decisions": [
+      "采用 JWT 而非 session cookie（理由：API 端要 stateless）"
+    ],
+    "rejected_options": [
+      "不用 Passport.js（理由：依赖过重，需求里没要求三方登录）"
+    ],
+    "assumptions": [
+      "假设 Node.js ≥ 20 且测试框架是 Vitest",
+      "假设 rate-limit 需求不在本次范围"
+    ]
+  }
+}
+```
+
+Field reference:
+
+| Field | Purpose |
+|---|---|
+| `goal` | One-sentence description of what success looks like. |
+| `acceptance_criteria` | Verifiable, testable conditions (the worker checks these before declaring done). |
+| `non_goals` | Explicitly out of scope — prevents scope creep and contradictory reviews. |
+| `constraints` | Hard rules (file boundaries, dependency limits, security/compliance). |
+| `relevant_files` | Starting points the executor should read. Reduces wandering. |
+| `decisions` | Choices already made; saves a round-trip. |
+| `rejected_options` | Alternatives considered and why they're off the table. |
+| `assumptions` | Things the worker is allowed to take for granted. |
+
+Keep `acceptance_criteria` short and verifiable. Long lists dilute the review signal; aim for 3–6 items.
+
+## Job status decision tree
+
+When polling reaches a terminal status, branch on it. **Do not** call `cbx_continue` blindly on any failure — different statuses need different fixes.
+
+`cbx_status` returns both a `status` (the coarse state machine) and a `phase` (the fine-grained reason). The statuses below are the terminal values of `status`; the `phase` column disambiguates cases that share `needs_fix`.
+
+| Status | Phase | Meaning | Agent action |
+|---|---|---|---|
+| `done` | — | Tests passed, review (if requested) passed. | `cbx_result` + read `handback.md`, `complete.patch`, `test.log`, `review.md` via `cbx_artifact`. Summarize for the user. |
+| `awaiting_approval` | `before_run` | Config has `approval.beforeRun: true`. | Call `cbx_approve` after user confirms, or `cbx_cancel` if declined. Do not auto-approve. |
+| `needs_fix` | `awaiting_clarification` | `task_contract` had a blocking ambiguity. | Read the worker's `understanding.json`; ask the user the unanswered question, then `cbx_continue` with refined `task_contract`. |
+| `needs_fix` | `baseline_drift` | HEAD moved or dirty-content fingerprint changed since the job was created. | Confirm with the user that the new HEAD is intended. If yes, `cbx_continue` with `refresh_baseline: true`. If no, ask them to clean up first. |
+| `needs_fix` | `dirty_baseline` (isolated only) | Job creation saw uncommitted changes; cbx refused to silently include them. | Ask the user to commit or `git restore` the dirty files. Then `cbx_continue` with `refresh_baseline: true`. |
+| `needs_fix` | `reviewing` | Review verdict is FAIL but tests passed. | Read `review.md` via `cbx_artifact`. Build a specific fix message and call `cbx_continue`. |
+| `needs_fix` | (other) | Worker self-reported a blocker it cannot resolve (missing dep, etc.). | Read the latest events via `cbx_logs`; usually requires user input. |
+| `failed` | (test) | Test command exited non-zero. | Read `test.log` via `cbx_artifact`. Build a targeted fix message and call `cbx_continue`. |
+| `failed` | (executor) | Executor process crashed or timed out. | Read the executor's stdout/stderr in `cbx_logs` (`process_finished` events). Often a transient issue — `cbx_retry` may be simpler than a fresh `cbx_continue`. |
+| `review_failed` | `reviewing` | Review phase itself errored (reviewer CLI unavailable, etc.). | Check executor availability. If it is, `cbx_retry` once; otherwise ask the user to switch `review_executor`. |
+| `cancelled` | — | User or agent called `cbx_cancel`. | **Do not** `cbx_continue` a cancelled job — the queue entry is marked cancelled and the executor will reject the re-queue. Create a new job via `cbx_start` instead. |
+
+Rules of thumb:
+- Always read primary artifacts (`handback.md`, `complete.patch`, `test.log`, `review.md`) before summarizing. `result.json` is metadata, not evidence.
+- Never auto-loop on `cbx_continue`. After 2 consecutive failures with the same root cause, stop and ask the user — the next fix probably needs a human decision, not another retry.
+- `cancelled` is sticky. Always start a new job.
+
+## Review configuration
+
+cbx runs an independent review after tests pass (when `review: true`). The review verdict decides whether `done` is reached. Configure it at two levels:
+
+### Project config (`.cbx.json`)
+
+```json
+{
+  "review": true,
+  "review_executor": "opencode",
+  "reviewRules": "重点检查鉴权、数据校验、回归测试和错误处理是否显式。"
+}
+```
+
+| Field | Effect |
+|---|---|
+| `review` | Master switch (default true). `false` skips the entire review phase. |
+| `review_executor` | Reviewer CLI. Falls back through: stage-level `review_executor` → this job-level value → the executor itself. Set this to avoid self-review bias. |
+| `reviewRules` | Free-form text injected into the reviewer's prompt. Empty = default behavior. |
+
+### Per-job override (MCP `cbx_start`)
+
+```json
+{
+  "executor": "codebuddy",
+  "review_executor": "cline",
+  "review": true,
+  "review_rules": "本次只关注安全漏洞和硬编码 secret。"
+}
+```
+
+Note the snake_case `review_rules` for the MCP argument vs `reviewRules` in `.cbx.json` — cbx normalizes both. CLI flag is `--review-rules`.
+
+### Per-stage override (stage chain)
+
+Inside `task_contract.stages[i]`:
+- `review_executor` — independent reviewer for that stage only.
+- `skip_review: true` — skip review for that stage (e.g. a fast scaffold step).
+
+### Common configurations
+
+- **Single-CLI, default behavior** (simplest): just `"review": true`. Reviewer = executor.
+- **Two-CLI split** (recommended for production): executor writes, different CLI reviews.
+  ```json
+  { "executor": "codebuddy", "review_executor": "opencode" }
+  ```
+- **Skip review for fast scaffolding**:
+  ```json
+  { "task_contract": { "stages": [
+    { "name": "scaffold", "skip_review": true },
+    { "name": "implement" }
+  ]}}
+  ```
+
+### Review verdict
+
+`cbx_artifact review.md` returns the full report. cbx parses the first line for `VERDICT: PASS` or `VERDICT: FAIL` (case-insensitive). PASS → stage passes; FAIL → `needs_fix`. An unparsable verdict is handled differently by the two review paths: the stop-gate (`cbx_review_gate`) fails open and records `UNKNOWN`; the in-stage review (when `review: true`) treats it as FAIL and re-queues. There is no separate WARN verdict.
 
 ## Realtime mode workflow (CLI streaming)
 
@@ -103,6 +254,21 @@ Set `review_executor` (or `.cbx.json` `reviewExecutor`) to use a different revie
 ## Stage chain: multi-tool handoff in a single job
 
 cbx supports a **stage chain** — multiple executors接力 within one job, sharing a worktree. Each stage's `handback.md` is automatically fed forward to the next stage's prompt. This is cleaner than chaining separate jobs because all stages share one worktree, one diff, and one result.
+
+### When to use stages (vs single stage + `review_executor`)
+
+Pick stages when stages add real value. Otherwise a single stage with `review_executor` is simpler.
+
+| Situation | Use |
+|---|---|
+| Write code, then independently review it | Single stage + `review_executor` |
+| Same tool, multiple passes (e.g. implement → refactor → test) | Single stage with a thorough `task` |
+| Different tools, each owning a distinct phase (scaffold → deep impl → security audit) | Stage chain |
+| User explicitly says "先 X 再 Y" / "分步做" / "分阶段" | Stage chain |
+| Quota splitting — one CLI has the free tier, another does not | Stage chain, picking executors per stage |
+| Need a fast scaffold step before a slow review step | Stage chain with `skip_review: true` on scaffold |
+
+Rule of thumb: **if a stage needs its own review verdict and a different reviewer, it's a real stage**. If it's just "more prompts in the same call", keep it in one stage with a longer task description.
 
 **When to use stages**: different tools have different strengths (e.g. codebuddy scaffolds fast, opencode implements deep logic, cline reviews on free quota). Stages let each tool do its best part within a single atomic task.
 
@@ -150,6 +316,96 @@ If `task_contract.stages` is absent, cbx runs a single synthetic `implementation
 ## Isolation
 
 `isolated: true` (default in the plugin) runs each task in a fresh git worktree under `.<repo>.cbx-worktrees/<job-id>`, so the main workspace is never polluted. `auto_branch` + `auto_commit` further commit results on a `cbx/<job-id>` branch. Keep isolation ON unless the task must touch the working tree directly.
+
+## End-to-end example
+
+A user asks: **"帮我实现用户登录接口，跑通测试 + 安全审查"**. Here is the full agent flow.
+
+### 1. Decide to use cbx
+
+Run the quick decision checklist. This task is multi-file (auth + middleware + tests), needs tests + review, and the user is fine with background — all axes point to cbx. Dispatch.
+
+### 2. Dispatch
+
+```json
+mcp__cbx__cbx_start({
+  "task": "实现用户登录接口 POST /api/auth/login",
+  "test_command": "npm test",
+  "review": true,
+  "review_executor": "opencode",
+  "task_contract": {
+    "goal": "用户能用邮箱+密码登录，签发 JWT，会话可被服务端吊销",
+    "acceptance_criteria": [
+      "npm test 通过",
+      "登录接口 401/200 路径都被覆盖",
+      "密码字段不进入任何日志"
+    ],
+    "non_goals": ["不做 SSO/三方登录", "不改 user 表结构"],
+    "constraints": ["禁止硬编码 secret", "改动只在 src/auth/ 下"],
+    "relevant_files": ["src/auth/", "tests/auth/"]
+  }
+})
+```
+
+Returns `{ job_id: "job-abc123", status: "queued" }`. **Tell the user immediately**: `已委派给 cbx，job_id=job-abc123，跑完后我会拉结果给你。`
+
+### 3. Poll (incremental)
+
+```text
+offset = 0
+loop:
+  r = mcp__cbx__cbx_logs({ job_id: "job-abc123", since: offset })
+  offset = r.next_offset
+  for each e in r.events:
+    if e.type in {process_started, process_finished, test, review_verdict}:
+      surface to user (one short line each)
+  s = mcp__cbx__cbx_status({ job_id: "job-abc123" })
+  if s.status in {done, failed, needs_fix, review_failed, cancelled, awaiting_approval}:
+    break
+  sleep(min(2 ** attempt, 15))   # exponential backoff capped at 15s
+```
+
+### 4. Branch on terminal status
+
+Say the job reached `needs_fix / review_failed` because the reviewer found two issues. The decision tree says: read `review.md`, build a fix message, call `cbx_continue`.
+
+```json
+mcp__cbx__cbx_artifact({ job_id: "job-abc123", name: "review.md" })
+```
+
+Suppose the report says: (a) JWT 过期时间硬编码 24h, (b) 错误信息泄露用户是否存在. Build a specific message:
+
+```json
+mcp__cbx__cbx_continue({
+  "job_id": "job-abc123",
+  "message": "按 review.md 修复：(1) JWT 过期时间从 env JWT_TTL 读取，默认 1h；(2) 登录失败统一返回 '凭证无效'，不区分用户存在与否。改完跑 npm test 验证。",
+  "context_snapshot": "前一轮：实现已完成，review 失败 2 项。"
+})
+```
+
+This re-queues. Resume polling from step 3.
+
+### 5. On `done`
+
+```json
+mcp__cbx__cbx_result({ job_id: "job-abc123" })
+mcp__cbx__cbx_artifact({ job_id: "job-abc123", name: "handback.md" })
+mcp__cbx__cbx_artifact({ job_id: "job-abc123", name: "complete.patch" })
+mcp__cbx__cbx_artifact({ job_id: "job-abc123", name: "test.log" })
+mcp__cbx__cbx_artifact({ job_id: "job-abc123", name: "review.md" })
+```
+
+Cross-check: the patch matches the handback, tests are green, review verdict is PASS. **Then** summarize to the user — list the changed files, the test result, and the review verdict. Do not summarize from `result.json` alone.
+
+### 6. Hand off to the user
+
+```
+搞定了，job-abc123 已 done：
+- 改了 4 个文件（src/auth/login.ts, src/middleware/session.ts, ...）
+- npm test 11/11 通过
+- review 通过，2 个小建议已记入 review.md
+- 完整产物在 .cbx/jobs/job-abc123/，需要的话可以 `cbx files job-abc123` 看
+```
 
 ## Safety notes
 
