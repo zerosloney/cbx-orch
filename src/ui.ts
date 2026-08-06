@@ -2,6 +2,53 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import { open, stat } from "node:fs/promises";
 import path from "node:path";
 import { health, listArtifacts, listJobs, listQueue, loadState, readArtifact } from "./core.js";
+import { capture } from "./process-runner.js";
+
+interface WorkspaceSummary {
+  path: string;
+  name: string;
+  jobsByStatus: Record<string, number>;
+  queueDepth: number;
+  paused: boolean;
+  activeExecutors: number;
+  lastActivityAt: string | null;
+  gitBranch: string | null;
+  gitDirty: boolean | null;
+}
+
+async function summarizeWorkspace(workspace: string): Promise<WorkspaceSummary> {
+  const [jobs, queue] = await Promise.all([listJobs(workspace), listQueue(workspace)]);
+  const jobsByStatus: Record<string, number> = {};
+  let activeExecutors = 0;
+  let lastActivityAt: string | null = null;
+  for (const job of jobs) {
+    const status = String(job.status);
+    jobsByStatus[status] = (jobsByStatus[status] ?? 0) + 1;
+    if (status === "running") activeExecutors += 1;
+    const updated = String(job.updatedAt ?? "");
+    if (updated && (!lastActivityAt || updated > lastActivityAt)) lastActivityAt = updated;
+  }
+  const queueDepth = (queue.entries ?? []).filter((entry) => ["queued", "running", "awaiting_approval"].includes(String(entry.status))).length;
+  let gitBranch: string | null = null;
+  let gitDirty: boolean | null = null;
+  try {
+    const branch = capture(["git", "branch", "--show-current"], workspace);
+    if (branch.code === 0) gitBranch = branch.stdout.trim() || null;
+    const statusResult = capture(["git", "status", "--porcelain"], workspace);
+    if (statusResult.code === 0) gitDirty = Boolean(statusResult.stdout.trim());
+  } catch { /* not a git repo, leave null */ }
+  return {
+    path: workspace,
+    name: path.basename(workspace) || workspace,
+    jobsByStatus,
+    queueDepth,
+    paused: Boolean(queue.paused),
+    activeExecutors,
+    lastActivityAt,
+    gitBranch,
+    gitDirty,
+  };
+}
 
 const page = `<!doctype html>
 <html><head><meta charset="utf-8"><title>CBX Orchestrator</title>
@@ -163,31 +210,49 @@ function startEventTailer(workspace: string, onEvent: (event: Record<string, unk
 
 export function createWebUiServer(workspace: string | string[], host = "127.0.0.1", port = 4173): Server {
   if (!new Set(["127.0.0.1", "localhost", "::1"]).has(host)) throw new Error("Web UI 仅允许绑定到本机回环地址；远程访问需要在受认证的反向代理后显式实现。");
-  // commit 1 兼容层:支持 string | string[]。单值原样,数组取第一个作为 active workspace(用于事件流 tailer);
-  // 完整多 workspace 路由在 commit 2 加上,这里先确保向后兼容(所有调用走原路径)。
   const workspaces = Array.isArray(workspace) ? workspace : [workspace];
-  const activeWorkspace = workspaces[0] ?? ".";
+  // 默认 workspace:多 workspace 时取第一个,单 workspace 时取该值。客户端可经 ?workspace=<encoded> 覆盖。
+  const defaultWorkspace = workspaces[0] ?? ".";
   const clients = new Set<ServerResponse>();
   const broadcast = (event: Record<string, unknown>): void => {
     const message = `data: ${JSON.stringify(event)}\n\n`;
     for (const client of clients) client.write(message);
   };
-  const stopTailer = startEventTailer(activeWorkspace, broadcast);
+  // 为每个 workspace 启动独立 tailer;事件附 workspace 字段,前端可按 workspace 过滤着色。
+  const stopTailers: Array<() => void> = [];
+  for (const ws of workspaces) {
+    const tailer = startEventTailer(ws, (event) => broadcast({ ...event, workspace: ws }));
+    stopTailers.push(tailer);
+  }
+  // 从 URL query 中选 workspace;不在白名单内时降级到 default,避免任意路径枚举。
+  const resolveWorkspace = (url: URL): string => {
+    const requested = url.searchParams.get("workspace");
+    if (requested) {
+      const resolved = path.resolve(decodeURIComponent(requested));
+      if (workspaces.some((item) => item === resolved)) return resolved;
+    }
+    return defaultWorkspace;
+  };
   const server = createServer(async (req, res) => {
     try {
       if (req.method !== "GET") return json(res, { error: "method not allowed" }, 405);
       const url = new URL(req.url ?? "/", `http://${host}:${port}`);
       if (url.pathname === "/") return text(res, page, "text/html; charset=utf-8");
-      if (url.pathname === "/events") { res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }); clients.add(res); res.write(`data: ${JSON.stringify({ at: new Date().toISOString(), type: "connected" })}\n\n`); req.on("close", () => clients.delete(res)); return; }
-      if (url.pathname === "/api/jobs") return json(res, await listJobs(activeWorkspace));
-      if (url.pathname === "/api/queue") return json(res, await listQueue(activeWorkspace));
-      if (url.pathname === "/healthz" || url.pathname === "/api/metrics") return json(res, await health(activeWorkspace));
+      if (url.pathname === "/events") { res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }); clients.add(res); res.write(`data: ${JSON.stringify({ at: new Date().toISOString(), type: "connected", workspaces })}\n\n`); req.on("close", () => clients.delete(res)); return; }
+      if (url.pathname === "/api/workspaces") {
+        const summaries = await Promise.all(workspaces.map((ws) => summarizeWorkspace(ws).catch((error) => ({ path: ws, name: path.basename(ws) || ws, error: error instanceof Error ? error.message : String(error) }))));
+        return json(res, { workspaces: summaries, default: defaultWorkspace });
+      }
+      const ws = resolveWorkspace(url);
+      if (url.pathname === "/api/jobs") return json(res, await listJobs(ws));
+      if (url.pathname === "/api/queue") return json(res, await listQueue(ws));
+      if (url.pathname === "/healthz" || url.pathname === "/api/metrics") return json(res, await health(ws));
       const job = /^\/api\/jobs\/([^/]+)$/.exec(url.pathname);
-      if (job) return json(res, await loadState(activeWorkspace, job[1]));
+      if (job) return json(res, await loadState(ws, job[1]));
       const artifacts = /^\/api\/jobs\/([^/]+)\/artifacts$/.exec(url.pathname);
-      if (artifacts) return json(res, await listArtifacts(activeWorkspace, artifacts[1]));
+      if (artifacts) return json(res, await listArtifacts(ws, artifacts[1]));
       const artifact = /^\/api\/jobs\/([^/]+)\/artifact\/([^/]+)$/.exec(url.pathname);
-      if (artifact) return text(res, await readArtifact(activeWorkspace, artifact[1], artifact[2]));
+      if (artifact) return text(res, await readArtifact(ws, artifact[1], artifact[2]));
       return json(res, { error: "not found" }, 404);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -198,7 +263,7 @@ export function createWebUiServer(workspace: string | string[], host = "127.0.0.
   });
   const heartbeat = setInterval(() => { const message = `data: ${JSON.stringify({ at: new Date().toISOString(), type: "heartbeat" })}\n\n`; for (const client of clients) client.write(message); }, 1500);
   heartbeat.unref();
-  server.on("close", () => { clearInterval(heartbeat); stopTailer(); });
+  server.on("close", () => { clearInterval(heartbeat); for (const stop of stopTailers) stop(); });
   return server;
 }
 
