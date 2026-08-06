@@ -441,6 +441,30 @@ test("approval gate pauses and resumes a task", async () => {
   assert.equal((await executeJob(workspace, job.jobId)).status, "done");
 });
 
+test("background approval gate finishes its queue entry without spawning another worker", async () => {
+  const { workspace } = await setupFake();
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ maxConcurrent: 1 }), "utf8");
+  const job = await createJob({ workspace, task: "后台批准", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, approvalBeforeRun: true, jobId: "background-approval" });
+  await startBackground(workspace, job.jobId);
+
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && (await loadState(workspace, job.jobId)).status !== "awaiting_approval") {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const entry = (await listQueue(workspace)).entries.find(item => item.jobId === job.jobId);
+  assert.equal((await loadState(workspace, job.jobId)).status, "awaiting_approval");
+  assert.equal(entry?.status, "awaiting_approval");
+  assert.equal(entry?.pid, undefined);
+
+  const { dispatchQueue } = await import("../src/core.js");
+  await dispatchQueue(workspace);
+  await dispatchQueue(workspace);
+  const after = (await listQueue(workspace)).entries.filter(item => item.jobId === job.jobId);
+  assert.equal(after.length, 1);
+  assert.equal(after[0].status, "awaiting_approval");
+  assert.equal(after[0].pid, undefined);
+});
+
 test("persistent queue respects maxConcurrent", async () => {
   const { workspace } = await setupFake();
   await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ maxConcurrent: 1 }), "utf8");

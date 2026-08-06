@@ -1,13 +1,13 @@
 {
   "name": "cbx-orch",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "license": "MIT",
   "private": false,
   "publishConfig": {
     "access": "public"
   },
   "files": [
-    "dist/",
+    "dist/src/",
     "README.md",
     "LICENSE",
     "SECURITY.md",

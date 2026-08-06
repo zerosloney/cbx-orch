@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { inspectExecutorPlugin } from "../src/executor.js";
+import { inspectExecutorPlugin, loadExecutorPlugin } from "../src/executor.js";
 
 const manifest = `export const manifest = { apiVersion: "cbx.executor/v1", name: "approved", version: "1.2.3", capabilities: ["execute"] }; export async function run() { return { code: 0 }; }`;
 
@@ -65,4 +65,21 @@ test("legacy plugins remain compatible unless policy enforcement is enabled", as
       }),
     /缺少 manifest/,
   );
+});
+
+test("expected SHA mismatch rejects before plugin top-level code runs", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-plugin-sha-"));
+  const plugin = path.join(workspace, "changed.mjs");
+  const sideEffect = path.join(workspace, "plugin-ran");
+  await writeFile(
+    plugin,
+    `import { writeFile } from "node:fs/promises"; await writeFile(${JSON.stringify(sideEffect)}, "ran"); ${manifest}`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => loadExecutorPlugin(plugin, workspace, {}, "0".repeat(64)),
+    /内容在启动前发生变化/,
+  );
+  await assert.rejects(() => access(sideEffect), { code: "ENOENT" });
 });

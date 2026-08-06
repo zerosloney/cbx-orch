@@ -612,7 +612,7 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
   }
   assertExecutionPolicy(context.trustMode ?? "trusted", context.isolated);
   if (context.approvalBeforeRun && initial.approved !== true) {
-    return writeState(workspace, jobId, { status: "awaiting_approval", phase: "before_run", approvalRequired: true });
+    return writeState(workspace, jobId, { status: "awaiting_approval", phase: "before_run", approvalRequired: true }, queueEntryId);
   }
   const drift = evaluateBaselineDrift(context, workspace);
   if (context.isolated && context.baseDirty) {
