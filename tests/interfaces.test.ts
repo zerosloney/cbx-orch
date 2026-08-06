@@ -28,7 +28,10 @@ test("Web UI exposes read-only local routes without wildcard CORS", async () => 
     const pageHtml = await page.text();
     assert.match(pageHtml, /CBX Orchestrator/);
     assert.match(pageHtml, /<button type="button" class="job-select">/);
-    assert.match(pageHtml, /<button type="button" class="art" data-name=/);
+    // commit 5: detail panel is now tabbed; verify the tab-related CSS ships with the page.
+    assert.match(pageHtml, /\.tabs\{/);
+    assert.match(pageHtml, /\.tab-panel/);
+    assert.match(pageHtml, /timeline-row/);
     const jobs = await fetch(`http://127.0.0.1:${port}/api/jobs`);
     assert.equal(jobs.headers.get("access-control-allow-origin"), null);
     assert.equal((await jobs.json() as Array<{ jobId: string }>)[0].jobId, job.jobId);
@@ -41,6 +44,35 @@ test("Web UI exposes read-only local routes without wildcard CORS", async () => 
     assert.equal((await fetch(`http://127.0.0.1:${port}/api/jobs/${job.jobId}/artifact/context.json.bak`)).status, 403);
   } finally { await closeServer(server); }
   assert.throws(() => createWebUiServer(workspace, "0.0.0.0"), /回环地址/);
+});
+
+test("Web UI exposes job detail APIs (timeline / executor / agent.log)", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-ui-detail-"));
+  const job = await createJob({ workspace, task: "detail", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "detail-job" });
+  const jobDirPath = path.join(workspace, ".cbx", "jobs", job.jobId);
+  await writeFile(path.join(jobDirPath, "events.ndjson"), [
+    JSON.stringify({ event: "job.state_changed", jobId: job.jobId, status: "queued", phase: "queued", at: "2026-08-06T11:00:00.000Z" }),
+    JSON.stringify({ event: "process_started", command: ["codebuddy", "-p", "do work"], at: "2026-08-06T11:00:05.000Z" }),
+    JSON.stringify({ event: "job.state_changed", jobId: job.jobId, status: "running", phase: "executor", at: "2026-08-06T11:00:05.000Z" }),
+  ].join("\n") + "\n", "utf8");
+  await writeFile(path.join(jobDirPath, "agent.log"), "fake executor output\n", "utf8");
+  const server = createWebUiServer(workspace);
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const timeline = await (await fetch(`http://127.0.0.1:${port}/api/jobs/${job.jobId}/timeline`)).json() as { stages: Array<{ name: string }>; currentStage: string | null; elapsedSec: number };
+    assert.equal(timeline.stages.length, 2);
+    assert.equal(timeline.stages[0].name, "queued");
+    assert.equal(timeline.currentStage, "running");
+    assert.ok(timeline.elapsedSec >= 0);
+    const executor = await (await fetch(`http://127.0.0.1:${port}/api/jobs/${job.jobId}/executor`)).json() as { pid: number | null; alive: boolean | null; command: string | null };
+    assert.equal(executor.pid, null);
+    assert.equal(executor.alive, null);
+    assert.equal(executor.command, "codebuddy -p do work");
+    const log = await (await fetch(`http://127.0.0.1:${port}/api/jobs/${job.jobId}/agent.log?since=0`)).json() as { content: string; truncated: boolean };
+    assert.match(log.content, /fake executor output/);
+    assert.equal(log.truncated, false);
+  } finally { await closeServer(server); }
 });
 
 test("MCP initialize, tools, resources and errors preserve request ids", async () => {
