@@ -80,7 +80,7 @@ export interface JobState {
   [key: string]: unknown;
 }
 
-const APP_VERSION = "0.9.0";
+const APP_VERSION = "0.10.0";
 
 /** 把降级路径的失败原因落到 job 事件流，避免裸吞导致排障无据。 */
 function logJobEvent(workspace: string, jobId: string, event: string, detail: Record<string, unknown> = {}): void {
