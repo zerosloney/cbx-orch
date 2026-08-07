@@ -26,6 +26,12 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 - Fix: `validateTestCommand` 注入防线收紧：拦截换行/回车、反引号、`$(` 命令替换，以及 `rm` 带 `-r`/`-f` 系列短选项或 `--recursive`/`--force` 长选项、`rd /s`、`rmdir /s`、`Remove-Item`、`del /s`、`deltree`、`format`、PowerShell `-enc`/`-encodedcommand` 编码执行等破坏性变体。
 - Fix: executor 指向插件文件但 `plugins.enforce` 未启用时，启动前输出显著告警并向 job 目录 `events.ndjson` 追加 `plugin_policy_warning` 审计事件（含插件路径与 SHA-256）；此前插件可在无路径/SHA 白名单校验的情况下被静默加载。配置 `enforce=true` 且白名单通过时不告警。
 - Test: 新增 `tests/reliability.test.ts`（6 个用例：testCommand 注入矩阵、回收未超阈值续派、熔断超阈值置 failed、终态写与 dispatch 扫描并发不互踩、legacy 导入跳过损坏记录且幂等、插件策略告警触发/抑制），总计 128 个测试。
+- Refactor: 统一 CLI 参数解析。新增 `src/cli-args.ts` 一次解析分离位置参数与选项，消除 `args[0]` 位置依赖——`cbx status --workspace X <jobId>` 这类选项在前的调用不再把选项误当 jobId；需要 jobId 的子命令统一经 `requireJobId` 取首个位置参数，缺失时报明确用法提示；新增支持 `--option=value` 与 `--` 分隔符，`queue pause/resume` 子命令也改从位置参数判定。既有调用形式全部向后兼容；唯一收紧：带值选项（如 `--workspace`）缺值时报明确错误而非静默走默认值。
+- Refactor: 引入统一错误类型 `CbxError` 与错误码（`E_INVALID_JOB_ID` / `E_ARTIFACT_FORBIDDEN` / `E_INVALID_CONTEXT` / `E_LOCK_BUSY` / `E_QUEUE_BUSY`，见 `src/errors.ts`），控制流改为按错误码判定：队列锁忙降级（queue.ts）与 Web UI HTTP 状态映射（403/400）不再匹配错误消息子串；面向用户的文案与既有测试断言保持不变，`core.ts` barrel 导出 `CbxError` / `isCbxError`。
+- Fix: `context.json` 加载增加 schema 校验（`loadJobContext` / `validateJobContext`）：核心必填字段（appVersion/jobId/workspace/createdAt/permissionMode/executor、reviewRequested/isolated、maxTurns/timeoutMs/maxRetries）缺失或类型错误即抛 `E_INVALID_CONTEXT`，不再让半损坏上下文进入执行循环；新增字段（trustMode/executionRetries/fixRetries/approval* 等）存在时做类型检查但不强制，保持旧 job 跨版本续跑不硬阻断（消费方均有 `??` 兜底）；未知字段容忍以兼容后续版本。approval/baseline/execution/result/updateJobContext 五个读写点统一走校验入口。
+- Fix: 随机数与凭据比较加固。queueId 与 jobId 兜底生成从 `Math.random()` 统一为 `crypto.randomBytes`；Web UI Bearer/query token 校验改为 SHA-256 + `timingSafeEqual` 常量时间比较，消除 `===` 逐字节短路的时序侧信道。
+- Test: 新增 `tests/hardening.test.ts`（10 个用例：CLI 解析单元与端到端位置参数、错误码稳定性、队列锁忙 `E_QUEUE_BUSY`、context schema 接受/拒绝、redactText 三种键行形态与正则兜底、staleLock 存活/死 pid/损坏记录分支、git-ops 超 200KB 未跟踪文件截断、crypto 随机数与常量时间比较），总计 138 个测试。
+- Repo: `npm run coverage` 增加最低覆盖率门槛。`scripts/check-coverage.mjs` 运行全量测试后解析覆盖率报告 `all files` 行并校验 lines ≥ 70% / branch ≥ 51% / functions ≥ 74%，低于门槛即失败；采用脚本解析而非高版本 Node 专属 flag，CI 矩阵最低的 Node 20 同样可用。README 质量章节同步说明。
 
 ## 0.10.2 - 2026-08-06
 

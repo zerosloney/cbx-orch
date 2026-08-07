@@ -3,7 +3,8 @@ import { open, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { health, jobDir, listArtifacts, listJobs, listQueue, loadState, readArtifact } from "./core.js";
 import { capture } from "./process-runner.js";
-import { processAlive } from "./storage.js";
+import { constantTimeEqual, processAlive } from "./storage.js";
+import { isCbxError } from "./errors.js";
 
 /** 从请求中提取 Bearer token；SSE 支持 ?token= 查询参数（EventSource 无法设置 header）。 */
 function extractToken(req: IncomingMessage, url: URL): string | undefined {
@@ -14,10 +15,11 @@ function extractToken(req: IncomingMessage, url: URL): string | undefined {
   return undefined;
 }
 
-/** 校验 token；未配置 token 时始终放行。 */
+/** 校验 token；未配置 token 时始终放行。比较走常量时间路径，避免时序侧信道泄漏 token 前缀。 */
 function isAuthorized(req: IncomingMessage, url: URL, expectedToken: string | undefined): boolean {
   if (!expectedToken) return true;
-  return extractToken(req, url) === expectedToken;
+  const provided = extractToken(req, url);
+  return provided !== undefined && constantTimeEqual(provided, expectedToken);
 }
 
 interface WorkspaceSummary {
@@ -627,7 +629,8 @@ export function createWebUiServer(workspace: string | string[], host = "127.0.0.
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const code = (error as NodeJS.ErrnoException)?.code;
-      const status = code === "ENOENT" ? 404 : message.includes("不允许读取") ? 403 : message.includes("无效的任务 ID") ? 400 : 500;
+      // 按错误码映射 HTTP 状态，不再依赖消息文案匹配。
+      const status = code === "ENOENT" ? 404 : isCbxError(error, "E_ARTIFACT_FORBIDDEN") ? 403 : isCbxError(error, "E_INVALID_JOB_ID") ? 400 : 500;
       json(res, { error: message }, status);
     }
   });

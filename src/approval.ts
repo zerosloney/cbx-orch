@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { loadJson, now, withFileLock } from "./storage.js";
+import { loadJson, loadJobContext, now, withFileLock } from "./storage.js";
 import { loadState, loadConfig, writeState, writeApprovalState, jobDir } from "./state.js";
 import { contextRedactor } from "./artifacts.js";
 import { writeResult } from "./result.js";
@@ -8,7 +8,7 @@ import { parseHumanGate, resolveHumanGate } from "./human-gate.js";
 import { parsePendingCompletion, evidenceHashes, completionEvidenceValid, worktreeSha256 } from "./evidence.js";
 import { snapshotDiff, commitWorktree } from "./git-ops.js";
 import { cleanupWorktree } from "./worktree.js";
-import type { JobContext, JobState, Json } from "./types.js";
+import type { JobState, Json } from "./types.js";
 
 async function approveJobLocked(workspaceInput: string, jobId: string): Promise<JobState> {
   const workspace = path.resolve(workspaceInput);
@@ -23,7 +23,7 @@ async function approveJobLocked(workspaceInput: string, jobId: string): Promise<
   }
   if (state.phase !== "before_complete" || gate.reason !== "completion") throw new Error("审批状态与 Human Gate 不一致。");
   const directory = jobDir(workspace, jobId);
-  const context = await loadJson<JobContext>(path.join(directory, "context.json"));
+  const context = await loadJobContext(directory);
   const pending = parsePendingCompletion(state.pendingCompletion);
   const worktreeFile = path.join(directory, "worktree.json");
   const recorded = existsSync(worktreeFile) ? await loadJson<{ path: string }>(worktreeFile) : undefined;

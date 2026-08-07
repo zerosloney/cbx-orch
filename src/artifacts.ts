@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { listPersistedStates, redactText, type RuntimeConfig } from "./storage.js";
 import { jobDir } from "./state.js";
+import { CbxError } from "./errors.js";
 import type { JobState, JobContext } from "./types.js";
 import type { ContextArtifact } from "./context-pack.js";
 
@@ -25,7 +26,7 @@ export async function listJobs(workspaceInput: string): Promise<JobState[]> {
 export async function readArtifact(workspaceInput: string, jobId: string, artifact: string): Promise<string> {
   // 与 listArtifacts 的动态发现保持一致：stage 交接副本 stage-<index>-<name>-handback.md 可读，
   // 但仍按白名单正则校验，防止路径穿越。
-  if (!ARTIFACTS.has(artifact) && !/^stage-\d+-[A-Za-z0-9._-]+-handback\.md$/.test(artifact)) throw new Error(`不允许读取任务文件：${artifact}`);
+  if (!ARTIFACTS.has(artifact) && !/^stage-\d+-[A-Za-z0-9._-]+-handback\.md$/.test(artifact)) throw new CbxError("E_ARTIFACT_FORBIDDEN", `不允许读取任务文件：${artifact}`);
   return readFile(path.join(jobDir(path.resolve(workspaceInput), jobId), artifact), "utf8");
 }
 

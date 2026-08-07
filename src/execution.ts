@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { loadJson, saveJson, now, updateJobContext, withFileLock } from "./storage.js";
+import { loadJobContext, loadJson, saveJson, now, updateJobContext, withFileLock } from "./storage.js";
 import { finishSpan, startSpan } from "./observability.js";
 import { loadState, writeState, loadConfig, jobDir, logJobEvent } from "./state.js";
 import { writeResult } from "./result.js";
@@ -18,13 +18,13 @@ import { resolveExecutor } from "./executors/builtin.js";
 import { dispatchQueue, finishQueueEntry } from "./queue-api.js";
 import { cleanupWorktree } from "./worktree.js";
 import { APP_VERSION } from "./version.js";
-import type { JobContext, JobState, Json, TaskStage, StageReport } from "./types.js";
+import type { JobState, Json, TaskStage, StageReport } from "./types.js";
 
 async function executeJobLocked(workspace: string, jobId: string, extra = "", queueEntryId?: string): Promise<JobState> {
   const directory = jobDir(workspace, jobId);
   const initial = await loadState(workspace, jobId);
-  const context = await loadJson<JobContext>(path.join(directory, "context.json"));
-  // intentional-simple: 旧 job 跨版本续跑时告警但不硬阻断——context schema 向后兼容。
+  const context = await loadJobContext(directory);
+  // intentional-simple: 旧 job 跨版本续跑时新增字段走可选校验与 ?? 兜底，不硬阻断；schema 损坏才拒绝。
   // 新功能字段（如 dependencyGuard）从 .cbx.json 同步到已持久化 context，避免旧任务遗漏。
   const runtimeConfig = await loadConfig(workspace);
   if (runtimeConfig.dependencyGuard && !context.dependencyGuard) {
@@ -268,7 +268,7 @@ async function prepareContinuationUnlocked(workspace: string, jobId: string, ins
   if (gate.reason === "max_rounds") {
     if (!extraRounds) return { instructions: safeInstructions, blocked: state };
     const directory = jobDir(workspace, jobId);
-    const context = await loadJson<JobContext>(path.join(directory, "context.json"));
+    const context = await loadJobContext(directory);
     if (!context.adaptive?.enabled) throw new Error("max_rounds gate 缺少 Adaptive 配置。");
     context.adaptive.maxRounds = extendRoundLimit(context.adaptive.maxRounds, extraRounds);
     await saveJson(path.join(directory, "context.json"), context);

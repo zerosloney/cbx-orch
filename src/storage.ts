@@ -1,8 +1,10 @@
 import { mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import Database from "better-sqlite3";
 import { normalizeAdaptiveOptions } from "./adaptive-manager.js";
+import { CbxError, type CbxErrorCode } from "./errors.js";
+import type { JobContext } from "./types.js";
 
 export function now(): string { return new Date().toISOString(); }
 
@@ -322,7 +324,8 @@ export function processAlive(pid?: number): boolean {
 
 interface LockRecord { pid?: number; acquiredAt?: string; token?: string; }
 
-async function staleLock(file: string, staleAfterMs: number): Promise<boolean> {
+/** 判定锁文件是否可回收：存活 pid 永远持有锁；死 pid 或超龄（acquiredAt 缺失时退回 mtime）视为过期。导出供测试覆盖各分支。 */
+export async function staleLock(file: string, staleAfterMs: number): Promise<boolean> {
   let record: LockRecord = {};
   let modifiedAt = 0;
   try {
@@ -352,7 +355,7 @@ async function reclaimLock(file: string): Promise<boolean> {
   }
 }
 
-export async function withFileLock<T>(file: string, action: () => Promise<T>, options: { retries?: number; retryDelayMs?: number; staleAfterMs?: number; busyMessage?: string } = {}): Promise<T> {
+export async function withFileLock<T>(file: string, action: () => Promise<T>, options: { retries?: number; retryDelayMs?: number; staleAfterMs?: number; busyMessage?: string; busyCode?: CbxErrorCode } = {}): Promise<T> {
   const retries = options.retries ?? 40;
   const retryDelayMs = options.retryDelayMs ?? 50;
   const staleAfterMs = options.staleAfterMs ?? 30_000;
@@ -367,7 +370,7 @@ export async function withFileLock<T>(file: string, action: () => Promise<T>, op
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       if (await staleLock(file, staleAfterMs) && await reclaimLock(file)) continue;
-      if (attempt >= retries) throw new Error(options.busyMessage ?? "锁正在被另一个进程持有，请稍后重试。");
+      if (attempt >= retries) throw new CbxError(options.busyCode ?? "E_LOCK_BUSY", options.busyMessage ?? "锁正在被另一个进程持有，请稍后重试。");
       await new Promise(resolve => setTimeout(resolve, retryDelayMs));
     }
   }
@@ -384,13 +387,76 @@ export async function withFileLock<T>(file: string, action: () => Promise<T>, op
 /** 队列写互斥的唯一来源：调度器整 blob 写回与 worker 终态双写必须共用同一把锁，否则会互相覆盖。 */
 export function queueLockFile(workspace: string): string { return path.join(workspace, ".cbx", "queue.lock"); }
 export function withQueueLock<T>(workspace: string, action: () => Promise<T>, options: { retries?: number } = {}): Promise<T> {
-  return withFileLock(queueLockFile(workspace), action, { retries: options.retries ?? 40, busyMessage: "队列正在被另一个调度器更新，请稍后重试。" });
+  return withFileLock(queueLockFile(workspace), action, { retries: options.retries ?? 40, busyMessage: "队列正在被另一个调度器更新，请稍后重试。", busyCode: "E_QUEUE_BUSY" });
+}
+
+/** 常量时间字符串比较：两侧先各取 SHA-256 再 timingSafeEqual，同时规避长度泄漏与逐字节时序差异。 */
+export function constantTimeEqual(actual: string, expected: string): boolean {
+  const left = createHash("sha256").update(actual, "utf8").digest();
+  const right = createHash("sha256").update(expected, "utf8").digest();
+  return timingSafeEqual(left, right);
+}
+
+// ---- context.json schema 校验：必填字段缺失或类型错误即拒绝加载，避免半损坏上下文在执行中途引发不可预期行为 ----
+
+function contextFieldError(field: string, expectation: string): CbxError {
+  return new CbxError("E_INVALID_CONTEXT", `context.json 无效：${field} ${expectation}。`);
+}
+function requireContextString(raw: Record<string, unknown>, field: string): void {
+  const value = raw[field];
+  if (typeof value !== "string" || !value.trim()) throw contextFieldError(field, "必须是非空字符串");
+}
+function requireContextBoolean(raw: Record<string, unknown>, field: string): void {
+  if (typeof raw[field] !== "boolean") throw contextFieldError(field, "必须是布尔值");
+}
+function requireContextNumber(raw: Record<string, unknown>, field: string): void {
+  const value = raw[field];
+  if (typeof value !== "number" || !Number.isFinite(value)) throw contextFieldError(field, "必须是有限数字");
+}
+function optionalContextString(raw: Record<string, unknown>, field: string): void {
+  const value = raw[field];
+  // 允许空字符串：git status 等来源合法地产生 ""；仅拒绝非字符串类型。
+  if (value !== undefined && typeof value !== "string") throw contextFieldError(field, "缺省或为字符串");
+}
+function optionalContextBoolean(raw: Record<string, unknown>, field: string): void {
+  const value = raw[field];
+  if (value !== undefined && typeof value !== "boolean") throw contextFieldError(field, "缺省或为布尔值");
+}
+function optionalContextNumber(raw: Record<string, unknown>, field: string): void {
+  const value = raw[field];
+  if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) throw contextFieldError(field, "缺省或为有限数字");
+}
+function optionalContextObject(raw: Record<string, unknown>, field: string): void {
+  const value = raw[field];
+  if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) throw contextFieldError(field, "缺省或为对象");
+}
+
+/** 校验 context.json 内容：核心必填字段齐全且类型正确；后期版本新增字段（trustMode、executionRetries 等）
+ * 存在时做类型检查但不强制要求，保持旧 job 跨版本续跑不被硬阻断（消费方均有 ?? 兜底）。未知字段容忍（前向兼容）。 */
+export function validateJobContext(value: unknown): JobContext {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new CbxError("E_INVALID_CONTEXT", "context.json 无效：必须是对象。");
+  const raw = value as Record<string, unknown>;
+  for (const field of ["appVersion", "jobId", "workspace", "createdAt", "permissionMode", "executor"]) requireContextString(raw, field);
+  for (const field of ["reviewRequested", "isolated"]) requireContextBoolean(raw, field);
+  for (const field of ["maxTurns", "timeoutMs", "maxRetries"]) requireContextNumber(raw, field);
+  for (const field of ["testCommand", "reviewRules", "reviewExecutor", "commitMessage", "baseCommit", "baseBranch", "baseStatus", "dirtyFingerprint", "gitRoot"]) optionalContextString(raw, field);
+  for (const field of ["keepWorktree", "approvalBeforeRun", "approvalBeforeComplete", "autoBranch", "autoCommit", "baseDirty", "dependencyGuard"]) optionalContextBoolean(raw, field);
+  for (const field of ["executionRetries", "fixRetries"]) optionalContextNumber(raw, field);
+  if (raw.trustMode !== undefined && raw.trustMode !== "trusted" && raw.trustMode !== "untrusted") throw contextFieldError("trustMode", "缺省或为 trusted/untrusted");
+  optionalContextObject(raw, "taskContract");
+  optionalContextObject(raw, "adaptive");
+  return value as JobContext;
+}
+
+/** 读取并校验任务的 context.json；schema 损坏时抛出带 E_INVALID_CONTEXT 错误码的异常（文件缺失则按 loadJson 原样抛 ENOENT），不返回半成品。 */
+export async function loadJobContext(directory: string): Promise<JobContext> {
+  return validateJobContext(await loadJson<unknown>(path.join(directory, "context.json")));
 }
 
 export async function updateJobContext(workspace: string, jobId: string, updates: Record<string, unknown>): Promise<void> {
   const directory = path.join(workspace, ".cbx", "jobs", jobId);
   const file = path.join(directory, "context.json");
-  const current = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+  const current = { ...(await loadJobContext(directory)) } as Record<string, unknown>;
   Object.assign(current, updates);
   await saveJson(file, current);
 }

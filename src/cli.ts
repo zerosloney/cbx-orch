@@ -4,19 +4,13 @@ import path from "node:path";
 import { approveJob, cancelJob, cleanupWorktree, dispatchQueue, createJob, executeJob, health, jobDir, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, resumeQueue, retryQueueJob, serveQueue, startBackground } from "./core.js";
 import { runReviewGate, stopReviewGateHook } from "./review-gate.js";
 import { runTui, startWebUi } from "./ui.js";
+import { parseCliArgs, type CliArgs } from "./cli-args.js";
 
-function option(args: string[], name: string, fallback?: string): string | undefined {
-  const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : fallback;
-}
-
-function has(args: string[], name: string): boolean { return args.includes(name); }
-
-/** 收集同一 flag 多次出现的值,用于 `cbx ui --workspace A --workspace B`。 */
-function collectAll(args: string[], name: string): string[] {
-  const values: string[] = [];
-  for (let i = 0; i < args.length; i += 1) if (args[i] === name && i + 1 < args.length) values.push(args[i + 1]);
-  return values;
+/** 需要 jobId 的子命令统一从位置参数取，缺失时给出明确用法提示而非 undefined 透传。 */
+function requireJobId(parsed: CliArgs, command: string): string {
+  const jobId = parsed.positionals[0];
+  if (!jobId) throw new Error(`请提供任务 ID。用法：cbx ${command} <jobId> [选项]`);
+  return jobId;
 }
 
 /** 扫描根目录下含 .cbx/ 的直接子目录(1 层深度,不递归)。返回绝对路径列表。 */
@@ -54,37 +48,38 @@ function dedupWorkspaces(paths: string[]): string[] {
 function print(value: unknown): void { console.log(JSON.stringify(value, null, 2)); }
 
 async function main(): Promise<void> {
-  const [command, ...args] = process.argv.slice(2);
-  const workspace = option(args, "--workspace", ".")!;
+  const [command, ...rest] = process.argv.slice(2);
+  const parsed = parseCliArgs(rest);
+  const workspace = parsed.option("--workspace", ".")!;
   if (["run", "start"].includes(command)) {
-    let task = option(args, "--task");
-    const taskFile = option(args, "--task-file");
+    let task = parsed.option("--task");
+    const taskFile = parsed.option("--task-file");
     if (taskFile) task = await readFile(taskFile, "utf8");
     const fileConfig = await loadConfig(workspace);
     const defaults = mergeConfig(fileConfig, {
-      testCommand: option(args, "--test"),
-      review: has(args, "--review") ? true : has(args, "--no-review") ? false : undefined,
-      approvalBeforeComplete: has(args, "--approval-before-complete") ? true : has(args, "--no-approval-before-complete") ? false : undefined,
-      isolated: has(args, "--isolated") ? true : has(args, "--no-isolated") ? false : undefined,
-      timeoutMs: option(args, "--timeout-ms") ? Number(option(args, "--timeout-ms")) : undefined,
-      maxRetries: option(args, "--max-retries") ? Number(option(args, "--max-retries")) : undefined,
-      maxTurns: option(args, "--max-turns") ? Number(option(args, "--max-turns")) : undefined,
-      keepWorktree: has(args, "--keep-worktree") ? true : has(args, "--no-keep-worktree") ? false : undefined,
-      permissionMode: has(args, "--dangerously-skip-permissions") ? "dontAsk" : option(args, "--permission-mode"),
-      executor: option(args, "--executor"),
-      reviewExecutor: option(args, "--review-executor"),
-      autoBranch: has(args, "--auto-branch") ? true : has(args, "--no-auto-branch") ? false : undefined,
-      autoCommit: has(args, "--auto-commit") ? true : has(args, "--no-auto-commit") ? false : undefined,
-      commitMessage: option(args, "--commit-message"),
-      trustMode: option(args, "--trust-mode") as "trusted" | "untrusted" | undefined,
-      dependencyGuard: has(args, "--dependency-guard") ? true : has(args, "--no-dependency-guard") ? false : undefined,
+      testCommand: parsed.option("--test"),
+      review: parsed.has("--review") ? true : parsed.has("--no-review") ? false : undefined,
+      approvalBeforeComplete: parsed.has("--approval-before-complete") ? true : parsed.has("--no-approval-before-complete") ? false : undefined,
+      isolated: parsed.has("--isolated") ? true : parsed.has("--no-isolated") ? false : undefined,
+      timeoutMs: parsed.option("--timeout-ms") ? Number(parsed.option("--timeout-ms")) : undefined,
+      maxRetries: parsed.option("--max-retries") ? Number(parsed.option("--max-retries")) : undefined,
+      maxTurns: parsed.option("--max-turns") ? Number(parsed.option("--max-turns")) : undefined,
+      keepWorktree: parsed.has("--keep-worktree") ? true : parsed.has("--no-keep-worktree") ? false : undefined,
+      permissionMode: parsed.has("--dangerously-skip-permissions") ? "dontAsk" : parsed.option("--permission-mode"),
+      executor: parsed.option("--executor"),
+      reviewExecutor: parsed.option("--review-executor"),
+      autoBranch: parsed.has("--auto-branch") ? true : parsed.has("--no-auto-branch") ? false : undefined,
+      autoCommit: parsed.has("--auto-commit") ? true : parsed.has("--no-auto-commit") ? false : undefined,
+      commitMessage: parsed.option("--commit-message"),
+      trustMode: parsed.option("--trust-mode") as "trusted" | "untrusted" | undefined,
+      dependencyGuard: parsed.has("--dependency-guard") ? true : parsed.has("--no-dependency-guard") ? false : undefined,
       adaptive: {
-        enabled: has(args, "--adaptive") ? true : has(args, "--no-adaptive") ? false : undefined,
-        maxRounds: option(args, "--adaptive-max-rounds") ? Number(option(args, "--adaptive-max-rounds")) : undefined,
-        managerExecutor: option(args, "--manager-executor"),
+        enabled: parsed.has("--adaptive") ? true : parsed.has("--no-adaptive") ? false : undefined,
+        maxRounds: parsed.option("--adaptive-max-rounds") ? Number(parsed.option("--adaptive-max-rounds")) : undefined,
+        managerExecutor: parsed.option("--manager-executor"),
       },
     });
-    const existingJob = option(args, "--job-id");
+    const existingJob = parsed.option("--job-id");
     let jobId = existingJob;
     if (!jobId) {
       if (!task) throw new Error("请提供 --task 或 --task-file。");
@@ -105,23 +100,23 @@ async function main(): Promise<void> {
         reviewExecutor: defaults.reviewExecutor,
         adaptive: defaults.adaptive,
         trustMode: defaults.trustMode,
-        allowUnsafePermissions: has(args, "--dangerously-skip-permissions"),
+        allowUnsafePermissions: parsed.has("--dangerously-skip-permissions"),
       });
       jobId = created.jobId;
     }
     if (command === "start") {
-      await startBackground(workspace, jobId!, option(args, "--message", ""), Number(option(args, "--priority", "0")));
+      await startBackground(workspace, jobId!, parsed.option("--message", ""), Number(parsed.option("--priority", "0")));
       print({ jobId, status: "queued" });
       return;
     }
-    const queueEntryId = option(args, "--queue-entry-id");
+    const queueEntryId = parsed.option("--queue-entry-id");
     const workerPidFile = queueEntryId ? path.join(jobDir(workspace, jobId!), "pid") : undefined;
     const heartbeatFile = queueEntryId ? path.join(jobDir(workspace, jobId!), "worker.heartbeat") : undefined;
     if (heartbeatFile) await writeFile(heartbeatFile, new Date().toISOString(), "utf8").catch(() => undefined);
     const heartbeat = heartbeatFile ? setInterval(() => { void writeFile(heartbeatFile, new Date().toISOString(), "utf8").catch(() => undefined); }, 10_000) : undefined;
     heartbeat?.unref();
     let result: Awaited<ReturnType<typeof executeJob>>;
-    try { result = await executeJob(workspace, jobId!, option(args, "--message", ""), queueEntryId); }
+    try { result = await executeJob(workspace, jobId!, parsed.option("--message", ""), queueEntryId); }
     finally {
       if (heartbeat) clearInterval(heartbeat);
       if (heartbeatFile) await unlink(heartbeatFile).catch(() => undefined);
@@ -131,14 +126,14 @@ async function main(): Promise<void> {
       }
     }
     print(result);
-    if (has(args, "--ci") && result.status !== "done") process.exitCode = 2;
+    if (parsed.has("--ci") && result.status !== "done") process.exitCode = 2;
     return;
   }
   if (command === "mcp") { const { runMcpServer } = await import("./mcp-server.js"); runMcpServer(); return; }
-  if (command === "status") { print(await loadState(workspace, args[0])); return; }
+  if (command === "status") { print(await loadState(workspace, requireJobId(parsed, command))); return; }
   if (command === "list") { print(await listJobs(workspace)); return; }
   if (command === "queue") {
-    const action = args.find(value => !value.startsWith("--") && value !== workspace);
+    const action = parsed.positionals[0];
     if (action === "pause") print(await pauseQueue(workspace));
     else if (action === "resume") print(await resumeQueue(workspace));
     else print(await listQueue(workspace));
@@ -147,7 +142,7 @@ async function main(): Promise<void> {
   if (command === "dispatch") { print(await dispatchQueue(workspace)); return; }
   if (command === "health" || command === "metrics") { print(await health(workspace)); return; }
   if (command === "serve") {
-    const service = await serveQueue(workspace, Number(option(args, "--interval-ms", "30000")));
+    const service = await serveQueue(workspace, Number(parsed.option("--interval-ms", "30000")));
     print({ workspace, status: "serving" });
     const signal = new Promise<void>(resolve => {
       process.once("SIGINT", () => resolve()); process.once("SIGTERM", () => resolve());
@@ -156,22 +151,24 @@ async function main(): Promise<void> {
     await service.stop();
     return;
   }
-  if (command === "logs") { console.log(await readArtifact(workspace, args[0], "events.ndjson")); return; }
+  if (command === "logs") { console.log(await readArtifact(workspace, requireJobId(parsed, command), "events.ndjson")); return; }
   if (command === "files") {
-    try { print(JSON.parse(await readArtifact(workspace, args[0], "result.json"))); }
+    const jobId = requireJobId(parsed, command);
+    try { print(JSON.parse(await readArtifact(workspace, jobId, "result.json"))); }
     catch { console.log("任务尚无 result.json"); }
     return;
   }
-  if (command === "result") { console.log(await readArtifact(workspace, args[0], "result.json")); return; }
+  if (command === "result") { console.log(await readArtifact(workspace, requireJobId(parsed, command), "result.json")); return; }
   if (command === "watch") {
-    const interval = Number(option(args, "--interval-ms", "1000"));
+    const jobId = requireJobId(parsed, command);
+    const interval = Number(parsed.option("--interval-ms", "1000"));
     let last = "";
     while (true) {
-      const state = await loadState(workspace, args[0]);
+      const state = await loadState(workspace, jobId);
       const snapshot = JSON.stringify(state);
       if (snapshot !== last) { print(state); last = snapshot; }
       if (["done", "failed", "needs_fix", "review_failed", "cancelled"].includes(state.status)) {
-        if (has(args, "--ci") && state.status !== "done") process.exitCode = 2;
+        if (parsed.has("--ci") && state.status !== "done") process.exitCode = 2;
         return;
       }
       await new Promise(resolve => setTimeout(resolve, interval));
@@ -180,52 +177,54 @@ async function main(): Promise<void> {
   if (command === "ui") {
     // ui 支持多 workspace 模式:`--workspace` 可多次,或 `--workspaces-dir <dir>` 扫描根目录下所有含 .cbx/ 的子目录。
     // 显式列出的 workspace 优先,扫到的追加在后,去重保留首次出现顺序。
-    const explicit = collectAll(args, "--workspace");
-    const scanRoot = option(args, "--workspaces-dir");
+    const explicit = parsed.all("--workspace");
+    const scanRoot = parsed.option("--workspaces-dir");
     const workspaces = dedupWorkspaces([...explicit, ...(scanRoot ? await discoverWorkspaces(scanRoot) : [])]);
     // token 优先级:CLI --ui-token > .cbx.json ui.token
-    const cliToken = option(args, "--ui-token");
+    const cliToken = parsed.option("--ui-token");
     const configToken = (await loadConfig(workspace)).ui?.token;
     const uiToken = cliToken ?? configToken;
     if (workspaces.length === 0) {
       // 向后兼容:无显式参数时退化为 cwd 单 workspace,与旧版一致。
-      await startWebUi(workspace, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1"), uiToken);
+      await startWebUi(workspace, Number(parsed.option("--port", "4173")), parsed.option("--host", "127.0.0.1"), uiToken);
       return;
     }
-    await startWebUi(workspaces, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1"), uiToken);
+    await startWebUi(workspaces, Number(parsed.option("--port", "4173")), parsed.option("--host", "127.0.0.1"), uiToken);
     return;
   }
-  if (command === "tui") { await runTui(workspace, Number(option(args, "--interval-ms", "1000"))); return; }
+  if (command === "tui") { await runTui(workspace, Number(parsed.option("--interval-ms", "1000"))); return; }
   if (command === "review") {
-    try { console.log(await readFile(`${jobDir(workspace, args[0])}/review.md`, "utf8")); }
+    try { console.log(await readFile(`${jobDir(workspace, requireJobId(parsed, command))}/review.md`, "utf8")); }
     catch { console.log("尚无 review.md"); }
     return;
   }
   if (command === "continue") {
-    const message = option(args, "--message", "请根据 review.md 修复问题，完成后重新运行验收命令。")!;
-    const extraRoundsOption = option(args, "--extra-rounds");
+    const jobId = requireJobId(parsed, command);
+    const message = parsed.option("--message", "请根据 review.md 修复问题，完成后重新运行验收命令。")!;
+    const extraRoundsOption = parsed.option("--extra-rounds");
     const extraRounds = extraRoundsOption === undefined ? 0 : Number(extraRoundsOption);
     if (extraRoundsOption !== undefined && (!Number.isInteger(extraRounds) || extraRounds < 1 || extraRounds > 100)) throw new Error("--extra-rounds 必须是 1 到 100 的整数。");
-    if (has(args, "--foreground")) {
-      await unlink(path.join(jobDir(workspace, args[0]), "cancel.requested")).catch(() => undefined);
-      print(await executeJob(workspace, args[0], message, undefined, extraRounds));
+    if (parsed.has("--foreground")) {
+      await unlink(path.join(jobDir(workspace, jobId), "cancel.requested")).catch(() => undefined);
+      print(await executeJob(workspace, jobId, message, undefined, extraRounds));
       return;
     }
-    await startBackground(workspace, args[0], message, Number(option(args, "--priority", "0")), undefined, has(args, "--refresh-baseline"), extraRounds);
-    print({ jobId: args[0], status: "queued" });
+    await startBackground(workspace, jobId, message, Number(parsed.option("--priority", "0")), undefined, parsed.has("--refresh-baseline"), extraRounds);
+    print({ jobId, status: "queued" });
     return;
   }
-  if (command === "cancel") { print(await cancelJob(workspace, args[0])); return; }
+  if (command === "cancel") { print(await cancelJob(workspace, requireJobId(parsed, command))); return; }
   if (command === "approve") {
-    const state = await approveJob(workspace, args[0]);
-    if (state.status === "queued") await startBackground(workspace, args[0]);
+    const jobId = requireJobId(parsed, command);
+    const state = await approveJob(workspace, jobId);
+    if (state.status === "queued") await startBackground(workspace, jobId);
     print(state);
     return;
   }
-  if (command === "retry") { print(await retryQueueJob(workspace, args[0], Number(option(args, "--priority", "0")))); return; }
-  if (command === "clean") { print({ jobId: args[0], cleaned: await cleanupWorktree(workspace, args[0]) }); return; }
+  if (command === "retry") { print(await retryQueueJob(workspace, requireJobId(parsed, command), Number(parsed.option("--priority", "0")))); return; }
+  if (command === "clean") { const jobId = requireJobId(parsed, command); print({ jobId, cleaned: await cleanupWorktree(workspace, jobId) }); return; }
   if (command === "review-gate") {
-    const result = await runReviewGate(workspace, { executor: option(args, "--executor"), timeoutMs: option(args, "--timeout-ms") ? Number(option(args, "--timeout-ms")) : undefined });
+    const result = await runReviewGate(workspace, { executor: parsed.option("--executor"), timeoutMs: parsed.option("--timeout-ms") ? Number(parsed.option("--timeout-ms")) : undefined });
     print({ pass: result.pass, reason: result.reason, verdict: result.verdict });
     if (!result.pass) process.exitCode = 2;
     return;

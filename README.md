@@ -214,7 +214,7 @@ node dist/src/cli.js health --workspace .
 
 ## 质量与发布
 
-`npm run check` 执行类型 lint、格式检查和测试；`npm run coverage` 运行 Node 测试覆盖率；`npm run audit` 检查高危依赖问题；`npm run sbom` 生成 CycloneDX SBOM。CI 在 Node 20、22 和 24 上执行这些确定性检查并上传测试、覆盖率和 SBOM 工件。
+`npm run check` 执行类型 lint、格式检查和测试；`npm run coverage` 运行 Node 测试覆盖率并按 `scripts/check-coverage.mjs` 中的最低阈值（lines/branch/functions）校验，低于阈值即失败；`npm run audit` 检查高危依赖问题；`npm run sbom` 生成 CycloneDX SBOM。CI 在 Node 20、22 和 24 上执行这些确定性检查并上传测试、覆盖率和 SBOM 工件。
 
 发布遵循 Semantic Versioning。源码仓库不跟踪 `dist/`；推送 `v*` tag 后，`.github/workflows/publish.yml` 会从源码构建它、运行测试，并用 `npm pack --dry-run` 校验待发布包确实包含 `dist/src/cli.js`，然后才发布到 npm（需在仓库 Secrets 配置 `NPM_TOKEN`）。`package.json.files` 仍明确限定 npm 包内容为 `dist/` 和文档，不包含源码与测试；`private` 已设为 `false`。
 

@@ -7,6 +7,10 @@
 // Types
 export type { Json, JobStatus, CbxConfig, JobContext, TaskStage, TaskContract, JobState, StageReport, StageOutcome, Understanding, BaselineDrift } from "./types.js";
 
+// Errors
+export { CbxError, isCbxError } from "./errors.js";
+export type { CbxErrorCode } from "./errors.js";
+
 // State management
 export { jobDir, loadState, loadConfig, mergeConfig, writeState, writeApprovalState, logJobEvent } from "./state.js";
 

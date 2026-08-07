@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { loadJson, saveJson } from "./storage.js";
+import { loadJobContext, loadJson, saveJson } from "./storage.js";
 import { snapshotGitBaseline, gitDirtyFingerprint, snapshotDiff, gitRoot } from "./git-ops.js";
 import { loadState, writeState, logJobEvent } from "./state.js";
 import { invokeExecutor, promptFor } from "./runner.js";
@@ -30,7 +30,7 @@ export function evaluateBaselineDrift(context: JobContext, workspace: string): B
 export async function refreshBaseline(workspace: string, jobId: string, directory: string): Promise<JobState> {
   const baseline = snapshotGitBaseline(workspace);
   const dirtyFingerprint = gitDirtyFingerprint(workspace);
-  const context = await loadJson<JobContext>(path.join(directory, "context.json"));
+  const context = await loadJobContext(directory);
   Object.assign(context, { gitRoot: baseline?.root, baseCommit: baseline?.commit, baseBranch: baseline?.branch, baseDirty: baseline?.dirty, baseStatus: baseline?.status, dirtyFingerprint });
   await saveJson(path.join(directory, "context.json"), context);
   const refreshedState = await writeState(workspace, jobId, { baselineDrift: false, dirtyBaselineDrift: false, currentCommit: null, error: null });

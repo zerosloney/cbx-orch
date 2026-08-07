@@ -1,5 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
+import { CbxError } from "./errors.js";
 
 export interface TaskStage {
   name: string;
@@ -22,12 +24,12 @@ export interface TaskContract {
 }
 
 export function assertJobId(jobId: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(jobId) || jobId === "." || jobId === "..") throw new Error(`无效的任务 ID：${jobId}`);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(jobId) || jobId === "." || jobId === "..") throw new CbxError("E_INVALID_JOB_ID", `无效的任务 ID：${jobId}`);
 }
 
 export function normalizeJobId(value?: string): string {
   const cleaned = value?.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return cleaned || `${new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14)}-${Math.random().toString(16).slice(2, 8)}`;
+  return cleaned || `${new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14)}-${randomBytes(3).toString("hex")}`;
 }
 
 export function validateWorkspace(workspace: string): void {

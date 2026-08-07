@@ -33,7 +33,7 @@
     "format": "prettier --write --ignore-unknown package.json README.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/executor.test.ts",
     "format:check": "prettier --check --ignore-unknown package.json README.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/executor.test.ts",
     "check": "npm run lint && npm run format:check && npm test",
-    "coverage": "npm run build && node --test --experimental-test-coverage dist/tests/*.test.js",
+    "coverage": "npm run build && node scripts/check-coverage.mjs",
     "audit": "npm audit --audit-level=high",
     "sbom": "npm sbom --omit=dev --sbom-format=cyclonedx > sbom.cdx.json",
     "prepublishOnly": "npm run lint && tsc -p tsconfig.json"

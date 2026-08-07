@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireServiceLease, loadPersistedQueue, now, processAlive, savePersistedQueue, withQueueLock } from "./storage.js";
+import { isCbxError } from "./errors.js";
 
 /** 队列降级路径失败原因落到 job 事件流。 */
 function logJobEvent(runtime: QueueRuntime, workspace: string, jobId: string, event: string, detail: Record<string, unknown> = {}): void {
@@ -120,7 +122,7 @@ export async function dispatchQueue(runtime: QueueRuntime, workspaceInput: strin
       return queue;
     });
   } catch (error) {
-    if (String(error).includes("队列正在被另一个调度器更新")) return loadQueue(workspace);
+    if (isCbxError(error, "E_QUEUE_BUSY")) return loadQueue(workspace);
     throw error;
   }
 }
@@ -166,7 +168,7 @@ export async function enqueueJob(runtime: QueueRuntime, workspaceInput: string, 
     queue.maxConcurrent = maxConcurrent;
     const duplicate = queue.entries.find(item => item.jobId === jobId && ["queued", "running"].includes(item.status));
     if (duplicate) throw new Error(`任务已经在队列中：${jobId}`);
-    const created: QueueEntry = { queueId: `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`, jobId, workspace, extra, status: "queued", createdAt: now(), priority };
+    const created: QueueEntry = { queueId: `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`, jobId, workspace, extra, status: "queued", createdAt: now(), priority };
     queue.entries.push(created);
     await saveQueue(workspace, queue);
     return created;
@@ -236,7 +238,7 @@ export async function retryQueueJob(runtime: QueueRuntime, workspaceInput: strin
       entry.status = "cancelled"; entry.finishedAt = now(); entry.error = "被新的 retry 请求取代"; entry.pid = undefined;
     }
     const current = await runtime.loadState(workspace, jobId);
-    const created: QueueEntry = { queueId: `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`, jobId, workspace, extra: "请读取已有的 test.log、review.md 和 result.json，修复失败原因后重新执行。", status: "queued", createdAt: now(), priority };
+    const created: QueueEntry = { queueId: `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`, jobId, workspace, extra: "请读取已有的 test.log、review.md 和 result.json，修复失败原因后重新执行。", status: "queued", createdAt: now(), priority };
     queue.entries.push(created);
     queue.updatedAt = now();
     await runtime.saveStateAndQueue(workspace, jobId, { ...current, status: "queued", phase: "queued", error: null, timedOut: false, updatedAt: now() }, queue);

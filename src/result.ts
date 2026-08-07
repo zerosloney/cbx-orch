@@ -2,19 +2,19 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { saveJson, loadJson, now } from "./storage.js";
+import { saveJson, loadJobContext, now } from "./storage.js";
 import { jobDir } from "./state.js";
 import { listArtifacts } from "./artifacts.js";
 import { criterionDefinitions, reconcileVerifiedProgress, type StructuredAudit, type VerifiedProgress } from "./progress.js";
 import { structuredAuditRequested, evidenceHashes } from "./evidence.js";
-import type { JobState, JobContext } from "./types.js";
+import type { JobState } from "./types.js";
 
 export async function writeResult(workspace: string, jobId: string, state: JobState): Promise<void> {
   const directory = jobDir(workspace, jobId);
   if (state.audit) await saveJson(path.join(directory, "audit.json"), state.audit);
   if (state.verifiedProgress) await saveJson(path.join(directory, "verified-progress.json"), state.verifiedProgress);
   const files = await listArtifacts(workspace, jobId);
-  const context = await loadJson<JobContext>(path.join(directory, "context.json"));
+  const context = await loadJobContext(directory);
   const text = async (name: string): Promise<string | null> => existsSync(path.join(directory, name)) ? readFile(path.join(directory, name), "utf8") : null;
   const handback = await text("handback.md");
   const status = await text("git-status.txt");
