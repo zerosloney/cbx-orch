@@ -17,6 +17,9 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 - Feature: Web UI 任务行新增 Elapsed 列,非终态任务从 `createdAt` 实时计算(每秒刷新),终态显示 `totalSeconds`。
 - Feature: Web UI 新增 3 个 HTTP 接口 —— `GET /api/workspaces`(所有 workspace 状态摘要)、`GET /api/jobs/:id/timeline`(从 events.ndjson 推导阶段时间线)、`GET /api/jobs/:id/executor`(PID/heartbeat/命令)、`GET /api/jobs/:id/agent.log?since=0`(增量读取,默认 256KB 截断)。
 - Test: 新增 `tests/ui.test.ts`(5 个 case 覆盖 buildTimeline / readExecutorStatus / readAgentLogIncremental);`tests/interfaces.test.ts` 增补 1 个 detail API 端到端测试,90 个测试全过。
+- Refactor: 将 1,157 行的 `core.ts` 拆分为 13 个职责单一的模块（`types`/`state`/`jobs`/`artifacts`/`result`/`runner`/`baseline`/`stage-runner`/`execution`/`approval`/`lifecycle`/`queue-api`/`worktree`），无循环依赖；`core.ts` 保留为 re-export barrel，公共 API 完全向后兼容。
+- Feature: Web UI token 鉴权。`--ui-token <token>` 或 `.cbx.json` `ui.token` 启用 Bearer token 认证；API 端点需 `Authorization: Bearer` 请求头，SSE 支持 `?token=` 查询参数；`/healthz` 与 `/` 首页保持开放。未配置 token 时行为不变。
+- Test: 新增 5 个集成测试（Web UI token 鉴权、无 token 开放访问、mock executor 端到端执行、多阶段任务 stage reports、任务取消），总计 122 个测试。
 
 ## 0.10.2 - 2026-08-06
 
