@@ -117,6 +117,9 @@ node dist\src\cli.js clean JOB_ID
   "governance": {
     "retentionDays": 30,
     "redactFields": ["token", "password", "authorization"]
+  },
+  "ui": {
+    "token": "your-secret-token"
   }
 }
 ```
@@ -139,6 +142,7 @@ node dist/src/cli.js stop-review-gate                   # Stop hook 入口（std
 
 # 本地 Web UI / TUI
 node dist/src/cli.js ui --workspace . --port 4173
+node dist/src/cli.js ui --workspace . --port 4173 --ui-token your-secret-token
 node dist/src/cli.js tui --workspace .
 
 # 多 workspace 模式:一个 UI 看多个项目,顶部 workspace 选择器 + Dashboard 卡片
@@ -173,6 +177,8 @@ node dist/src/cli.js serve --workspace . --interval-ms 30000
 # 不含任务正文的健康与运行指标
 node dist/src/cli.js health --workspace .
 ```
+
+`ui` 命令支持 token 鉴权：通过 `--ui-token <token>` 或 `.cbx.json` 的 `ui.token` 配置。启用后 API 端点需要 `Authorization: Bearer <token>` 请求头；SSE（EventSource）不支持自定义请求头，可通过 `?token=<token>` 查询参数传递。`/healthz` 健康检查和 `/` 首页无需 token。
 
 `continue` 默认将任务重新入队（后台执行）。加 `--foreground` 走前台同步语义（阻塞至完成）。
 
@@ -312,7 +318,7 @@ claude plugin install cbx-orch@cbx-orch-marketplace
 
 - 默认权限模式 `auto`。可通过 `--permission-mode` 或配置覆盖；`dontAsk` 需显式 `--dangerously-skip-permissions`。
 - 测试命令由用户提供，会在目标工作区执行。cbx 只做有限黑名单过滤（正则可被变体绕过），**不保证命令安全**。建议始终用 `--isolated` 让测试在 worktree 内跑；非隔离时 cbx 会输出告警。
-- Web UI / TUI 仅绑定本机回环（127.0.0.1/::1），**不提供任何鉴权**。本机其他进程或浏览器仍可访问。远程共享必须放在带认证的反向代理之后。
+- Web UI / TUI 仅绑定本机回环（127.0.0.1/::1）。可通过 `--ui-token` 或配置 `ui.token` 启用 Bearer token 鉴权（API 端点和 SSE 需要有效 token，`/healthz` 和首页保持开放）。未配置 token 时不做鉴权。远程共享必须放在带认证的反向代理之后。
 - `--isolated` 会创建 Git worktree，避免直接污染主工作区；**它不是 OS 安全沙箱**，不会隔离网络、凭据、宿主机文件或进程。
 - 默认 `execution.trustMode` 是 `trusted`。`untrusted` 任务需要 OS 容器沙箱；当前 cbx 没有内置容器 runner，因此会明确拒绝启动该模式。可通过 `--trust-mode trusted|untrusted` 覆盖配置。
 - `.cbx.json` 是严格 schema：未知字段、错误类型和越界值会拒绝加载，避免策略拼写错误静默失效。`governance.redactFields` 会递归脱敏事件、webhook 和死信中的同名字段；`governance.retentionDays` 会在状态更新和健康检查时原子压缩 `.cbx/delivery-failures.ndjson`，并同步清理过期 SQLite 死信记录。

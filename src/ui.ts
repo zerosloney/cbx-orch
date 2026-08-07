@@ -1,9 +1,24 @@
-import { createServer, type Server, type ServerResponse } from "node:http";
+import { createServer, type Server, type ServerResponse, type IncomingMessage } from "node:http";
 import { open, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { health, jobDir, listArtifacts, listJobs, listQueue, loadState, readArtifact } from "./core.js";
 import { capture } from "./process-runner.js";
 import { processAlive } from "./storage.js";
+
+/** 从请求中提取 Bearer token；SSE 支持 ?token= 查询参数（EventSource 无法设置 header）。 */
+function extractToken(req: IncomingMessage, url: URL): string | undefined {
+  const auth = req.headers["authorization"];
+  if (auth && auth.startsWith("Bearer ")) return auth.slice(7);
+  const queryToken = url.searchParams.get("token");
+  if (queryToken) return queryToken;
+  return undefined;
+}
+
+/** 校验 token；未配置 token 时始终放行。 */
+function isAuthorized(req: IncomingMessage, url: URL, expectedToken: string | undefined): boolean {
+  if (!expectedToken) return true;
+  return extractToken(req, url) === expectedToken;
+}
 
 interface WorkspaceSummary {
   path: string;
@@ -549,7 +564,7 @@ function startEventTailer(workspace: string, onEvent: (event: Record<string, unk
   return () => clearInterval(timer);
 }
 
-export function createWebUiServer(workspace: string | string[], host = "127.0.0.1", port = 4173): Server {
+export function createWebUiServer(workspace: string | string[], host = "127.0.0.1", port = 4173, token?: string): Server {
   if (!new Set(["127.0.0.1", "localhost", "::1"]).has(host)) throw new Error("Web UI 仅允许绑定到本机回环地址；远程访问需要在受认证的反向代理后显式实现。");
   const workspaces = Array.isArray(workspace) ? workspace : [workspace];
   // 默认 workspace:多 workspace 时取第一个,单 workspace 时取该值。客户端可经 ?workspace=<encoded> 覆盖。
@@ -578,6 +593,11 @@ export function createWebUiServer(workspace: string | string[], host = "127.0.0.
     try {
       if (req.method !== "GET") return json(res, { error: "method not allowed" }, 405);
       const url = new URL(req.url ?? "/", `http://${host}:${port}`);
+      // /healthz 保持开放供健康检查；/ 首页保持开放（UI 外壳，API 调用仍需鉴权）。
+      if (url.pathname !== "/healthz" && url.pathname !== "/" && !isAuthorized(req, url, token)) {
+        res.writeHead(401, { "www-authenticate": "Bearer", "content-type": "application/json; charset=utf-8" });
+        return res.end(JSON.stringify({ error: "unauthorized" }));
+      }
       if (url.pathname === "/") return text(res, page, "text/html; charset=utf-8");
       if (url.pathname === "/events") { res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }); clients.add(res); res.write(`data: ${JSON.stringify({ at: new Date().toISOString(), type: "connected", workspaces })}\n\n`); req.on("close", () => clients.delete(res)); return; }
       if (url.pathname === "/api/workspaces") {
@@ -617,10 +637,10 @@ export function createWebUiServer(workspace: string | string[], host = "127.0.0.
   return server;
 }
 
-export async function startWebUi(workspace: string | string[], port = 4173, host = "127.0.0.1"): Promise<void> {
-  const server = createWebUiServer(workspace, host, port);
+export async function startWebUi(workspace: string | string[], port = 4173, host = "127.0.0.1", token?: string): Promise<void> {
+  const server = createWebUiServer(workspace, host, port, token);
   await new Promise<void>(resolve => server.listen(port, host, resolve));
-  console.log(`CBX UI: http://${host}:${port}`);
+  console.log(`CBX UI: http://${host}:${port}${token ? " (token auth enabled)" : ""}`);
   await new Promise<void>(resolve => server.on("close", resolve));
 }
 

@@ -183,12 +183,16 @@ async function main(): Promise<void> {
     const explicit = collectAll(args, "--workspace");
     const scanRoot = option(args, "--workspaces-dir");
     const workspaces = dedupWorkspaces([...explicit, ...(scanRoot ? await discoverWorkspaces(scanRoot) : [])]);
+    // token 优先级:CLI --ui-token > .cbx.json ui.token
+    const cliToken = option(args, "--ui-token");
+    const configToken = (await loadConfig(workspace)).ui?.token;
+    const uiToken = cliToken ?? configToken;
     if (workspaces.length === 0) {
       // 向后兼容:无显式参数时退化为 cwd 单 workspace,与旧版一致。
-      await startWebUi(workspace, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1"));
+      await startWebUi(workspace, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1"), uiToken);
       return;
     }
-    await startWebUi(workspaces, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1"));
+    await startWebUi(workspaces, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1"), uiToken);
     return;
   }
   if (command === "tui") { await runTui(workspace, Number(option(args, "--interval-ms", "1000"))); return; }
