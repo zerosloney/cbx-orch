@@ -119,23 +119,34 @@ async function database(workspaceInput: string): Promise<CbxDatabase> {
 }
 async function importLegacyData(workspace: string, db: CbxDatabase): Promise<void> {
   if (db.prepare("SELECT value FROM metadata WHERE key = ?").get("legacy_import_v1")) return;
+  // 先异步收集再单事务提交：损坏行跳过并留痕而非致命抛出，避免一条坏记录锁死整个 workspace；
+  // 任务、失败记录与幂等标记同事务落盘，崩溃后整体重放，不产生部分导入或重复失败记录。
+  const jobRows: Array<{ jobId: string; stateJson: string; updatedAt: string }> = [];
   const root = path.join(workspace, ".cbx", "jobs");
   let entries: Array<{ isDirectory(): boolean; name: string }>;
   try { entries = await readdir(root, { withFileTypes: true }); } catch (error) { if (isMissing(error)) entries = []; else throw error; }
-  const insert = db.prepare("INSERT OR IGNORE INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?)");
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     try {
       const state = JSON.parse(await readFile(path.join(root, entry.name, "state.json"), "utf8")) as Record<string, unknown>;
-      if (typeof state.jobId === "string") insert.run(state.jobId, JSON.stringify(state), String(state.updatedAt ?? now()));
+      if (typeof state.jobId === "string") jobRows.push({ jobId: state.jobId, stateJson: JSON.stringify(state), updatedAt: String(state.updatedAt ?? now()) });
     } catch (error) { if (!isMissing(error)) console.error(`cbx: 跳过无法导入的旧任务 ${entry.name}：${error instanceof Error ? error.message : error}`); }
   }
+  const failureRows: Array<{ createdAt: string; recordJson: string }> = [];
   try {
     const lines = (await readFile(path.join(workspace, ".cbx", "delivery-failures.ndjson"), "utf8")).split(/\r?\n/).filter(Boolean);
-    const insertFailure = db.prepare("INSERT INTO delivery_failures(created_at, record_json) VALUES (?, ?)");
-    db.transaction(() => { for (const line of lines) { const record = JSON.parse(line) as { at?: string }; insertFailure.run(record.at ?? now(), JSON.stringify(record)); } })();
+    for (const line of lines) {
+      try { const record = JSON.parse(line) as { at?: string }; failureRows.push({ createdAt: record.at ?? now(), recordJson: JSON.stringify(record) }); }
+      catch (error) { console.error(`cbx: 跳过无法解析的旧投递失败记录：${error instanceof Error ? error.message : error}`); }
+    }
   } catch (error) { if (!isMissing(error)) throw error; }
-  db.prepare("INSERT INTO metadata(key, value) VALUES (?, ?)").run("legacy_import_v1", now());
+  const insertJob = db.prepare("INSERT OR IGNORE INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?)");
+  const insertFailure = db.prepare("INSERT INTO delivery_failures(created_at, record_json) VALUES (?, ?)");
+  db.transaction(() => {
+    for (const row of jobRows) insertJob.run(row.jobId, row.stateJson, row.updatedAt);
+    for (const row of failureRows) insertFailure.run(row.createdAt, row.recordJson);
+    db.prepare("INSERT INTO metadata(key, value) VALUES (?, ?)").run("legacy_import_v1", now());
+  })();
 }
 async function legacyQueue(workspace: string, db: CbxDatabase, fallback: unknown): Promise<unknown> {
   const existing = db.prepare("SELECT state_json FROM queue_state WHERE singleton = 1").get() as { state_json: string } | undefined;
@@ -368,6 +379,12 @@ export async function withFileLock<T>(file: string, action: () => Promise<T>, op
       if (current.token === token) await unlink(file);
     } catch { /* replaced or already released */ }
   }
+}
+
+/** 队列写互斥的唯一来源：调度器整 blob 写回与 worker 终态双写必须共用同一把锁，否则会互相覆盖。 */
+export function queueLockFile(workspace: string): string { return path.join(workspace, ".cbx", "queue.lock"); }
+export function withQueueLock<T>(workspace: string, action: () => Promise<T>, options: { retries?: number } = {}): Promise<T> {
+  return withFileLock(queueLockFile(workspace), action, { retries: options.retries ?? 40, busyMessage: "队列正在被另一个调度器更新，请稍后重试。" });
 }
 
 export async function updateJobContext(workspace: string, jobId: string, updates: Record<string, unknown>): Promise<void> {

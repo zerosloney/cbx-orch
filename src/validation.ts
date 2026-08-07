@@ -38,8 +38,15 @@ export function validateWorkspace(workspace: string): void {
 
 export function validateTestCommand(command?: string): void {
   if (!command) return;
-  if (/[;&|<>]/.test(command) || /(?:rm\s+-rf|Remove-Item|del\s+\/s|format\s+)/i.test(command)) {
-    throw new Error("测试命令包含不允许的 shell 操作符或破坏性命令。");
+  // 拒绝 shell 链式/重定向操作符、换行（命令分隔）、反引号与 $( 命令替换——这些是绕过黑名单的主要手法。
+  if (/[;&|<>`\r\n]/.test(command) || command.includes("$(")) {
+    throw new Error("测试命令包含不允许的 shell 操作符、换行或命令替换。");
+  }
+  // 拒绝递归/强制删除与编码执行等破坏性命令（覆盖常见参数变体）。
+  const destructive = /(?:\brm\s+(?:-[a-z]*[rf]|--recurs|--forc)|\brd\s+\/s|\brmdir\s+\/s|Remove-Item|\bdel\s+\/s|\bdeltree\b|\bformat\s+)/i;
+  const encodedCommand = /\s-(?:enc|encodedcommand)\b/i;
+  if (destructive.test(command) || encodedCommand.test(command)) {
+    throw new Error("测试命令包含不允许的破坏性命令或编码执行。");
   }
 }
 

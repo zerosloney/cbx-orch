@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import { stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { acquireServiceLease, loadPersistedQueue, now, processAlive, savePersistedQueue, withFileLock } from "./storage.js";
+import { acquireServiceLease, loadPersistedQueue, now, processAlive, savePersistedQueue, withQueueLock } from "./storage.js";
 
 /** 队列降级路径失败原因落到 job 事件流。 */
 function logJobEvent(runtime: QueueRuntime, workspace: string, jobId: string, event: string, detail: Record<string, unknown> = {}): void {
@@ -15,6 +15,8 @@ export type QueueEntryStatus = "queued" | "running" | "done" | "failed" | "await
 export interface QueueEntry {
   queueId: string; jobId: string; workspace: string; extra: string; status: QueueEntryStatus;
   createdAt: string; startedAt?: string; finishedAt?: string; pid?: number; error?: string; priority: number;
+  /** 死 worker 被回收重派的累计次数；超过上限熔断为 failed，避免损坏状态引发无限重派。 */
+  reclaimCount?: number;
 }
 export interface QueueFile { maxConcurrent: number; paused: boolean; entries: QueueEntry[]; updatedAt: string; }
 
@@ -29,8 +31,6 @@ export interface QueueRuntime {
 
 export interface QueueService { done: Promise<void>; stop(): Promise<void>; }
 
-function queueLockFile(workspace: string): string { return path.join(workspace, ".cbx", "queue.lock"); }
-
 async function loadQueue(workspace: string): Promise<QueueFile> {
   const queue = await loadPersistedQueue<QueueFile>(workspace, { maxConcurrent: 2, paused: false, entries: [], updatedAt: now() });
   if (!queue || !Array.isArray(queue.entries)) throw new Error("queue.json 结构无效。");
@@ -44,10 +44,6 @@ async function saveQueue(workspace: string, queue: QueueFile): Promise<void> {
   await savePersistedQueue(workspace, queue);
 }
 
-function withQueueLock<T>(workspace: string, action: () => Promise<T>): Promise<T> {
-  return withFileLock(queueLockFile(workspace), action, { busyMessage: "队列正在被另一个调度器更新，请稍后重试。" });
-}
-
 function configuredConcurrency(value: number | undefined): number {
   const maximum = Number(value ?? 2);
   if (!Number.isInteger(maximum) || maximum < 1) throw new Error("maxConcurrent 必须是正整数。");
@@ -57,6 +53,8 @@ function configuredConcurrency(value: number | undefined): number {
 // intentional-simple: worker 起步 + worktree 创建 + executor spawn 应 < 60s。超过仍无 heartbeat 视为僵尸（pid 复用或 spawn ENOENT 后 pid 被复用）。
 const WORKER_HEARTBEAT_GRACE_MS = 60_000;
 const WORKER_HEARTBEAT_STALE_MS = 45_000;
+// 死 worker 回收重派的上限：超过即熔断为 failed，避免状态永久损坏时无限 spawn。
+const MAX_RECLAIMS = 3;
 const SERVICE_LEASE_TTL_MS = 45_000;
 
 async function spawnQueueWorker(runtime: QueueRuntime, workspace: string, entry: QueueEntry): Promise<number> {
@@ -86,10 +84,25 @@ export async function dispatchQueue(runtime: QueueRuntime, workspaceInput: strin
           || (heartbeatModifiedAt === undefined && Number.isFinite(startedAt) && Date.now() - startedAt > WORKER_HEARTBEAT_GRACE_MS)
           || (heartbeatModifiedAt !== undefined && Date.now() - heartbeatModifiedAt > WORKER_HEARTBEAT_STALE_MS);
         if (!stale) continue;
+        let reclaimed: QueueEntryStatus;
         try {
           const state = await runtime.loadState(workspace, entry.jobId);
-          entry.status = state.status === "done" ? "done" : state.status === "cancelled" ? "cancelled" : "queued";
-        } catch (error) { logJobEvent(runtime, workspace, entry.jobId, "queue_reclaim_failed", { error: error instanceof Error ? error.message : String(error) }); entry.status = "queued"; }
+          reclaimed = state.status === "done" ? "done" : state.status === "cancelled" ? "cancelled" : "queued";
+        } catch (error) { logJobEvent(runtime, workspace, entry.jobId, "queue_reclaim_failed", { error: error instanceof Error ? error.message : String(error) }); reclaimed = "queued"; }
+        if (reclaimed === "queued") {
+          entry.reclaimCount = (entry.reclaimCount ?? 0) + 1;
+          if (entry.reclaimCount > MAX_RECLAIMS) {
+            // 熔断：worker 反复无法恢复（多为状态永久损坏），停止重派避免无限 spawn。
+            entry.status = "failed";
+            entry.error = `worker 反复无法恢复（已回收 ${entry.reclaimCount} 次），停止自动重派；请检查任务状态后用 retry 手动重跑。`;
+            entry.finishedAt = now();
+            logJobEvent(runtime, workspace, entry.jobId, "queue_reclaim_circuit_breaker", { reclaimCount: entry.reclaimCount });
+          } else {
+            entry.status = "queued";
+          }
+        } else {
+          entry.status = reclaimed;
+        }
         entry.pid = undefined;
       }
       let active = queue.entries.filter(entry => entry.status === "running" && processAlive(entry.pid)).length;

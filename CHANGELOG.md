@@ -20,6 +20,12 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 - Refactor: 将 1,157 行的 `core.ts` 拆分为 13 个职责单一的模块（`types`/`state`/`jobs`/`artifacts`/`result`/`runner`/`baseline`/`stage-runner`/`execution`/`approval`/`lifecycle`/`queue-api`/`worktree`），无循环依赖；`core.ts` 保留为 re-export barrel，公共 API 完全向后兼容。
 - Feature: Web UI token 鉴权。`--ui-token <token>` 或 `.cbx.json` `ui.token` 启用 Bearer token 认证；API 端点需 `Authorization: Bearer` 请求头，SSE 支持 `?token=` 查询参数；`/healthz` 与 `/` 首页保持开放。未配置 token 时行为不变。
 - Test: 新增 5 个集成测试（Web UI token 鉴权、无 token 开放访问、mock executor 端到端执行、多阶段任务 stage reports、任务取消），总计 122 个测试。
+- Fix: 队列写入统一锁。调度器整 blob 写回与 worker 终态双写（`writeState` / `writeApprovalState` 携带 `queueEntryId` 的路径）现共用 storage 层新增的 `queueLockFile` / `withQueueLock`（唯一锁来源，queue.ts 本地实现删除），消除终态条目被旧调度快照整 blob 覆盖而倒退（如 `awaiting_approval` 退回 `queued`）且无自愈的 lost-update；终态双写锁重试提升至 120 次以覆盖长 dispatch 持锁窗口。
+- Fix: 死 worker 回收新增熔断。队列条目记录 `reclaimCount`，同一 job 被回收重派超过 3 次后置为 `failed`（提示检查任务状态后用 `retry` 手动重跑）并落 `queue_reclaim_circuit_breaker` 事件，避免状态永久损坏的任务在"派发—失活—回收"间无限循环。
+- Fix: `importLegacyData` 改为先异步收集再单事务原子提交（jobs INSERT OR IGNORE + failures + `legacy_import_v1` 标记）；损坏的 `state.json` / `delivery-failures.ndjson` 记录跳过并留痕而非致命抛出，导入不再把整个 workspace 锁在迁移中间态，重复导入保持幂等。
+- Fix: `validateTestCommand` 注入防线收紧：拦截换行/回车、反引号、`$(` 命令替换，以及 `rm` 带 `-r`/`-f` 系列短选项或 `--recursive`/`--force` 长选项、`rd /s`、`rmdir /s`、`Remove-Item`、`del /s`、`deltree`、`format`、PowerShell `-enc`/`-encodedcommand` 编码执行等破坏性变体。
+- Fix: executor 指向插件文件但 `plugins.enforce` 未启用时，启动前输出显著告警并向 job 目录 `events.ndjson` 追加 `plugin_policy_warning` 审计事件（含插件路径与 SHA-256）；此前插件可在无路径/SHA 白名单校验的情况下被静默加载。配置 `enforce=true` 且白名单通过时不告警。
+- Test: 新增 `tests/reliability.test.ts`（6 个用例：testCommand 注入矩阵、回收未超阈值续派、熔断超阈值置 failed、终态写与 dispatch 扫描并发不互踩、legacy 导入跳过损坏记录且幂等、插件策略告警触发/抑制），总计 128 个测试。
 
 ## 0.10.2 - 2026-08-06
 

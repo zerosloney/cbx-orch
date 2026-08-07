@@ -31,6 +31,12 @@ export async function invokeExecutor(executor: string, workspace: string, direct
   if (builtin) return invokeBuiltin(builtin, directory, workdir, prompt, permissionMode, maxTurns, timeoutMs);
   const config = await loadConfig(workspace);
   const identity = await inspectExecutorPlugin(executor, workspace, config.plugins);
+  if (!config.plugins?.enforce) {
+    // 默认不强制插件白名单：显式告警并落审计事件，提醒生产环境启用 plugins.enforce。
+    const warning = `executor 指向插件 ${identity.path}，但 plugins.enforce 未启用，插件未经路径/SHA 白名单校验即被加载；生产环境请配置 plugins.enforce=true 与 allowPaths/allowSha256。`;
+    console.error(`cbx: ${warning}`);
+    appendFileSync(path.join(directory, "events.ndjson"), JSON.stringify({ event: "plugin_policy_warning", executor: identity.name, path: identity.path, sha256: identity.sha256, enforce: false, at: new Date().toISOString() }) + "\n", "utf8");
+  }
   const request: ExecutorRequest = { directory, workdir, prompt, permissionMode, maxTurns, timeoutMs, executor, plugin: { policy: config.plugins, sha256: identity.sha256 } };
   appendFileSync(path.join(directory, "events.ndjson"), JSON.stringify({ event: "executor_metadata", source: identity.source, name: identity.name, version: identity.version, apiVersion: identity.apiVersion, capabilities: identity.capabilities, sha256: identity.sha256, at: new Date().toISOString() }) + "\n", "utf8");
   appendFileSync(path.join(directory, "events.ndjson"), JSON.stringify({ event: "plugin_started", executor: identity.name, at: new Date().toISOString() }) + "\n", "utf8");

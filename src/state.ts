@@ -1,7 +1,7 @@
 import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { publishEvent } from "./observability.js";
-import { loadRuntimeConfig, loadPersistedState, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndResolveApprovalQueue, saveJson, prunePersistedData, now, type RuntimeConfig } from "./storage.js";
+import { loadRuntimeConfig, loadPersistedState, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndResolveApprovalQueue, saveJson, prunePersistedData, now, withQueueLock, type RuntimeConfig } from "./storage.js";
 import { assertJobId } from "./validation.js";
 import { normalizeAdaptiveOptions } from "./adaptive-manager.js";
 import type { JobState, CbxConfig, Json } from "./types.js";
@@ -59,7 +59,8 @@ export async function writeState(workspace: string, jobId: string, updates: Json
   const state = await loadState(workspace, jobId);
   const previousStatus = state.status;
   Object.assign(state, updates, { updatedAt: now() });
-  if (queueEntryId) await savePersistedStateAndFinishQueue(workspace, jobId, state, queueEntryId);
+  // 终态双写与调度器整 blob 写回共用队列锁：否则两者并发时 worker 的终态会被调度器的旧快照覆盖。
+  if (queueEntryId) await withQueueLock(workspace, () => savePersistedStateAndFinishQueue(workspace, jobId, state, queueEntryId), { retries: 120 });
   else await savePersistedState(workspace, jobId, state);
   await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
   await prunePersistedData(workspace, (await loadConfig(workspace)).governance?.retentionDays);
@@ -72,7 +73,8 @@ export async function writeApprovalState(workspace: string, jobId: string, updat
   const state = await loadState(workspace, jobId);
   const previousStatus = state.status;
   Object.assign(state, updates, { updatedAt: now() });
-  await savePersistedStateAndResolveApprovalQueue(workspace, jobId, state, queueStatus);
+  // 审批终态同样并入队列锁，避免与调度器整 blob 写回互相覆盖。
+  await withQueueLock(workspace, () => savePersistedStateAndResolveApprovalQueue(workspace, jobId, state, queueStatus), { retries: 120 });
   await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
   try { await publishEvent(workspace, "job.state_changed", { jobId, previousStatus, status: state.status, phase: state.phase, attempt: state.attempt }); }
   catch { /* durable approval transition must not depend on delivery */ }
