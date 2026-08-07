@@ -90,13 +90,19 @@ node dist\src\cli.js clean JOB_ID
   "maxTurns": 50,
   "maxConcurrent": 2,
   "reviewRules": "重点检查鉴权、数据校验和回归测试。",
-  "approval": { "beforeRun": true },
+  "approval": { "beforeRun": true, "beforeComplete": false },
   "git": {
     "autoBranch": true,
     "autoCommit": true,
     "commitMessage": "chore: apply task"
   },
   "execution": { "trustMode": "trusted" },
+  "dependencyGuard": true,
+  "adaptive": {
+    "enabled": false,
+    "maxRounds": 8,
+    "managerExecutor": "codebuddy"
+  },
   "notifications": {
     "webhook": "https://example.test/cbx-events",
     "timeoutMs": 3000,
@@ -222,7 +228,9 @@ MCP 还提供 `resources/list` 和 `resources/read`，可直接读取任务的 `
 
 非平凡任务可在 `cbx_start` 中传结构化 `task_contract`（目标、验收标准、非目标、约束、相关文件、决策与假设）。执行器会先生成 `understanding.json`；存在阻塞问题时任务以 `needs_fix / awaiting_clarification` 暂停。创建任务时还会记录 Git commit、branch、dirty 状态及 dirty 内容指纹。`isolated: true` 且创建基线包含未提交内容时，任务会在创建 worktree 前以 `needs_fix / dirty_baseline` 暂停，避免未提交内容被静默遗漏；请先提交或清理这些内容，确认当前基线符合预期后再以 `refresh_baseline: true` 继续。隔离 worktree 随后固定从确认过的 commit 创建。非隔离任务仅在 HEAD 或 dirty 内容指纹相对创建基线发生漂移时暂停，dirty 内容未变时可正常执行。`review_executor` 可指定独立审查 CLI，默认仍沿用 `executor`。
 
-`result.json` 包含 changed files、handback、`stages` 数组（每阶段 exit code 与 review verdict）、测试与验收摘要、基线信息及 artifact SHA-256。最终交付仍应通过 `cbx_artifact` 或 MCP resources 读取并核对 `handback.md`、`complete.patch`、`test.log` 和 `review.md`，不要只根据状态元数据总结。
+`cbx_start` 还支持：`approval_before_complete`（测试+审查通过后，落 `done` 前再停一次审批门，对应 `.cbx.json` 的 `approval.beforeComplete`，批准入口同 `cbx approve`）；`adaptive`（对象，snake_case 字段 `enabled`/`max_rounds`/`manager_executor`，启用后由独立 manager executor 每轮决策跑哪个 stage，超出 `max_rounds` 触发 `needs_fix / adaptive_max_rounds` Human Gate，可用 `cbx_continue` 的 `extra_rounds` 续跑；`adaptive.enabled=true` 要求 `review=true`）。`cbx_continue` 支持 `extra_rounds`（1–100 整数，仅在 `max_rounds` Human Gate 等待时追加 adaptive 轮次）。
+
+`result.json` 包含 changed files、handback、`stages` 数组（每阶段 exit code 与 review verdict）、测试与验收摘要、基线信息、`humanGate`（人工等待状态）及 artifact SHA-256。最终交付仍应通过 `cbx_artifact` 或 MCP resources 读取并核对 `handback.md`、`complete.patch`、`test.log` 和 `review.md`，不要只根据状态元数据总结。
 
 ## ZCode 插件
 
@@ -309,6 +317,7 @@ claude plugin install cbx-orch@cbx-orch-marketplace
 - 默认 `execution.trustMode` 是 `trusted`。`untrusted` 任务需要 OS 容器沙箱；当前 cbx 没有内置容器 runner，因此会明确拒绝启动该模式。可通过 `--trust-mode trusted|untrusted` 覆盖配置。
 - `.cbx.json` 是严格 schema：未知字段、错误类型和越界值会拒绝加载，避免策略拼写错误静默失效。`governance.redactFields` 会递归脱敏事件、webhook 和死信中的同名字段；`governance.retentionDays` 会在状态更新和健康检查时原子压缩 `.cbx/delivery-failures.ndjson`，并同步清理过期 SQLite 死信记录。
 - `--timeout-ms` 限制执行器和测试命令的单次执行时间。
-- `--max-retries` 控制失败后的自动重试次数，默认 1 次。
+- `--max-retries` 控制失败后的自动重试预算，默认 1。内部拆为两个独立计数器：执行器崩溃预算 `executionRetries = maxRetries+1`，测试/审查失败修复预算 `fixRetries = maxRetries`。执行器崩溃只消耗 `executionRetries`，测试/审查失败只消耗 `fixRetries`，避免 `needs_fix` 场景每轮白耗一次执行器重试。CLI 与 `.cbx.json` 的 `maxRetries` 语义不变。
+- `--dependency-guard` / `.cbx.json` `dependencyGuard`（默认关闭）：开启后每个 stage 执行前后对 `package.json`、`package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`bun.lockb` 取 SHA-256 baseline 比对，未授权改动触发 `needs_fix / dependency_guard` 并提示恢复或 `--no-dependency-guard` 关闭。仅做哈希比对，不阻止其他文件改动，也不替代 OS 沙箱。
 - 默认任务完成或失败后清理 isolated worktree；使用 `--keep-worktree` 保留。
 - 同一个任务不能并发执行；`cancel` 会终止进程树并留下取消标记。

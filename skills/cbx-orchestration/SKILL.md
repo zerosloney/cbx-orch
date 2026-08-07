@@ -60,7 +60,7 @@ cbx's MCP server is registered under the name `cbx`. In ZCode its tools appear a
 
 ## Background mode workflow (MCP tools)
 
-1. **Start**: `cbx_start` with `task` (and optional `test_command`, `executor`, `review_executor`, `review`, `isolated`). For non-trivial tasks also pass `task_contract` with goal, acceptance criteria, non-goals, constraints, relevant files, decisions/rejections, and assumptions. This creates a plan-only `understanding.json` handshake; blocking ambiguity stops as `needs_fix`. Returns `{ job_id, status: "queued" }`. Give the user the `job_id` immediately.
+1. **Start**: `cbx_start` with `task` (and optional `test_command`, `executor`, `review_executor`, `review`, `isolated`, `approval_before_complete`, `adaptive`). For non-trivial tasks also pass `task_contract` with goal, acceptance criteria, non-goals, constraints, relevant files, decisions/rejections, and assumptions. This creates a plan-only `understanding.json` handshake; blocking ambiguity stops as `needs_fix`. Returns `{ job_id, status: "queued" }`. Give the user the `job_id` immediately.
 2. **Poll** (incremental, low-cost): the worker writes events to `events.ndjson` as it runs; stream them back with a line cursor so this session only pays for new events each round:
    - `offset = 0`
    - loop:
@@ -70,7 +70,7 @@ cbx's MCP server is registered under the name `cbx`. In ZCode its tools appear a
      4. Not terminal → wait a few seconds (backoff up to ~15s for long tasks) and loop.
    - Omitting `since` returns the legacy full `{ logs: string }` shape — use it only for one-shot full reads, not in the poll loop.
 3. **Collect**: on `done`, call `cbx_result`, then read `handback.md`, `complete.patch`, `test.log`, and (when requested) `review.md` with `cbx_artifact`. Compare these primary artifacts before summarizing; `result.json` alone is not sufficient evidence. On failure, read the available evidence plus `cbx_review` + `cbx_logs`.
-4. **Rework** (if needed): `cbx_continue` with a fix message and refreshed `context_snapshot` re-queues the job. For `baseline_drift` or `dirty_baseline`, use `refresh_baseline: true` only after the main Agent confirms the current HEAD and dirty state are intended. An isolated dirty baseline must be committed or cleaned first.
+4. **Rework** (if needed): `cbx_continue` with a fix message and refreshed `context_snapshot` re-queues the job. For `baseline_drift` or `dirty_baseline`, use `refresh_baseline: true` only after the main Agent confirms the current HEAD and dirty state are intended. An isolated dirty baseline must be committed or cleaned first. For the `adaptive_max_rounds` Human Gate (only reached when `adaptive.enabled=true`), pass `extra_rounds` (1–100) to extend the round budget; any other phase rejects `extra_rounds`.
 
 ### Task contract template
 
@@ -135,22 +135,102 @@ When polling reaches a terminal status, branch on it. **Do not** call `cbx_conti
 
 | Status | Phase | Meaning | Agent action |
 |---|---|---|---|
-| `done` | — | Tests passed, review (if requested) passed. | `cbx_result` + read `handback.md`, `complete.patch`, `test.log`, `review.md` via `cbx_artifact`. Summarize for the user. |
+| `done` | — | Tests passed, review (if requested) passed, completion gate cleared. | `cbx_result` + read `handback.md`, `complete.patch`, `test.log`, `review.md` via `cbx_artifact`. Summarize for the user. |
 | `awaiting_approval` | `before_run` | Config has `approval.beforeRun: true`. | Call `cbx_approve` after user confirms, or `cbx_cancel` if declined. Do not auto-approve. |
-| `needs_fix` | `awaiting_clarification` | `task_contract` had a blocking ambiguity. | Read the worker's `understanding.json`; ask the user the unanswered question, then `cbx_continue` with refined `task_contract`. |
+| `awaiting_approval` | `before_complete` | Config has `approval.beforeComplete: true`; tests + review already passed and the completion evidence gate cleared. `pendingCompletion` holds the artifact SHA-256 snapshot awaiting sign-off. | Call `cbx_approve` to finalize `done`, or `cbx_cancel`. If the worktree/evidence has drifted since the gate ran, the approve path fails to `needs_fix / completion_evidence_stale` — re-run verification instead of re-approving. |
+| `needs_fix` | `awaiting_clarification` | `task_contract` had a blocking ambiguity (`humanGate.reason=needs_input`). | Read `understanding.json` via `cbx_artifact`; ask the user the unanswered question, then `cbx_continue` with refined `task_contract`. |
+| `needs_fix` | `context_handshake` | Executor failed to produce a valid `understanding.json` (crash, missing file, malformed JSON). | Read `cbx_logs` for the executor error. Usually a prompt/format issue — fix the contract or executor and `cbx_continue`. |
 | `needs_fix` | `baseline_drift` | HEAD moved or dirty-content fingerprint changed since the job was created. | Confirm with the user that the new HEAD is intended. If yes, `cbx_continue` with `refresh_baseline: true`. If no, ask them to clean up first. |
 | `needs_fix` | `dirty_baseline` (isolated only) | Job creation saw uncommitted changes; cbx refused to silently include them. | Ask the user to commit or `git restore` the dirty files. Then `cbx_continue` with `refresh_baseline: true`. |
-| `needs_fix` | `reviewing` | Review verdict is FAIL but tests passed. | Read `review.md` via `cbx_artifact`. Build a specific fix message and call `cbx_continue`. |
+| `needs_fix` | `reviewing` | Review verdict is FAIL but tests passed (`humanGate.reason=semantic_conflict` or plain FAIL). | Read `review.md` via `cbx_artifact`. For `semantic_conflict` the failure is a contract/semantic issue needing main-agent judgment. Build a specific fix message and call `cbx_continue`. |
+| `needs_fix` | `dependency_guard` | `dependencyGuard` was on and a stage mutated `package.json` / lock files without authorization. | Ask the user if the dependency change is intended. If no, instruct the worker to restore the files (the phase includes which files changed) and `cbx_continue`; if yes, re-dispatch with `--no-dependency-guard` or set `dependencyGuard: false`. |
+| `needs_fix` | `verification_gate` | Completion evidence gate failed: worktree not clean, acceptance criteria not all verified, or test/review evidence incomplete. | Read `verified-progress.json` / `audit.json` via MCP resources, plus `test.log` and `review.md`. The phase error names which condition failed; address it and `cbx_continue`. |
+| `needs_fix` | `repeated_failure` | Same normalized failure reason hit 3+ times (`humanGate.reason=repeated_failure`). cbx stopped auto-retrying. | **Do not** blindly `cbx_continue` — the error recurs. Escalate to the user; a human decision is required before another attempt. |
+| `needs_fix` | `adaptive_ask` | Adaptive manager returned `{"action":"ask"}` (`humanGate.reason=needs_input`). | Read `manager-context.json` + `candidate.json` via MCP resources; surface the manager's questions to the user, then `cbx_continue` with answers in `context_snapshot`. |
+| `needs_fix` | `adaptive_blocked` | Adaptive manager returned `{"action":"blocked"}` with a reason. | Read the blocked reason in `cbx_status` / `candidate.json`. Usually needs a human decision or a scope change; do not auto-continue. |
+| `needs_fix` | `adaptive_max_rounds` | Adaptive loop exhausted `maxRounds` (`humanGate.reason=max_rounds`). | Either accept the current state and stop, or `cbx_continue` with `extra_rounds` (1–100) to extend the budget. Confirm with the user before extending. |
+| `needs_fix` | `adaptive_manager_decision` / `adaptive_manager_safety` / `adaptive_state` | Adaptive manager produced invalid JSON, tried to mutate the worktree, or the persisted `adaptiveRound` is corrupt. | Read `cbx_logs`. For `safety`, the manager tried to edit files — check whether `manager_executor` is misconfigured. For `decision`, the manager output did not parse; tighten the task. |
 | `needs_fix` | (other) | Worker self-reported a blocker it cannot resolve (missing dep, etc.). | Read the latest events via `cbx_logs`; usually requires user input. |
 | `failed` | (test) | Test command exited non-zero. | Read `test.log` via `cbx_artifact`. Build a targeted fix message and call `cbx_continue`. |
 | `failed` | (executor) | Executor process crashed or timed out. | Read the executor's stdout/stderr in `cbx_logs` (`process_finished` events). Often a transient issue — `cbx_retry` may be simpler than a fresh `cbx_continue`. |
+| `failed` | `git_commit` | Auto-commit failed during finalize (e.g. hooks rejected, identity missing). | Read the error in `cbx_status`. Fix the git issue, then `cbx_continue`. |
 | `review_failed` | `reviewing` | Review phase itself errored (reviewer CLI unavailable, etc.). | Check executor availability. If it is, `cbx_retry` once; otherwise ask the user to switch `review_executor`. |
 | `cancelled` | — | User or agent called `cbx_cancel`. | **Do not** `cbx_continue` a cancelled job — the queue entry is marked cancelled and the executor will reject the re-queue. Create a new job via `cbx_start` instead. |
 
+Phase values that surface under `needs_fix` but resolve via a **Human Gate** (`before_run`, `needs_input`, `semantic_conflict`, `repeated_failure`, `max_rounds`, `completion`) carry a `humanGate` object on `state.json` / `result.json` with `status` (`waiting`/`resolved`) and `instructions`. Gate resolution happens through `cbx_approve` or `cbx_continue` — do not edit `humanGate` directly.
+
 Rules of thumb:
 - Always read primary artifacts (`handback.md`, `complete.patch`, `test.log`, `review.md`) before summarizing. `result.json` is metadata, not evidence.
-- Never auto-loop on `cbx_continue`. After 2 consecutive failures with the same root cause, stop and ask the user — the next fix probably needs a human decision, not another retry.
+- Never auto-loop on `cbx_continue`. After 2 consecutive failures with the same root cause, stop and ask the user — the next fix probably needs a human decision, not another retry. (cbx itself promotes 3 same-root-cause failures to `needs_fix / repeated_failure`.)
 - `cancelled` is sticky. Always start a new job.
+
+## Adaptive mode
+
+Adaptive mode replaces a fixed stage list with a **manager executor** that decides each round what to run. Use it when the task is too open-ended to pre-plan as a stage chain — the manager picks the next stage based on verified progress so far.
+
+### When to use adaptive (vs a fixed stage chain)
+
+| Situation | Use |
+|---|---|
+| You know the phases up front (scaffold → impl → audit) | Fixed stage chain (`task_contract.stages`) |
+| The path is unknown and the next step depends on what the previous stage found | Adaptive |
+| You want a separate "planner" CLI that does not touch the worktree, only decides | Adaptive (`manager_executor`) |
+| Single straightforward task | Neither — single stage, no manager |
+
+The manager **never edits files**. It reads a minimal projection context pack (`manager-context.json`) and writes a strict-JSON decision to `candidate.json`. cbx validates the decision, runs the chosen stage, then loops. A deterministic completion gate (verified progress + clean worktree + evidence) still gates `done` — the manager saying `done` is necessary but not sufficient.
+
+### Enabling adaptive
+
+```json
+{
+  "task": "重构认证模块，分步推进，每步独立验证",
+  "test_command": "npm test",
+  "review": true,
+  "adaptive": { "enabled": true, "max_rounds": 8, "manager_executor": "codebuddy" }
+}
+```
+
+`adaptive.enabled=true` **requires** `review=true` — completion is gated on structured review evidence, so review cannot be off in adaptive mode. CLI equivalents: `--adaptive` / `--no-adaptive` / `--adaptive-max-rounds N` / `--manager-executor <cli>`. In `.cbx.json`: `adaptive` (`enabled`, `maxRounds` default 8, max 100, `managerExecutor` defaulting to the job executor). MCP `cbx_start` takes the same shape with snake_case (`max_rounds`, `manager_executor`).
+
+### Manager decision shape (`candidate.json`)
+
+The manager writes exactly one of:
+
+```json
+{"action":"execute","stage":{"name":"...","executor":"...","task":"...","reviewExecutor":"...","skip_review":false}}
+{"action":"ask","questions":["..."]}
+{"action":"blocked","reason":"..."}
+{"action":"done"}
+```
+
+- `execute` → cbx runs that stage (executor/review/skip overrides honored), then loops back to the manager.
+- `ask` → pauses as `needs_fix / adaptive_ask` with the questions surfaced via Human Gate.
+- `blocked` → pauses as `needs_fix / adaptive_blocked`; needs a human decision.
+- `done` → cbx runs the completion gate; if it passes, the job finishes. If the gate fails, the job lands in `needs_fix / verification_gate`.
+
+### Hitting the round limit
+
+After `maxRounds` rounds without `done`, the job pauses at `needs_fix / adaptive_max_rounds` (`humanGate.reason=max_rounds`). Two honest options, both requiring user confirmation:
+
+- Accept the current state — read `result.json` / artifacts and report to the user.
+- Extend the budget: `cbx_continue` with `extra_rounds` (1–100). The cumulative cap is 100; `extra_rounds` is rejected on any other phase.
+
+### Artifacts adaptive adds
+
+Beyond the standard artifacts, adaptive jobs produce `manager-context.json`, `candidate.json`, `audit.json`, `verified-progress.json` per round, plus `executor-context.json` / `auditor-context.json` projections. These are readable via MCP `resources/read` / `resources/list`. Use them to understand why the manager chose a given stage when debugging.
+
+## Approval gates
+
+cbx supports two independent approval gates, both driven by the same `cbx approve` / MCP `cbx_approve` entry and both surfaced as `awaiting_approval`:
+
+| Gate | Config | Phase | When it fires |
+|---|---|---|---|
+| Before run | `approval.beforeRun` | `before_run` | Before any executor runs. The job sits in the queue until approved. |
+| Before complete | `approval.beforeComplete` | `before_complete` | After tests + review + completion evidence gate have all passed, just before finalizing `done`. `pendingCompletion` holds the artifact SHA-256 snapshot awaiting sign-off. |
+
+If evidence or the worktree drifts between the gate and the approve, the approve path lands in `needs_fix / completion_evidence_stale` rather than finalizing — re-run verification instead of re-approving.
+
+`cbx approve` only launches the worker when the resulting state is `queued`; calling it on an already-running or terminal job is a no-op for the launch step.
 
 ## Review configuration
 
