@@ -11,6 +11,46 @@ function option(args: string[], name: string, fallback?: string): string | undef
 }
 
 function has(args: string[], name: string): boolean { return args.includes(name); }
+
+/** 收集同一 flag 多次出现的值,用于 `cbx ui --workspace A --workspace B`。 */
+function collectAll(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i += 1) if (args[i] === name && i + 1 < args.length) values.push(args[i + 1]);
+  return values;
+}
+
+/** 扫描根目录下含 .cbx/ 的直接子目录(1 层深度,不递归)。返回绝对路径列表。 */
+async function discoverWorkspaces(root: string): Promise<string[]> {
+  const { readdir, stat } = await import("node:fs/promises");
+  const resolvedRoot = path.resolve(root);
+  let names: string[];
+  try { names = await readdir(resolvedRoot); }
+  catch { return []; }
+  const out: string[] = [];
+  for (const name of names) {
+    if (name.startsWith(".") || name === "node_modules") continue;
+    const candidate = path.join(resolvedRoot, name);
+    let dirStat, cbxStat;
+    try { dirStat = await stat(candidate); } catch { continue; }
+    if (!dirStat.isDirectory()) continue;
+    try { cbxStat = await stat(path.join(candidate, ".cbx")); } catch { continue; }
+    if (cbxStat.isDirectory()) out.push(candidate);
+  }
+  return out;
+}
+
+/** 按 path.resolve 后的字符串去重,保留首次出现顺序。 */
+function dedupWorkspaces(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of paths) {
+    const resolved = path.resolve(p);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    out.push(resolved);
+  }
+  return out;
+}
 function print(value: unknown): void { console.log(JSON.stringify(value, null, 2)); }
 
 async function main(): Promise<void> {
@@ -24,6 +64,7 @@ async function main(): Promise<void> {
     const defaults = mergeConfig(fileConfig, {
       testCommand: option(args, "--test"),
       review: has(args, "--review") ? true : has(args, "--no-review") ? false : undefined,
+      approvalBeforeComplete: has(args, "--approval-before-complete") ? true : has(args, "--no-approval-before-complete") ? false : undefined,
       isolated: has(args, "--isolated") ? true : has(args, "--no-isolated") ? false : undefined,
       timeoutMs: option(args, "--timeout-ms") ? Number(option(args, "--timeout-ms")) : undefined,
       maxRetries: option(args, "--max-retries") ? Number(option(args, "--max-retries")) : undefined,
@@ -36,6 +77,11 @@ async function main(): Promise<void> {
       autoCommit: has(args, "--auto-commit") ? true : has(args, "--no-auto-commit") ? false : undefined,
       commitMessage: option(args, "--commit-message"),
       trustMode: option(args, "--trust-mode") as "trusted" | "untrusted" | undefined,
+      adaptive: {
+        enabled: has(args, "--adaptive") ? true : has(args, "--no-adaptive") ? false : undefined,
+        maxRounds: option(args, "--adaptive-max-rounds") ? Number(option(args, "--adaptive-max-rounds")) : undefined,
+        managerExecutor: option(args, "--manager-executor"),
+      },
     });
     const existingJob = option(args, "--job-id");
     let jobId = existingJob;
@@ -50,11 +96,13 @@ async function main(): Promise<void> {
         keepWorktree: defaults.keepWorktree,
         reviewRules: fileConfig.reviewRules,
         approvalBeforeRun: defaults.approvalBeforeRun,
+        approvalBeforeComplete: defaults.approvalBeforeComplete,
         autoBranch: defaults.autoBranch,
         autoCommit: defaults.autoCommit,
         commitMessage: defaults.commitMessage,
         executor: defaults.executor,
         reviewExecutor: defaults.reviewExecutor,
+        adaptive: defaults.adaptive,
         trustMode: defaults.trustMode,
         allowUnsafePermissions: has(args, "--dangerously-skip-permissions"),
       });
@@ -128,7 +176,20 @@ async function main(): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, interval));
     }
   }
-  if (command === "ui") { await startWebUi(workspace, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1")); return; }
+  if (command === "ui") {
+    // ui 支持多 workspace 模式:`--workspace` 可多次,或 `--workspaces-dir <dir>` 扫描根目录下所有含 .cbx/ 的子目录。
+    // 显式列出的 workspace 优先,扫到的追加在后,去重保留首次出现顺序。
+    const explicit = collectAll(args, "--workspace");
+    const scanRoot = option(args, "--workspaces-dir");
+    const workspaces = dedupWorkspaces([...explicit, ...(scanRoot ? await discoverWorkspaces(scanRoot) : [])]);
+    if (workspaces.length === 0) {
+      // 向后兼容:无显式参数时退化为 cwd 单 workspace,与旧版一致。
+      await startWebUi(workspace, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1"));
+      return;
+    }
+    await startWebUi(workspaces, Number(option(args, "--port", "4173")), option(args, "--host", "127.0.0.1"));
+    return;
+  }
   if (command === "tui") { await runTui(workspace, Number(option(args, "--interval-ms", "1000"))); return; }
   if (command === "review") {
     try { console.log(await readFile(`${jobDir(workspace, args[0])}/review.md`, "utf8")); }
@@ -137,19 +198,22 @@ async function main(): Promise<void> {
   }
   if (command === "continue") {
     const message = option(args, "--message", "请根据 review.md 修复问题，完成后重新运行验收命令。")!;
+    const extraRoundsOption = option(args, "--extra-rounds");
+    const extraRounds = extraRoundsOption === undefined ? 0 : Number(extraRoundsOption);
+    if (extraRoundsOption !== undefined && (!Number.isInteger(extraRounds) || extraRounds < 1 || extraRounds > 100)) throw new Error("--extra-rounds 必须是 1 到 100 的整数。");
     if (has(args, "--foreground")) {
       await unlink(path.join(jobDir(workspace, args[0]), "cancel.requested")).catch(() => undefined);
-      print(await executeJob(workspace, args[0], message));
+      print(await executeJob(workspace, args[0], message, undefined, extraRounds));
       return;
     }
-    await startBackground(workspace, args[0], message, Number(option(args, "--priority", "0")), undefined, has(args, "--refresh-baseline"));
+    await startBackground(workspace, args[0], message, Number(option(args, "--priority", "0")), undefined, has(args, "--refresh-baseline"), extraRounds);
     print({ jobId: args[0], status: "queued" });
     return;
   }
   if (command === "cancel") { print(await cancelJob(workspace, args[0])); return; }
   if (command === "approve") {
     const state = await approveJob(workspace, args[0]);
-    await startBackground(workspace, args[0]);
+    if (state.status === "queued") await startBackground(workspace, args[0]);
     print(state);
     return;
   }

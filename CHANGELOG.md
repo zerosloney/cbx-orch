@@ -4,6 +4,12 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Feature: Web UI 多 workspace 模式。`cbx ui --workspace A --workspace B` 或 `cbx ui --workspaces-dir <dir>` 扫描根目录下所有含 `.cbx/` 的子目录,一个 UI 跨多个项目。Dashboard 顶部 6 个卡片(总任务 / 运行中-并发 / 失败 / 队列 / 最后活动 / 健康),多 workspace 时显示 workspace 列表与状态点。
+- Feature: Web UI 任务详情面板升级为 6 个 tab(概览 / 阶段时间线 / 执行器 / Diff / Test / Review),执行器 tab 显示 PID 脉冲灯、心跳、已跑时间和 `process_started` 命令,并附 agent.log 尾部。
+- Feature: Web UI 任务行新增 Elapsed 列,非终态任务从 `createdAt` 实时计算(每秒刷新),终态显示 `totalSeconds`。
+- Feature: Web UI 新增 3 个 HTTP 接口 —— `GET /api/workspaces`(所有 workspace 状态摘要)、`GET /api/jobs/:id/timeline`(从 events.ndjson 推导阶段时间线)、`GET /api/jobs/:id/executor`(PID/heartbeat/命令)、`GET /api/jobs/:id/agent.log?since=0`(增量读取,默认 256KB 截断)。
+- Test: 新增 `tests/ui.test.ts`(5 个 case 覆盖 buildTimeline / readExecutorStatus / readAgentLogIncremental);`tests/interfaces.test.ts` 增补 1 个 detail API 端到端测试,90 个测试全过。
+
 ## 0.10.2 - 2026-08-06
 
 - Fix: 以 `package.json` 作为运行时和 MCP 版本的唯一来源，并同步 Claude Code、ZCode 与 marketplace manifest，避免补丁版本发布漂移。

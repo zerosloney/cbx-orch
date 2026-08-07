@@ -28,7 +28,10 @@ test("Web UI exposes read-only local routes without wildcard CORS", async () => 
     const pageHtml = await page.text();
     assert.match(pageHtml, /CBX Orchestrator/);
     assert.match(pageHtml, /<button type="button" class="job-select">/);
-    assert.match(pageHtml, /<button type="button" class="art" data-name=/);
+    // commit 5: detail panel is now tabbed; verify the tab-related CSS ships with the page.
+    assert.match(pageHtml, /\.tabs\{/);
+    assert.match(pageHtml, /\.tab-panel/);
+    assert.match(pageHtml, /timeline-row/);
     const jobs = await fetch(`http://127.0.0.1:${port}/api/jobs`);
     assert.equal(jobs.headers.get("access-control-allow-origin"), null);
     assert.equal((await jobs.json() as Array<{ jobId: string }>)[0].jobId, job.jobId);
@@ -41,6 +44,35 @@ test("Web UI exposes read-only local routes without wildcard CORS", async () => 
     assert.equal((await fetch(`http://127.0.0.1:${port}/api/jobs/${job.jobId}/artifact/context.json.bak`)).status, 403);
   } finally { await closeServer(server); }
   assert.throws(() => createWebUiServer(workspace, "0.0.0.0"), /回环地址/);
+});
+
+test("Web UI exposes job detail APIs (timeline / executor / agent.log)", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-ui-detail-"));
+  const job = await createJob({ workspace, task: "detail", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "detail-job" });
+  const jobDirPath = path.join(workspace, ".cbx", "jobs", job.jobId);
+  await writeFile(path.join(jobDirPath, "events.ndjson"), [
+    JSON.stringify({ event: "job.state_changed", jobId: job.jobId, status: "queued", phase: "queued", at: "2026-08-06T11:00:00.000Z" }),
+    JSON.stringify({ event: "process_started", command: ["codebuddy", "-p", "do work"], at: "2026-08-06T11:00:05.000Z" }),
+    JSON.stringify({ event: "job.state_changed", jobId: job.jobId, status: "running", phase: "executor", at: "2026-08-06T11:00:05.000Z" }),
+  ].join("\n") + "\n", "utf8");
+  await writeFile(path.join(jobDirPath, "agent.log"), "fake executor output\n", "utf8");
+  const server = createWebUiServer(workspace);
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const timeline = await (await fetch(`http://127.0.0.1:${port}/api/jobs/${job.jobId}/timeline`)).json() as { stages: Array<{ name: string }>; currentStage: string | null; elapsedSec: number };
+    assert.equal(timeline.stages.length, 2);
+    assert.equal(timeline.stages[0].name, "queued");
+    assert.equal(timeline.currentStage, "running");
+    assert.ok(timeline.elapsedSec >= 0);
+    const executor = await (await fetch(`http://127.0.0.1:${port}/api/jobs/${job.jobId}/executor`)).json() as { pid: number | null; alive: boolean | null; command: string | null };
+    assert.equal(executor.pid, null);
+    assert.equal(executor.alive, null);
+    assert.equal(executor.command, "codebuddy -p do work");
+    const log = await (await fetch(`http://127.0.0.1:${port}/api/jobs/${job.jobId}/agent.log?since=0`)).json() as { content: string; truncated: boolean };
+    assert.match(log.content, /fake executor output/);
+    assert.equal(log.truncated, false);
+  } finally { await closeServer(server); }
 });
 
 test("MCP initialize, tools, resources and errors preserve request ids", async () => {
@@ -74,6 +106,9 @@ test("MCP initialize, tools, resources and errors preserve request ids", async (
     assert.ok(tools.some(tool => tool.name === "cbx_artifact"));
     assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.task_contract);
     assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.review_executor);
+    assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.adaptive);
+    assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.approval_before_complete);
+    assert.ok(tools.find(tool => tool.name === "cbx_continue")?.inputSchema.properties?.extra_rounds);
     assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.allow_unsafe_permissions);
     assert.ok(tools.some(tool => tool.name === "cbx_review_gate"));
     const status = await call(3, "tools/call", { name: "cbx_status", arguments: { workspace, job_id: job.jobId } });
@@ -98,6 +133,20 @@ test("MCP initialize, tools, resources and errors preserve request ids", async (
       assert.match(String((response.error as { message: string }).message), expectedStageErrors[index]);
     }
     assert.deepEqual(await readdir(path.join(workspace, ".cbx", "jobs")), jobsBeforeInvalidStages, "invalid stages must not create or enqueue jobs");
+    const jobsBeforeInvalidAdaptive = await readdir(path.join(workspace, ".cbx", "jobs"));
+    for (const [index, adaptive] of [[], { unknown: true }, { enabled: "yes" }, { max_rounds: 0 }].entries()) {
+      const response = await call(50 + index, "tools/call", { name: "cbx_start", arguments: { workspace, task: "invalid adaptive", review: true, adaptive } });
+      assert.match(String((response.error as { message: string }).message), /adaptive/);
+    }
+    assert.deepEqual(await readdir(path.join(workspace, ".cbx", "jobs")), jobsBeforeInvalidAdaptive, "invalid adaptive options must not create jobs");
+    const invalidApproval = await call(55, "tools/call", { name: "cbx_start", arguments: { workspace, task: "invalid approval", approval_before_complete: "yes" } });
+    assert.match(String((invalidApproval.error as { message: string }).message), /approval_before_complete 必须是布尔值/);
+    const invalidExtraRounds = await call(56, "tools/call", { name: "cbx_continue", arguments: { workspace, job_id: job.jobId, extra_rounds: 0 } });
+    assert.match(String((invalidExtraRounds.error as { message: string }).message), /extra_rounds 必须是 1 到 100/);
+    const validAdaptive = await call(54, "tools/call", { name: "cbx_start", arguments: { workspace, task: "valid adaptive", review: true, adaptive: { enabled: true, max_rounds: 3, manager_executor: "codebuddy" } } });
+    const adaptiveJobId = ((validAdaptive.result as { structuredContent: { job_id: string } }).structuredContent).job_id;
+    const adaptiveContext = JSON.parse(await readFile(path.join(workspace, ".cbx", "jobs", adaptiveJobId, "context.json"), "utf8"));
+    assert.deepEqual(adaptiveContext.adaptive, { enabled: true, maxRounds: 3, managerExecutor: "codebuddy" });
     const validStage = await call(40, "tools/call", { name: "cbx_start", arguments: { workspace, task: "valid stage", task_contract: { stages: [{ name: "implement", executor: "codebuddy", task: "do work", review_executor: "opencode", skip_review: false }] } } });
     const validJobId = ((validStage.result as { structuredContent: { job_id: string } }).structuredContent).job_id;
     const persistedContract = JSON.parse(await readFile(path.join(workspace, ".cbx", "jobs", validJobId, "context-contract.json"), "utf8")) as { stages: Array<Record<string, unknown>> };

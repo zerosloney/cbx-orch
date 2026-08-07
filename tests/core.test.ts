@@ -6,13 +6,16 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
-import { approveJob, cancelJob, createJob, executeJob, health, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, readEventsIncremental, resumeQueue, retryQueueJob, serveQueue, startBackground } from "../src/core.js";
+import { approveJob, cancelJob, createJob, executeJob, health, listJobs, listQueue, loadConfig, loadState, mergeConfig, pauseQueue, readArtifact, readEventsIncremental, resumeQueue, retryQueueJob, serveQueue, startBackground, type JobState } from "../src/core.js";
 import { runReviewGate, stopReviewGateHook } from "../src/review-gate.js";
 import { acquireServiceLease, loadPersistedQueue, loadPersistedState, savePersistedStateAndQueue } from "../src/storage.js";
 import { BUILTIN_EXECUTORS, resolveExecutor } from "../src/executors/builtin.js";
+import { parseNextAction } from "../src/adaptive-manager.js";
+import { CONTEXT_PACK_MAX_CHARS, parseContextPack } from "../src/context-pack.js";
+import { createHumanGate, extendRoundLimit, parseHumanGate, resolveHumanGate } from "../src/human-gate.js";
 
 const fakeAgent = `
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, writeFile } from "node:fs/promises";
 const args = process.argv.slice(2);
 const prompt = args.find(value => value.includes("执行代理")) ?? args.at(-1) ?? "";
 const sleepMs = Number(process.env.FAKE_SLEEP_MS ?? 0);
@@ -22,12 +25,43 @@ const promptFile = process.env.FAKE_PROMPT_FILE;
 if (promptFile) await appendFile(promptFile, prompt + "\\n---\\n");
 if (jobDir) {
   await mkdir(jobDir, { recursive: true });
-  if (prompt.includes("context handshake")) {
+  if (prompt.includes("adaptive manager")) {
+    const candidate = prompt.match(/写入 (.+?manager-decision-candidate\\.json)/)?.[1];
+    const actions = (process.env.FAKE_MANAGER_ACTIONS ?? "execute,done").split(",");
+    const counterFile = process.env.FAKE_MANAGER_COUNTER_FILE ?? (jobDir + "/manager-counter.txt");
+    let managerIndex = 0;
+    try { managerIndex = Number(await (await import("node:fs/promises")).readFile(counterFile, "utf8")); } catch {}
+    await writeFile(counterFile, String(managerIndex + 1));
+    const action = actions[Math.min(managerIndex, actions.length - 1)];
+    if (action === "mutate") await writeFile(process.cwd() + "/manager-change.txt", "unsafe manager change\\n");
+    let requiredChangePresent = true;
+    if (action === "done" && process.env.FAKE_REQUIRE_CHANGE_ON_DONE === "1") {
+      try { await access(process.cwd() + "/fake-change.txt"); } catch { requiredChangePresent = false; }
+    }
+    const decision = action === "execute" || action === "mutate" ? { action: action === "mutate" ? "done" : "execute", ...(action === "execute" ? { stage: { name: "adaptive-implementation", executor: "codebuddy", task: "implement adaptive task" } } : {}) }
+      : action === "ask" ? { action, questions: ["请补充需求？"] }
+      : action === "blocked" ? { action, reason: "缺少外部权限" }
+      : action === "invalid" ? { action: "done", extra: true }
+      : requiredChangePresent ? { action: "done" } : { action: "done", missingChange: true };
+    if (candidate) await writeFile(candidate, JSON.stringify(decision));
+  } else if (prompt.includes("context handshake")) {
     const blockingQuestions = process.env.FAKE_BLOCKING_QUESTION ? [process.env.FAKE_BLOCKING_QUESTION] : [];
     await writeFile(jobDir + "/understanding.json", JSON.stringify({ interpretedGoal: "fake goal", plannedFiles: [], acceptanceCriteria: [], assumptions: [], blockingQuestions }));
   } else if (prompt.includes("independent review")) {
     const verdict = process.env.FAKE_REVIEW_VERDICT ?? "PASS";
     await writeFile(jobDir + "/review.md", process.env.FAKE_REVIEW_CONTENT ?? ("VERDICT: " + verdict + "\\n"));
+    let definitions;
+    try { definitions = JSON.parse(await (await import("node:fs/promises")).readFile(jobDir + "/auditor-context.json", "utf8")).current.criteria; } catch {}
+    if (definitions) {
+      const partial = process.env.FAKE_AUDIT_MODE === "partial";
+      const inconsistent = process.env.FAKE_AUDIT_MODE === "inconsistent";
+      const criteria = definitions.map((item, index) => {
+        const status = inconsistent || (partial && index > 0) ? "unverified" : "verified";
+        const evidence = status === "verified" ? ["complete.patch", "test.log", process.env.FAKE_AUDIT_UNSAFE === "1" ? "../secret" : "review.md"] : [];
+        return { id: item.id, status, evidence };
+      });
+      await writeFile(jobDir + "/audit-candidate.json", JSON.stringify({ version: 1, completion: partial ? "incomplete" : "complete", cleanliness: "clean", alignment: "aligned", criteria }));
+    }
     if (process.env.FAKE_REVIEW_MUTATE === "1") await writeFile(process.cwd() + "/reviewer-change.txt", "untested reviewer change\\n");
   } else {
     await writeFile(jobDir + "/handback.md", "fake handback\\n");
@@ -65,11 +99,29 @@ async function setupFake(): Promise<{ workspace: string; script: string }> {
   process.env.FAKE_REVIEW_VERDICT = "PASS";
   delete process.env.FAKE_REVIEW_CONTENT;
   delete process.env.FAKE_REVIEW_MUTATE;
+  delete process.env.FAKE_AUDIT_MODE;
+  delete process.env.FAKE_AUDIT_UNSAFE;
+  delete process.env.FAKE_MANAGER_ACTIONS;
+  delete process.env.FAKE_MANAGER_COUNTER_FILE;
+  delete process.env.FAKE_REQUIRE_CHANGE_ON_DONE;
   delete process.env.FAKE_STAGE_CHANGE;
   delete process.env.FAKE_COUNTER_FILE;
   delete process.env.FAKE_PROMPT_FILE;
   delete process.env.FAKE_BLOCKING_QUESTION;
   return { workspace, script };
+}
+
+async function createAdaptiveJob(workspace: string, jobId: string, maxRounds = 4) {
+  return createJob({ workspace, task: "adaptive task", taskContract: { goal: "adaptive goal", acceptanceCriteria: ["adaptive criterion"] }, testCommand: "node -e \"process.exit(0)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, adaptive: { enabled: true, maxRounds }, jobId });
+}
+
+async function initializeGitWorkspace(workspace: string): Promise<void> {
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "initial"], { cwd: workspace, encoding: "utf8" });
 }
 
 test("createJob persists task contract and state", async () => {
@@ -79,6 +131,7 @@ test("createJob persists task contract and state", async () => {
   assert.equal((await loadState(workspace, job.jobId)).status, "queued");
   assert.match(await readFile(path.join(job.directory, "request.md"), "utf8"), /实现功能/);
   assert.equal(existsSync(path.join(job.directory, "context-snapshot.md")), false);
+  assert.equal(JSON.parse(await readFile(path.join(job.directory, "context.json"), "utf8")).adaptive, undefined);
 });
 
 test("readEventsIncremental returns events after cursor and skips partial tail", async () => {
@@ -154,7 +207,7 @@ test("end-to-end success runs fake agent, test, and review", async () => {
   await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
   spawnSync("git", ["add", "README.md"], { cwd: workspace });
   spawnSync("git", ["commit", "-m", "initial"], { cwd: workspace, encoding: "utf8" });
-  const job = await createJob({ workspace, task: "实现功能", testCommand: "node -e \"process.exit(0)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "success" });
+  const job = await createJob({ workspace, task: "实现功能", taskContract: { acceptanceCriteria: ["验收通过"] }, testCommand: "node -e \"process.exit(0)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "success" });
   process.env.FAKE_JOB_DIR = job.directory;
   const state = await executeJob(workspace, job.jobId);
   assert.equal(state.status, "done");
@@ -169,6 +222,300 @@ test("end-to-end success runs fake agent, test, and review", async () => {
   assert.ok(result.changedFiles.includes("fake-change.txt"));
   assert.equal(result.handback.trim(), "fake handback");
   assert.match(result.artifactHashes["complete.patch"], /^[a-f0-9]{64}$/);
+  assert.equal(result.acceptanceEvidence[0].status, "evidence_available");
+  assert.equal(result.audit.completion, "complete");
+  assert.equal(result.audit.cleanliness, "clean");
+  assert.equal(result.audit.alignment, "aligned");
+  assert.match(result.verifiedProgress.criteria[0].id, /^criterion-[a-f0-9]{16}$/);
+  assert.equal(result.verifiedProgress.criteria[0].status, "verified");
+  assert.match(result.verifiedProgress.criteria[0].evidence[0].sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(JSON.parse(await readArtifact(workspace, job.jobId, "audit.json")), result.audit);
+  assert.deepEqual(JSON.parse(await readArtifact(workspace, job.jobId, "verified-progress.json")), result.verifiedProgress);
+});
+
+test("structured audit preserves partial criterion progress but blocks completion", async () => {
+  const { workspace } = await setupFake();
+  process.env.FAKE_AUDIT_MODE = "partial";
+  const job = await createJob({ workspace, task: "部分完成", taskContract: { acceptanceCriteria: ["标准 A", "标准 B"] }, review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "partial-audit" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "needs_fix");
+  assert.equal(state.phase, "verification_gate");
+  const result = JSON.parse(await readArtifact(workspace, job.jobId, "result.json"));
+  assert.deepEqual(result.verifiedProgress.criteria.map((item: { status: string }) => item.status), ["verified", "unverified"]);
+  assert.deepEqual(result.acceptanceEvidence.map((item: { status: string }) => item.status), ["unverified", "unverified"]);
+});
+
+test("structured audit rejects evidence paths outside the safe artifact set", async () => {
+  const { workspace } = await setupFake();
+  process.env.FAKE_AUDIT_UNSAFE = "1";
+  const job = await createJob({ workspace, task: "非法证据", taskContract: { acceptanceCriteria: ["安全引用"] }, review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "unsafe-audit" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "review_failed");
+  assert.match(String(state.auditError), /不允许或不存在的产物/);
+  await assert.rejects(() => readArtifact(workspace, job.jobId, "audit-candidate.json"), /不允许读取/);
+});
+
+test("verified progress invalidates changed evidence and recovers with fresh audit", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({ workspace, task: "证据恢复", taskContract: { acceptanceCriteria: ["结果可信"] }, review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "progress-recovery" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const first = await executeJob(workspace, job.jobId);
+  assert.equal(first.status, "done");
+  const stableId = (first.verifiedProgress as { criteria: Array<{ id: string }> }).criteria[0].id;
+
+  await writeFile(path.join(job.directory, "test.log"), "tampered evidence\n", "utf8");
+  process.env.FAKE_EXIT_SEQUENCE = "1";
+  const failed = await executeJob(workspace, job.jobId);
+  assert.equal(failed.status, "failed");
+  assert.equal((failed.verifiedProgress as { criteria: Array<{ status: string }> }).criteria[0].status, "invalidated");
+
+  process.env.FAKE_EXIT_SEQUENCE = "0";
+  const recovered = await executeJob(workspace, job.jobId);
+  assert.equal(recovered.status, "done");
+  const recoveredCriterion = (recovered.verifiedProgress as { criteria: Array<{ id: string; status: string }> }).criteria[0];
+  assert.equal(recoveredCriterion.id, stableId);
+  assert.equal(recoveredCriterion.status, "verified");
+});
+
+test("complete audit cannot reuse prior progress for an unverified current criterion", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({ workspace, task: "拒绝矛盾审计", taskContract: { acceptanceCriteria: ["必须重新确认"] }, review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "inconsistent-audit" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const first = await executeJob(workspace, job.jobId);
+  assert.equal(first.status, "done");
+  assert.equal((first.verifiedProgress as { criteria: Array<{ status: string }> }).criteria[0].status, "verified");
+
+  process.env.FAKE_AUDIT_MODE = "inconsistent";
+  const rejected = await executeJob(workspace, job.jobId);
+  assert.equal(rejected.status, "review_failed");
+  assert.match(String(rejected.auditError), /completion=complete.*verified/);
+});
+
+test("explicit skipReview keeps the legacy task contract completion path", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({ workspace, task: "显式跳过审查", taskContract: { acceptanceCriteria: ["保持跳审语义"], stages: [{ name: "implementation", executor: "codebuddy", task: "实现", skipReview: true }] }, review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "skip-structured-audit" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "done");
+  assert.equal(state.reviewVerdict, null);
+  assert.equal(existsSync(path.join(job.directory, "audit.json")), false);
+});
+
+test("adaptive manager executes one stage then deterministically completes", async () => {
+  const { workspace } = await setupFake();
+  const job = await createAdaptiveJob(workspace, "adaptive-success");
+  const promptFile = path.join(workspace, "adaptive-prompts.txt");
+  process.env.FAKE_JOB_DIR = job.directory;
+  process.env.FAKE_PROMPT_FILE = promptFile;
+  const state = await executeJob(workspace, job.jobId, "operator supplement");
+  assert.equal(state.status, "done");
+  assert.equal(state.adaptiveRound, 2);
+  assert.deepEqual((state.adaptiveRounds as Array<{ action: string }>).map(item => item.action), ["execute", "done"]);
+  assert.equal((state.stages as unknown[]).length, 1);
+  const context = JSON.parse(await readFile(path.join(job.directory, "context.json"), "utf8"));
+  assert.deepEqual(context.adaptive, { enabled: true, maxRounds: 4, managerExecutor: "codebuddy" });
+  const prompts = await readFile(promptFile, "utf8");
+  assert.match(prompts, /manager-context\.json/);
+  assert.doesNotMatch(prompts, /MANAGER_INPUT:/);
+  const packs = await Promise.all(["manager", "executor", "auditor"].map(role => readArtifact(workspace, job.jobId, `${role}-context.json`).then(JSON.parse)));
+  assert.deepEqual(packs.map(pack => pack.role), ["manager", "executor", "auditor"]);
+  for (const pack of packs) {
+    assert.equal(pack.projection, true);
+    assert.ok(JSON.stringify(pack).length <= CONTEXT_PACK_MAX_CHARS);
+    assert.doesNotMatch(JSON.stringify(pack), /agent\.log|MANAGER_INPUT|trajectory/i);
+    assert.ok(pack.artifacts.every((artifact: { sha256: string }) => /^[a-f0-9]{64}$/.test(artifact.sha256)));
+    assert.deepEqual(parseContextPack(pack), pack);
+  }
+  assert.equal(packs[0].userInstructions, "operator supplement");
+});
+
+test("context packs redact role inputs and strict parsers reject unknown fields", async () => {
+  const { workspace } = await setupFake();
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ governance: { redactPatterns: ["SECRET-[A-Z]+"] } }), "utf8");
+  const job = await createJob({ workspace, task: "secret context", taskContract: { goal: "use SECRET-TOKEN", acceptanceCriteria: ["safe"] }, testCommand: "node -e \"process.exit(0)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, adaptive: { enabled: true, maxRounds: 2 }, jobId: "context-pack-redaction" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  assert.equal((await executeJob(workspace, job.jobId, "instruction SECRET-INPUT")).status, "done");
+  for (const role of ["manager", "executor", "auditor"]) assert.doesNotMatch(await readArtifact(workspace, job.jobId, `${role}-context.json`), /SECRET-/);
+  assert.throws(() => parseContextPack({ version: 1, projection: true, role: "manager", taskContract: null, verifiedProgress: null, audit: null, recentFailure: null, userInstructions: "", artifacts: [], current: { round: 1, maxRounds: 2, remainingRounds: 1 }, history: [] }), /不支持字段/);
+  const gate = createHumanGate("needs_input", { questions: ["answer?"] });
+  assert.equal(resolveHumanGate(gate, "safe", value => value).status, "resolved");
+  assert.throws(() => parseHumanGate({ ...gate, unknown: true }), /不支持字段/);
+  assert.throws(() => extendRoundLimit(100, 1), /不能超过 100/);
+});
+
+test("adaptive done without evidence is blocked by the existing completion gate", async () => {
+  const { workspace } = await setupFake();
+  process.env.FAKE_MANAGER_ACTIONS = "done";
+  const job = await createAdaptiveJob(workspace, "adaptive-no-evidence");
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "needs_fix");
+  assert.equal(state.phase, "verification_gate");
+  assert.equal(state.adaptiveRound, 1);
+});
+
+test("adaptive done cannot bypass the completion gate through a dormant static skipReview stage", async () => {
+  const { workspace } = await setupFake();
+  process.env.FAKE_MANAGER_ACTIONS = "done";
+  const job = await createJob({
+    workspace,
+    task: "adaptive dormant stage",
+    taskContract: {
+      goal: "adaptive goal",
+      acceptanceCriteria: ["adaptive criterion"],
+      stages: [{ name: "dormant", executor: "codebuddy", task: "not executed", skipReview: true }],
+    },
+    testCommand: "node -e \"process.exit(0)\"",
+    review: true,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 10,
+    timeoutMs: 2_000,
+    maxRetries: 0,
+    adaptive: { enabled: true, maxRounds: 1 },
+    jobId: "adaptive-dormant-skip-review",
+  });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "needs_fix");
+  assert.equal(state.phase, "verification_gate");
+});
+
+test("adaptive ask and blocked decisions map to explicit needs_fix phases", async () => {
+  for (const [action, phase, field] of [["ask", "adaptive_ask", "blockingQuestions"], ["blocked", "adaptive_blocked", "blockedReason"]] as const) {
+    const { workspace } = await setupFake();
+    process.env.FAKE_MANAGER_ACTIONS = action;
+    const job = await createAdaptiveJob(workspace, `adaptive-${action}`);
+    process.env.FAKE_JOB_DIR = job.directory;
+    const state = await executeJob(workspace, job.jobId);
+    assert.equal(state.status, "needs_fix");
+    assert.equal(state.phase, phase);
+    assert.ok(state[field]);
+    assert.equal((state.humanGate as { reason: string; status: string }).reason, "needs_input");
+    assert.equal((state.humanGate as { status: string }).status, "waiting");
+  }
+});
+
+test("adaptive manager rejects invalid decisions and worktree mutation", async () => {
+  for (const [action, status, phase] of [["invalid", "needs_fix", "adaptive_manager_decision"], ["mutate", "failed", "adaptive_manager_safety"]] as const) {
+    const { workspace } = await setupFake();
+    process.env.FAKE_MANAGER_ACTIONS = action;
+    if (action === "mutate") spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+    const job = await createAdaptiveJob(workspace, `adaptive-${action}`);
+    process.env.FAKE_JOB_DIR = job.directory;
+    const state = await executeJob(workspace, job.jobId);
+    assert.equal(state.status, status);
+    assert.equal(state.phase, phase);
+    await assert.rejects(() => readArtifact(workspace, job.jobId, "manager-decision-candidate.json"), /不允许读取/);
+  }
+});
+
+test("NextAction parser rejects unknown fields, illegal combinations, and empty content", () => {
+  assert.throws(() => parseNextAction({ action: "done", reason: "extra" }), /不支持字段/);
+  assert.throws(() => parseNextAction({ action: "execute" }), /stage/);
+  assert.throws(() => parseNextAction({ action: "ask", questions: [] }), /1 到 20/);
+  assert.throws(() => parseNextAction({ action: "blocked", reason: " " }), /非空字符串/);
+});
+
+test("adaptive maxRounds persists across foreground continuation", async () => {
+  const { workspace } = await setupFake();
+  process.env.FAKE_MANAGER_ACTIONS = "ask,execute,done";
+  const job = await createAdaptiveJob(workspace, "adaptive-round-recovery", 2);
+  process.env.FAKE_JOB_DIR = job.directory;
+  const first = await executeJob(workspace, job.jobId);
+  assert.equal(first.phase, "adaptive_ask");
+  assert.equal(first.adaptiveRound, 1);
+  const resumed = await executeJob(workspace, job.jobId, "answer");
+  assert.equal(resumed.status, "needs_fix");
+  assert.equal(resumed.phase, "adaptive_max_rounds");
+  assert.equal(resumed.adaptiveRound, 2);
+  assert.equal((resumed.stages as unknown[]).length, 1);
+  const exhausted = await executeJob(workspace, job.jobId, "retry");
+  assert.equal(exhausted.adaptiveRound, 2);
+  assert.equal(exhausted.phase, "adaptive_max_rounds");
+  assert.equal((exhausted.humanGate as { status: string }).status, "waiting");
+  const completed = await executeJob(workspace, job.jobId, "one more round", undefined, 1);
+  assert.equal(completed.status, "done");
+  assert.equal(completed.adaptiveRound, 3);
+});
+
+test("isolated adaptive execute then ask preserves its worktree through continuation and delivery", async () => {
+  const { workspace } = await setupFake();
+  await initializeGitWorkspace(workspace);
+  process.env.FAKE_MANAGER_ACTIONS = "execute,ask,done";
+  process.env.FAKE_REQUIRE_CHANGE_ON_DONE = "1";
+  const job = await createJob({
+    workspace,
+    task: "isolated adaptive recovery",
+    taskContract: { goal: "adaptive goal", acceptanceCriteria: ["adaptive criterion"] },
+    testCommand: "node -e \"process.exit(0)\"",
+    review: true,
+    isolated: true,
+    permissionMode: "auto",
+    maxTurns: 10,
+    timeoutMs: 2_000,
+    maxRetries: 0,
+    adaptive: { enabled: true, maxRounds: 4 },
+    jobId: "adaptive-isolated-recovery",
+  });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const paused = await executeJob(workspace, job.jobId);
+  assert.equal(paused.phase, "adaptive_ask");
+  const worktree = JSON.parse(await readFile(path.join(job.directory, "worktree.json"), "utf8")) as { path: string };
+  assert.equal(existsSync(worktree.path), true);
+  assert.equal(existsSync(path.join(worktree.path, "fake-change.txt")), true);
+  assert.notEqual(paused.worktreeCleaned, true);
+
+  const completed = await executeJob(workspace, job.jobId, "continue");
+  assert.equal(completed.status, "done");
+  assert.equal(existsSync(worktree.path), false);
+  assert.match(await readFile(path.join(job.directory, "complete.patch"), "utf8"), /fake-change\.txt/);
+  const result = JSON.parse(await readArtifact(workspace, job.jobId, "result.json"));
+  assert.ok(result.changedFiles.includes("fake-change.txt"));
+});
+
+test("isolated adaptive maxRounds pause preserves its worktree", async () => {
+  const { workspace } = await setupFake();
+  await initializeGitWorkspace(workspace);
+  process.env.FAKE_MANAGER_ACTIONS = "execute";
+  const job = await createJob({
+    workspace,
+    task: "isolated adaptive max rounds",
+    taskContract: { goal: "adaptive goal", acceptanceCriteria: ["adaptive criterion"] },
+    testCommand: "node -e \"process.exit(0)\"",
+    review: true,
+    isolated: true,
+    permissionMode: "auto",
+    maxTurns: 10,
+    timeoutMs: 2_000,
+    maxRetries: 0,
+    adaptive: { enabled: true, maxRounds: 1 },
+    jobId: "adaptive-isolated-max-rounds",
+  });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const paused = await executeJob(workspace, job.jobId);
+  assert.equal(paused.status, "needs_fix");
+  assert.equal(paused.phase, "adaptive_max_rounds");
+  const worktree = JSON.parse(await readFile(path.join(job.directory, "worktree.json"), "utf8")) as { path: string };
+  assert.equal(existsSync(worktree.path), true);
+  assert.equal(existsSync(path.join(worktree.path, "fake-change.txt")), true);
+  assert.notEqual(paused.worktreeCleaned, true);
+});
+
+test("CLI adaptive flags persist opt-in settings", async () => {
+  const { workspace } = await setupFake();
+  const result = spawnSync(process.execPath, [path.resolve("dist/src/cli.js"), "run", "--workspace", workspace, "--task", "cli adaptive", "--review", "--adaptive", "--adaptive-max-rounds", "1", "--manager-executor", "codebuddy", "--approval-before-complete"], { encoding: "utf8", env: { ...process.env, FAKE_JOB_DIR: "" } });
+  assert.equal(result.status, 0, result.stderr);
+  const jobId = JSON.parse(result.stdout).jobId as string;
+  const directory = path.join(workspace, ".cbx", "jobs", jobId);
+  const context = JSON.parse(await readFile(path.join(directory, "context.json"), "utf8"));
+  assert.deepEqual(context.adaptive, { enabled: true, maxRounds: 1, managerExecutor: "codebuddy" });
+  assert.equal(context.approvalBeforeComplete, true);
+  const invalidRounds = spawnSync(process.execPath, [path.resolve("dist/src/cli.js"), "continue", "missing", "--workspace", workspace, "--extra-rounds", "0", "--foreground"], { encoding: "utf8" });
+  assert.notEqual(invalidRounds.status, 0);
+  assert.match(invalidRounds.stderr, /--extra-rounds 必须是 1 到 100/);
 });
 
 test("structured task contract performs a plan-only handshake and pauses on ambiguity", async () => {
@@ -182,6 +529,7 @@ test("structured task contract performs a plan-only handshake and pauses on ambi
   assert.equal(state.attempt, 0, "语义歧义不应消耗实现重试");
   assert.equal(existsSync(path.join(workspace, "fake-change.txt")), false);
   assert.deepEqual(JSON.parse(await readArtifact(workspace, job.jobId, "understanding.json")).blockingQuestions, ["是否允许修改公共 API？"]);
+  assert.equal((state.humanGate as { reason: string; status: string }).reason, "needs_input");
   assert.equal(JSON.parse(await readArtifact(workspace, job.jobId, "result.json")).acceptanceEvidence[0].status, "unverified");
 });
 
@@ -195,6 +543,7 @@ test("reviewExecutor can independently override the implementation executor", as
   const events = await readFile(path.join(job.directory, "events.ndjson"), "utf8");
   assert.match(events, /"name":"codebuddy"/);
   assert.match(events, /"name":"opencode"/);
+  assert.equal(existsSync(path.join(job.directory, "audit.json")), false, "non-contract review keeps the legacy flow");
 });
 
 test("staged tasks inherit the top-level reviewExecutor", async () => {
@@ -212,7 +561,7 @@ test("staged tasks use the first stage executor for the context handshake", asyn
   const { workspace, script } = await setupFake();
   process.env.CBX_CODEBUDDY = path.join(workspace, "missing-codebuddy.mjs");
   process.env.CBX_OPENCODE = script;
-  const job = await createJob({ workspace, task: "仅阶段执行器", review: false, isolated: false, executor: "codebuddy", permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "stage-handshake-executor", taskContract: { stages: [{ name: "implement", executor: "opencode", task: "实现" }] } });
+  const job = await createJob({ workspace, task: "仅阶段执行器", review: false, isolated: false, executor: "codebuddy", permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "stage-handshake-executor", taskContract: { acceptanceCriteria: ["旧流程验收"], stages: [{ name: "implement", executor: "opencode", task: "实现" }] } });
   process.env.FAKE_JOB_DIR = job.directory;
   try { assert.equal((await executeJob(workspace, job.jobId)).status, "done"); }
   finally {
@@ -221,6 +570,8 @@ test("staged tasks use the first stage executor for the context handshake", asyn
   }
   const events = (await readFile(path.join(job.directory, "events.ndjson"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
   assert.deepEqual(events.filter(event => event.event === "executor_metadata").map(event => event.name), ["opencode", "opencode"]);
+  assert.equal(existsSync(path.join(job.directory, "audit.json")), false, "review=false keeps the legacy contract flow");
+  assert.equal(JSON.parse(await readArtifact(workspace, job.jobId, "result.json")).acceptanceEvidence[0].status, "evidence_available");
 });
 
 test("git baseline is recorded and isolated execution stays pinned when HEAD drifts", async () => {
@@ -448,9 +799,67 @@ test("approval gate pauses and resumes a task", async () => {
   const { workspace } = await setupFake();
   const job = await createJob({ workspace, task: "批准", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, approvalBeforeRun: true, jobId: "approval" });
   process.env.FAKE_JOB_DIR = job.directory;
-  assert.equal((await executeJob(workspace, job.jobId)).status, "awaiting_approval");
-  await approveJob(workspace, job.jobId);
+  const waiting = await executeJob(workspace, job.jobId);
+  assert.equal(waiting.status, "awaiting_approval");
+  assert.deepEqual({ reason: (waiting.humanGate as { reason: string }).reason, status: (waiting.humanGate as { status: string }).status }, { reason: "before_run", status: "waiting" });
+  const approved = await approveJob(workspace, job.jobId);
+  assert.equal((approved.humanGate as { status: string }).status, "resolved");
   assert.equal((await executeJob(workspace, job.jobId)).status, "done");
+});
+
+test("completion approval preserves verified isolated work and completes without rerunning stages", async () => {
+  const { workspace } = await setupFake();
+  await initializeGitWorkspace(workspace);
+  const job = await createJob({ workspace, task: "approve completion", taskContract: { acceptanceCriteria: ["verified"] }, testCommand: "node -e \"process.exit(0)\"", review: true, isolated: true, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, approvalBeforeComplete: true, jobId: "completion-approval" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const waiting = await executeJob(workspace, job.jobId);
+  assert.equal(waiting.status, "awaiting_approval");
+  assert.equal(waiting.phase, "before_complete");
+  assert.deepEqual({ reason: (waiting.humanGate as { reason: string }).reason, status: (waiting.humanGate as { status: string }).status }, { reason: "completion", status: "waiting" });
+  const worktree = JSON.parse(await readFile(path.join(job.directory, "worktree.json"), "utf8")) as { path: string };
+  assert.equal(existsSync(path.join(worktree.path, "fake-change.txt")), true);
+  const attempt = waiting.attempt;
+
+  const completed = await approveJob(workspace, job.jobId);
+  assert.equal(completed.status, "done");
+  assert.equal(completed.attempt, attempt, "完成审批不得重跑已验证 stage");
+  assert.equal((completed.humanGate as { status: string }).status, "resolved");
+  assert.equal(existsSync(worktree.path), false);
+  assert.match(await readFile(path.join(job.directory, "complete.patch"), "utf8"), /fake-change\.txt/);
+  await assert.rejects(() => approveJob(workspace, job.jobId), /不需要批准/);
+});
+
+test("completion approval rejects stale worktree evidence and keeps work for revalidation", async () => {
+  const { workspace } = await setupFake();
+  await initializeGitWorkspace(workspace);
+  const job = await createJob({ workspace, task: "stale completion", taskContract: { acceptanceCriteria: ["verified"] }, testCommand: "node -e \"process.exit(0)\"", review: true, isolated: true, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, approvalBeforeComplete: true, jobId: "completion-stale" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  assert.equal((await executeJob(workspace, job.jobId)).phase, "before_complete");
+  const worktree = JSON.parse(await readFile(path.join(job.directory, "worktree.json"), "utf8")) as { path: string };
+  await writeFile(path.join(worktree.path, "fake-change.txt"), "changed after review\n", "utf8");
+  const stale = await approveJob(workspace, job.jobId);
+  assert.equal(stale.status, "needs_fix");
+  assert.equal(stale.phase, "completion_evidence_stale");
+  assert.equal(existsSync(worktree.path), true);
+  await assert.rejects(() => approveJob(workspace, job.jobId), /不需要批准/);
+});
+
+test("the same terminal failure opens a Human Gate only at the third occurrence", async () => {
+  const { workspace } = await setupFake();
+  process.env.FAKE_EXIT_SEQUENCE = "1";
+  const job = await createJob({ workspace, task: "repeat failure", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "repeated-failure" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const first = await executeJob(workspace, job.jobId);
+  const second = await executeJob(workspace, job.jobId);
+  assert.equal(first.status, "failed");
+  assert.equal(second.status, "failed");
+  assert.equal(first.humanGate, undefined);
+  assert.equal(second.humanGate, undefined);
+  const third = await executeJob(workspace, job.jobId);
+  assert.equal(third.status, "needs_fix");
+  assert.equal(third.phase, "repeated_failure");
+  assert.deepEqual({ reason: (third.humanGate as { reason: string }).reason, status: (third.humanGate as { status: string }).status }, { reason: "repeated_failure", status: "waiting" });
+  assert.equal((third.failureTracker as { count: number }).count, 3);
 });
 
 test("background approval gate finishes its queue entry without spawning another worker", async () => {
@@ -647,14 +1056,17 @@ test("reviewer worktree changes fail review instead of being silently delivered"
   assert.equal(state.reviewerModifiedWorktree, true);
 });
 
-test("review verdict is parsed only from the first line", async () => {
+test("review failure keeps residual artifacts unverified", async () => {
   const { workspace } = await setupFake();
   process.env.FAKE_REVIEW_CONTENT = "VERDICT: FAIL\nexample text\nVERDICT: PASS\n";
-  const job = await createJob({ workspace, task: "严格 verdict", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "strict-verdict" });
+  const job = await createJob({ workspace, task: "严格 verdict", taskContract: { acceptanceCriteria: ["审查通过"] }, review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "strict-verdict" });
   process.env.FAKE_JOB_DIR = job.directory;
   const state = await executeJob(workspace, job.jobId);
   assert.equal(state.status, "needs_fix");
   assert.equal(state.reviewVerdict, "FAIL");
+  const result = JSON.parse(await readArtifact(workspace, job.jobId, "result.json"));
+  assert.deepEqual(result.acceptanceEvidence[0].artifacts, ["complete.patch", "test.log", "review.md"]);
+  assert.equal(result.acceptanceEvidence[0].status, "unverified");
 });
 
 test("semantic review failures pause without automatic implementation retries", async () => {
@@ -666,6 +1078,7 @@ test("semantic review failures pause without automatic implementation retries", 
   assert.equal(state.status, "needs_fix");
   assert.equal(state.phase, "awaiting_clarification");
   assert.equal(state.attempt, 1);
+  assert.equal((state.humanGate as { reason: string }).reason, "semantic_conflict");
 });
 
 test("corrupt queue is surfaced and dead queue locks are recovered", async () => {
@@ -700,18 +1113,29 @@ test("stale job lock and a dead running queue entry recover after a crash", asyn
 
 test("context snapshot is persisted and required by implementation and review prompts", async () => {
   const { workspace } = await setupFake();
-  const job = await createJob({ workspace, task: "保留父会话上下文", contextSnapshot: "计划：修改核心流程\\n约束：不要新增依赖", testCommand: "node -e \"process.exit(0)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "context-snapshot" });
+  const job = await createJob({ workspace, task: "保留父会话上下文", contextSnapshot: "计划：修改核心流程\n约束：不要新增依赖", testCommand: "node -e \"process.exit(0)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "context-snapshot" });
   const promptFile = path.join(workspace, "prompts.txt");
   process.env.FAKE_JOB_DIR = job.directory;
   process.env.FAKE_PROMPT_FILE = promptFile;
   const state = await executeJob(workspace, job.jobId);
   assert.equal(state.status, "done");
-  assert.equal(await readFile(path.join(job.directory, "context-snapshot.md"), "utf8"), "计划：修改核心流程\\n约束：不要新增依赖");
+  assert.equal(await readFile(path.join(job.directory, "context-snapshot.md"), "utf8"), "计划：修改核心流程\n约束：不要新增依赖");
   const prompts = await readFile(promptFile, "utf8");
+  // prompt 引用 context pack，不直接引用 snapshot 路径或裸 context.json
+  assert.match(prompts, /executor-context\.json/);
+  assert.match(prompts, /auditor-context\.json/);
+  assert.doesNotMatch(prompts, /[\\/]context\.json\b/);
   const snapshotPath = path.join(job.directory, "context-snapshot.md");
   const escaped = snapshotPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const matches = prompts.match(new RegExp(escaped, "g"));
-  assert.ok(matches && matches.length >= 2, `context-snapshot.md 应在 impl 和 review prompt 中各引用一次，实际 ${matches?.length ?? 0} 次`);
+  assert.doesNotMatch(prompts, new RegExp(escaped));
+  // executor 和 auditor context pack 的 artifact 引用必须包含 snapshot 的绝对路径和 SHA
+  for (const role of ["executor", "auditor"] as const) {
+    const pack = JSON.parse(await readArtifact(workspace, job.jobId, `${role}-context.json`));
+    const snapshotRef = pack.artifacts.find((a: { name: string }) => a.name === "context-snapshot.md");
+    assert.ok(snapshotRef, `${role} context pack 应包含 context-snapshot.md 的 artifact 引用`);
+    assert.equal(snapshotRef.path, snapshotPath);
+    assert.match(snapshotRef.sha256, /^[a-f0-9]{64}$/);
+  }
 });
 
 test("empty context snapshot is not persisted and omitted from prompts", async () => {
@@ -742,6 +1166,119 @@ test("cbx_continue with empty snapshot deletes existing context-snapshot.md", as
   assert.equal(existsSync(path.join(job.directory, "context-snapshot.md")), true);
   await startBackground(workspace, job.jobId, "修复", 0, "");
   assert.equal(existsSync(path.join(job.directory, "context-snapshot.md")), false);
+});
+
+test("3A.1 context pack redacts sensitive strings from acceptance criteria in all role packs", async () => {
+  const { workspace } = await setupFake();
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ governance: { redactPatterns: ["SENSITIVE-\\d+"] } }), "utf8");
+  const job = await createJob({ workspace, task: "redact context pack", taskContract: { goal: "test", acceptanceCriteria: ["must not leak SENSITIVE-12345"] }, testCommand: "node -e \"process.exit(0)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, adaptive: { enabled: true, maxRounds: 2 }, jobId: "pack-redaction" });
+  const promptFile = path.join(workspace, "pack-prompts.txt");
+  process.env.FAKE_JOB_DIR = job.directory;
+  process.env.FAKE_PROMPT_FILE = promptFile;
+  assert.equal((await executeJob(workspace, job.jobId)).status, "done");
+  for (const role of ["manager", "executor", "auditor"] as const) {
+    const pack = JSON.parse(await readArtifact(workspace, job.jobId, `${role}-context.json`));
+    const serialized = JSON.stringify(pack);
+    assert.doesNotMatch(serialized, /SENSITIVE-12345/);
+    assert.ok(serialized.length <= CONTEXT_PACK_MAX_CHARS, `${role} pack 超过 ${CONTEXT_PACK_MAX_CHARS} 字符上限`);
+    assert.doesNotThrow(() => parseContextPack(pack), `${role} pack 格式无效`);
+  }
+  const prompts = await readFile(promptFile, "utf8");
+  assert.doesNotMatch(prompts, /SENSITIVE-12345/);
+});
+
+test("3A.3 background before_complete approval resolves queue entry to done without lingering awaiting_approval", async () => {
+  const { workspace } = await setupFake();
+  await initializeGitWorkspace(workspace);
+  const job = await createJob({ workspace, task: "bg approve completion", taskContract: { acceptanceCriteria: ["verified"] }, testCommand: "node -e \"process.exit(0)\"", review: true, isolated: true, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, approvalBeforeComplete: true, autoCommit: true, jobId: "bg-completion-approval" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  await startBackground(workspace, job.jobId);
+  // 等待 job 到达 before_complete
+  const deadline = Date.now() + 10_000;
+  let state: JobState;
+  while (Date.now() < deadline) {
+    state = await loadState(workspace, job.jobId);
+    if (state.status === "awaiting_approval") break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  state = await loadState(workspace, job.jobId);
+  assert.equal(state.status, "awaiting_approval");
+  assert.equal(state.phase, "before_complete");
+  const entry = (await listQueue(workspace)).entries.find(item => item.jobId === job.jobId);
+  assert.equal(entry?.status, "awaiting_approval");
+  assert.equal(entry?.pid, undefined);
+  // 等待 executeJob 释放 run.lock（approveJob 需要获取同一锁）
+  const approveDeadline = Date.now() + 5_000;
+  let completed: JobState | undefined;
+  while (Date.now() < approveDeadline) {
+    try { completed = await approveJob(workspace, job.jobId); break; }
+    catch { await new Promise(resolve => setTimeout(resolve, 50)); }
+  }
+  assert.ok(completed, "approveJob 应在超时前成功");
+  assert.equal(completed!.status, "done");
+  assert.equal((completed!.humanGate as { status: string }).status, "resolved");
+  // 队列中对应 entry 应为 done，无遗留 awaiting_approval
+  const afterQueue = (await listQueue(workspace)).entries.filter(item => item.jobId === job.jobId);
+  assert.equal(afterQueue.length, 1);
+  assert.equal(afterQueue[0].status, "done");
+});
+
+test("3A.4 completion approval with autoCommit failure preserves worktree and verified changes", async () => {
+  const { workspace } = await setupFake();
+  // 初始化 git 仓库；用空 GIT_AUTHOR_NAME/COMMITTER_NAME 让 approve 阶段的 git commit 失败
+  spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
+  spawnSync("git", ["add", "README.md"], { cwd: workspace });
+  spawnSync("git", ["commit", "-m", "initial", "--author=CBX Test <cbx@example.test>"], { cwd: workspace, encoding: "utf8" });
+  const job = await createJob({ workspace, task: "commit fail", taskContract: { acceptanceCriteria: ["verified"] }, testCommand: "node -e \"process.exit(0)\"", review: true, isolated: true, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, approvalBeforeComplete: true, autoCommit: true, jobId: "commit-fail-preserve" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const waiting = await executeJob(workspace, job.jobId);
+  assert.equal(waiting.phase, "before_complete");
+  const worktree = JSON.parse(await readFile(path.join(job.directory, "worktree.json"), "utf8")) as { path: string };
+  assert.equal(existsSync(path.join(worktree.path, "fake-change.txt")), true);
+  const previousAuthor = process.env.GIT_AUTHOR_NAME;
+  const previousCommitter = process.env.GIT_COMMITTER_NAME;
+  process.env.GIT_AUTHOR_NAME = "";
+  process.env.GIT_COMMITTER_NAME = "";
+  let failed: JobState;
+  try {
+    failed = await approveJob(workspace, job.jobId);
+  } finally {
+    if (previousAuthor === undefined) delete process.env.GIT_AUTHOR_NAME; else process.env.GIT_AUTHOR_NAME = previousAuthor;
+    if (previousCommitter === undefined) delete process.env.GIT_COMMITTER_NAME; else process.env.GIT_COMMITTER_NAME = previousCommitter;
+  }
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.phase, "git_commit");
+  // worktree 和已验证修改仍保留（approveJobLocked 的 commit 失败分支不清 worktree）
+  assert.equal(existsSync(worktree.path), true);
+  assert.equal(existsSync(path.join(worktree.path, "fake-change.txt")), true);
+});
+
+test("3A.5 verification_gate repeated failure triggers human gate at third occurrence", async () => {
+  const { workspace } = await setupFake();
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ maxConcurrent: 1 }), "utf8");
+  // 构造一个每次执行都会失败的任务 ✓ 但通过 verification_gate 触发，而非 executor 失败
+  // 让 fake agent 正常完成，但测试命令失败，使 finish 中 verification_gate 拦截
+  process.env.FAKE_EXIT_SEQUENCE = "0";
+  const job = await createJob({ workspace, task: "verification repeat", taskContract: { acceptanceCriteria: ["must-pass"] }, testCommand: "node -e \"process.exit(1)\"", review: true, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "verification-repeat" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  // 第一次：测试失败 → needs_fix
+  const first = await executeJob(workspace, job.jobId);
+  assert.equal(first.status, "needs_fix");
+  // 检查 failureTracker 计数
+  // verification_gate 不应被排除在 repeated_failure 统计之外
+  // 第一次失败 count=1，第二次 count=2，第三次 count=3 → humanGate
+  for (let i = 0; i < 2; i++) {
+    process.env.FAKE_JOB_DIR = job.directory;
+    const state = await executeJob(workspace, job.jobId);
+    if (i === 0) {
+      assert.equal(state.humanGate, undefined, "第二次失败不应触发 humanGate");
+    } else {
+      assert.equal(state.phase, "repeated_failure");
+      assert.equal((state.humanGate as { reason: string }).reason, "repeated_failure");
+      assert.equal((state.failureTracker as { count: number }).count, 3);
+    }
+  }
 });
 
 test("governance redaction scrubs context snapshot by key name and regex pattern", async () => {
@@ -798,10 +1335,20 @@ test("SQLite migrates legacy jobs, queue, and delivery failures without losing a
 
 test("strict configuration rejects unknown and unsafe nested fields", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-config-schema-"));
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ approval: { beforeRun: true, beforeComplete: true } }), "utf8");
+  assert.deepEqual((await loadConfig(workspace)).approval, { beforeRun: true, beforeComplete: true });
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ approval: { beforeComplete: "yes" } }), "utf8");
+  await assert.rejects(() => loadConfig(workspace), /approval\.beforeComplete/);
   await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ notifications: { timeoutMs: 10 } }), "utf8");
   await assert.rejects(() => loadConfig(workspace), /notifications\.timeoutMs/);
   await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ governance: { unknown: true } }), "utf8");
   await assert.rejects(() => loadConfig(workspace), /governance 不支持字段/);
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ adaptive: { enabled: true, maxRounds: 3, managerExecutor: "opencode" } }), "utf8");
+  assert.deepEqual((await loadConfig(workspace)).adaptive, { enabled: true, maxRounds: 3, managerExecutor: "opencode" });
+  for (const [adaptive, error] of [[{ unknown: true }, /adaptive 不支持字段/], [{ enabled: "yes" }, /adaptive\.enabled/], [{ maxRounds: 0 }, /adaptive\.maxRounds/], [{ managerExecutor: "" }, /adaptive\.managerExecutor/]] as const) {
+    await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ adaptive }), "utf8");
+    await assert.rejects(() => loadConfig(workspace), error);
+  }
 });
 
 test("retention prunes expired delivery failure artifacts and SQLite records together", async () => {
