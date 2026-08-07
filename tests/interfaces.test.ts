@@ -106,6 +106,9 @@ test("MCP initialize, tools, resources and errors preserve request ids", async (
     assert.ok(tools.some(tool => tool.name === "cbx_artifact"));
     assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.task_contract);
     assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.review_executor);
+    assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.adaptive);
+    assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.approval_before_complete);
+    assert.ok(tools.find(tool => tool.name === "cbx_continue")?.inputSchema.properties?.extra_rounds);
     assert.ok(tools.find(tool => tool.name === "cbx_start")?.inputSchema.properties?.allow_unsafe_permissions);
     assert.ok(tools.some(tool => tool.name === "cbx_review_gate"));
     const status = await call(3, "tools/call", { name: "cbx_status", arguments: { workspace, job_id: job.jobId } });
@@ -130,6 +133,20 @@ test("MCP initialize, tools, resources and errors preserve request ids", async (
       assert.match(String((response.error as { message: string }).message), expectedStageErrors[index]);
     }
     assert.deepEqual(await readdir(path.join(workspace, ".cbx", "jobs")), jobsBeforeInvalidStages, "invalid stages must not create or enqueue jobs");
+    const jobsBeforeInvalidAdaptive = await readdir(path.join(workspace, ".cbx", "jobs"));
+    for (const [index, adaptive] of [[], { unknown: true }, { enabled: "yes" }, { max_rounds: 0 }].entries()) {
+      const response = await call(50 + index, "tools/call", { name: "cbx_start", arguments: { workspace, task: "invalid adaptive", review: true, adaptive } });
+      assert.match(String((response.error as { message: string }).message), /adaptive/);
+    }
+    assert.deepEqual(await readdir(path.join(workspace, ".cbx", "jobs")), jobsBeforeInvalidAdaptive, "invalid adaptive options must not create jobs");
+    const invalidApproval = await call(55, "tools/call", { name: "cbx_start", arguments: { workspace, task: "invalid approval", approval_before_complete: "yes" } });
+    assert.match(String((invalidApproval.error as { message: string }).message), /approval_before_complete 必须是布尔值/);
+    const invalidExtraRounds = await call(56, "tools/call", { name: "cbx_continue", arguments: { workspace, job_id: job.jobId, extra_rounds: 0 } });
+    assert.match(String((invalidExtraRounds.error as { message: string }).message), /extra_rounds 必须是 1 到 100/);
+    const validAdaptive = await call(54, "tools/call", { name: "cbx_start", arguments: { workspace, task: "valid adaptive", review: true, adaptive: { enabled: true, max_rounds: 3, manager_executor: "codebuddy" } } });
+    const adaptiveJobId = ((validAdaptive.result as { structuredContent: { job_id: string } }).structuredContent).job_id;
+    const adaptiveContext = JSON.parse(await readFile(path.join(workspace, ".cbx", "jobs", adaptiveJobId, "context.json"), "utf8"));
+    assert.deepEqual(adaptiveContext.adaptive, { enabled: true, maxRounds: 3, managerExecutor: "codebuddy" });
     const validStage = await call(40, "tools/call", { name: "cbx_start", arguments: { workspace, task: "valid stage", task_contract: { stages: [{ name: "implement", executor: "codebuddy", task: "do work", review_executor: "opencode", skip_review: false }] } } });
     const validJobId = ((validStage.result as { structuredContent: { job_id: string } }).structuredContent).job_id;
     const persistedContract = JSON.parse(await readFile(path.join(workspace, ".cbx", "jobs", validJobId, "context-contract.json"), "utf8")) as { stages: Array<Record<string, unknown>> };

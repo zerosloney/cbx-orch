@@ -6,13 +6,22 @@ import { fileURLToPath } from "node:url";
 import { finishSpan, publishEvent, startSpan } from "./observability.js";
 import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from "./executor.js";
 import { findExecutable, resolveExecutor } from "./executors/builtin.js";
-import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, redactText, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, withFileLock, type RuntimeConfig } from "./storage.js";
+import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, redactText, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, savePersistedStateAndResolveApprovalQueue, withFileLock, type RuntimeConfig } from "./storage.js";
 import { runProcess, runShell, terminateTree, type ProcessResult } from "./process-runner.js";
+import { auditAllowsCompletion, criterionDefinitions, parseStructuredAudit, reconcileVerifiedProgress, type StructuredAudit, type VerifiedProgress } from "./progress.js";
+import { managerPrompt, normalizeAdaptiveOptions, parseNextAction, type AdaptiveOptions, type NextAction } from "./adaptive-manager.js";
+import { createAuditorContextPack, createExecutorContextPack, createManagerContextPack, type ContextArtifact } from "./context-pack.js";
+import { createHumanGate, extendRoundLimit, parseHumanGate, resolveHumanGate, trackFailure, type HumanGate } from "./human-gate.js";
 import { cleanupRecordedWorktree, collectDiff, commitWorktree, gitDirtyFingerprint, gitRoot, prepareWorktree, snapshotDiff, snapshotGitBaseline, type GitBaseline } from "./git-ops.js";
 import * as queue from "./queue.js";
 import type { QueueEntry, QueueFile, QueueRuntime } from "./queue.js";
 import { APP_VERSION } from "./version.js";
 export type { QueueEntry, QueueEntryStatus, QueueFile } from "./queue.js";
+import { assertJobId, normalizeJobId, validateWorkspace, validateTestCommand, validatePermissionMode, assertExecutionPolicy, normalizeTaskContract, type TaskStage as TaskStageType, type TaskContract as TaskContractType } from "./validation.js";
+import { AUDIT_EVIDENCE_ARTIFACTS, evidenceHashes, completionEvidenceValid, parsePendingCompletion, worktreeSha256, structuredAuditRequested, type PendingCompletion } from "./evidence.js";
+export { assertJobId, normalizeJobId, validateWorkspace, validateTestCommand, validatePermissionMode, assertExecutionPolicy, normalizeTaskContract } from "./validation.js";
+export { AUDIT_EVIDENCE_ARTIFACTS, evidenceHashes, completionEvidenceValid, parsePendingCompletion, worktreeSha256, structuredAuditRequested } from "./evidence.js";
+export type { PendingCompletion } from "./evidence.js";
 
 export type Json = Record<string, unknown>;
 export type JobStatus = "queued" | "running" | "awaiting_approval" | "needs_fix" | "review_failed" | "failed" | "done" | "cancelled";
@@ -34,12 +43,13 @@ export interface JobContext {
   keepWorktree: boolean;
   reviewRules?: string;
   approvalBeforeRun: boolean;
+  approvalBeforeComplete: boolean;
   autoBranch: boolean;
   autoCommit: boolean;
   commitMessage: string;
   executor: string;
   reviewExecutor?: string;
-  taskContract?: TaskContract;
+  taskContract?: TaskContractType;
   baseCommit?: string;
   baseBranch?: string;
   baseDirty?: boolean;
@@ -47,27 +57,11 @@ export interface JobContext {
   dirtyFingerprint?: string;
   trustMode: "trusted" | "untrusted";
   gitRoot?: string;
+  adaptive?: AdaptiveOptions;
 }
 
-export interface TaskStage {
-  name: string;
-  executor: string;
-  task: string;
-  reviewExecutor?: string;
-  skipReview?: boolean;
-}
-
-export interface TaskContract {
-  goal?: string;
-  nonGoals?: string[];
-  acceptanceCriteria?: string[];
-  constraints?: string[];
-  relevantFiles?: string[];
-  decisions?: string[];
-  rejectedOptions?: string[];
-  assumptions?: string[];
-  stages?: TaskStage[];
-}
+export type TaskStage = TaskStageType;
+export type TaskContract = TaskContractType;
 
 export interface JobState {
   jobId: string;
@@ -88,10 +82,6 @@ function logJobEvent(workspace: string, jobId: string, event: string, detail: Re
   } catch { /* events file itself unreachable — nothing more we can do */ }
 }
 
-function assertJobId(jobId: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(jobId) || jobId === "." || jobId === "..") throw new Error(`无效的任务 ID：${jobId}`);
-}
-
 export function jobDir(workspace: string, jobId: string): string {
   assertJobId(jobId);
   return path.join(workspace, ".cbx", "jobs", jobId);
@@ -108,7 +98,8 @@ export async function loadConfig(workspaceInput: string): Promise<CbxConfig> {
   return loadRuntimeConfig(workspaceInput);
 }
 
-export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & { approvalBeforeRun?: boolean; autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string; trustMode?: "trusted" | "untrusted" }): Required<Pick<CbxConfig, "review" | "isolated" | "timeoutMs" | "maxRetries" | "maxTurns" | "keepWorktree" | "permissionMode" | "maxConcurrent">> & Pick<CbxConfig, "testCommand" | "reviewRules" | "executor" | "reviewExecutor"> & { approvalBeforeRun: boolean; autoBranch: boolean; autoCommit: boolean; commitMessage: string; trustMode: "trusted" | "untrusted" } {
+export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & { approvalBeforeRun?: boolean; approvalBeforeComplete?: boolean; autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string; trustMode?: "trusted" | "untrusted" }): Required<Pick<CbxConfig, "review" | "isolated" | "timeoutMs" | "maxRetries" | "maxTurns" | "keepWorktree" | "permissionMode" | "maxConcurrent">> & Pick<CbxConfig, "testCommand" | "reviewRules" | "executor" | "reviewExecutor"> & { approvalBeforeRun: boolean; approvalBeforeComplete: boolean; autoBranch: boolean; autoCommit: boolean; commitMessage: string; trustMode: "trusted" | "untrusted"; adaptive: AdaptiveOptions } {
+  const adaptive = normalizeAdaptiveOptions(overrides.adaptive, normalizeAdaptiveOptions(config.adaptive));
   return {
     testCommand: overrides.testCommand ?? config.testCommand,
     review: overrides.review ?? config.review ?? false,
@@ -120,6 +111,7 @@ export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & {
     permissionMode: overrides.permissionMode ?? config.permissionMode ?? "auto",
     reviewRules: overrides.reviewRules ?? config.reviewRules,
     approvalBeforeRun: overrides.approvalBeforeRun ?? config.approval?.beforeRun ?? false,
+    approvalBeforeComplete: overrides.approvalBeforeComplete ?? config.approval?.beforeComplete ?? false,
     maxConcurrent: overrides.maxConcurrent ?? config.maxConcurrent ?? 2,
     autoBranch: overrides.autoBranch ?? config.git?.autoBranch ?? false,
     autoCommit: overrides.autoCommit ?? config.git?.autoCommit ?? false,
@@ -127,44 +119,8 @@ export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & {
     executor: overrides.executor ?? config.executor ?? "codebuddy",
     reviewExecutor: overrides.reviewExecutor ?? config.reviewExecutor,
     trustMode: overrides.trustMode ?? config.execution?.trustMode ?? "trusted",
+    adaptive,
   };
-}
-
-function normalizeTaskContract(value?: TaskContract): TaskContract | undefined {
-  if (!value) return undefined;
-  const result: TaskContract = {};
-  if (value.goal !== undefined) {
-    if (typeof value.goal !== "string") throw new Error("taskContract.goal 必须是字符串。");
-    if (value.goal.trim()) result.goal = value.goal.trim();
-  }
-  for (const key of ["nonGoals", "acceptanceCriteria", "constraints", "relevantFiles", "decisions", "rejectedOptions", "assumptions"] as const) {
-    const items = value[key];
-    if (items !== undefined) {
-      if (!Array.isArray(items) || items.some(item => typeof item !== "string")) throw new Error(`taskContract.${key} 必须是字符串数组。`);
-      result[key] = items.map(item => item.trim()).filter(Boolean);
-    }
-  }
-  if (value.stages !== undefined) {
-    if (!Array.isArray(value.stages) || value.stages.length === 0) throw new Error("taskContract.stages 必须是非空数组。");
-    result.stages = value.stages.map((stage, index) => {
-      if (!stage || typeof stage !== "object") throw new Error(`taskContract.stages[${index}] 必须是对象。`);
-      if (typeof stage.name !== "string" || !stage.name.trim()) throw new Error(`taskContract.stages[${index}].name 必须是非空字符串。`);
-      if (typeof stage.executor !== "string" || !stage.executor.trim()) throw new Error(`taskContract.stages[${index}].executor 必须是非空字符串。`);
-      if (typeof stage.task !== "string" || !stage.task.trim()) throw new Error(`taskContract.stages[${index}].task 必须是非空字符串。`);
-      if (stage.reviewExecutor !== undefined && (typeof stage.reviewExecutor !== "string" || !stage.reviewExecutor.trim())) throw new Error(`taskContract.stages[${index}].reviewExecutor 必须是非空字符串。`);
-      if (stage.skipReview !== undefined && typeof stage.skipReview !== "boolean") throw new Error(`taskContract.stages[${index}].skipReview 必须是布尔值。`);
-      return { name: stage.name.trim(), executor: stage.executor.trim(), task: stage.task.trim(), reviewExecutor: stage.reviewExecutor?.trim(), skipReview: stage.skipReview };
-    });
-  }
-  return Object.keys(result).length ? result : undefined;
-}
-
-function assertExecutionPolicy(trustMode: string, isolated: boolean): asserts trustMode is "trusted" | "untrusted" {
-  if (trustMode !== "trusted" && trustMode !== "untrusted") throw new Error(`不支持的 trustMode：${trustMode}`);
-  if (trustMode === "untrusted") {
-    if (!isolated) throw new Error("untrusted 任务必须设置 isolated=true；Git worktree 不是安全沙箱。");
-    throw new Error("当前 cbx 未提供 OS 容器沙箱，拒绝启用 untrusted 模式；请使用受控的外部容器 runner。");
-  }
 }
 
 export async function writeState(workspace: string, jobId: string, updates: Json, queueEntryId?: string): Promise<JobState> {
@@ -180,28 +136,15 @@ export async function writeState(workspace: string, jobId: string, updates: Json
   return state;
 }
 
-function normalizeJobId(value?: string): string {
-  const cleaned = value?.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return cleaned || `${new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14)}-${Math.random().toString(16).slice(2, 8)}`;
-}
-
-function validateWorkspace(workspace: string): void {
-  const resolved = path.resolve(workspace);
-  if (path.dirname(resolved) === resolved) throw new Error("不允许把文件系统根目录作为工作区。");
-  if (!existsSync(resolved)) throw new Error(`工作区不存在：${resolved}`);
-}
-
-function validateTestCommand(command?: string): void {
-  if (!command) return;
-  if (/[;&|<>]/.test(command) || /(?:rm\s+-rf|Remove-Item|del\s+\/s|format\s+)/i.test(command)) {
-    throw new Error("测试命令包含不允许的 shell 操作符或破坏性命令。");
-  }
-}
-
-function validatePermissionMode(mode: string, allowUnsafe = false): void {
-  const allowed = new Set(["default", "acceptEdits", "auto", "dontAsk", "plan"]);
-  if (!allowed.has(mode)) throw new Error(`不支持的 permission mode：${mode}`);
-  if (mode === "dontAsk" && !allowUnsafe) throw new Error("dontAsk 需要显式使用 --dangerously-skip-permissions；请在编排器外部确认后再启用。");
+async function writeApprovalState(workspace: string, jobId: string, updates: Json, queueStatus: "done" | "failed"): Promise<JobState> {
+  const state = await loadState(workspace, jobId);
+  const previousStatus = state.status;
+  Object.assign(state, updates, { updatedAt: now() });
+  await savePersistedStateAndResolveApprovalQueue(workspace, jobId, state, queueStatus);
+  await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
+  try { await publishEvent(workspace, "job.state_changed", { jobId, previousStatus, status: state.status, phase: state.phase, attempt: state.attempt }); }
+  catch { /* durable approval transition must not depend on delivery */ }
+  return state;
 }
 
 export async function createJob(options: {
@@ -218,6 +161,7 @@ export async function createJob(options: {
   allowUnsafePermissions?: boolean;
   reviewRules?: string;
   approvalBeforeRun?: boolean;
+  approvalBeforeComplete?: boolean;
   autoBranch?: boolean;
   autoCommit?: boolean;
   commitMessage?: string;
@@ -226,6 +170,7 @@ export async function createJob(options: {
   trustMode?: "trusted" | "untrusted";
   contextSnapshot?: string;
   taskContract?: TaskContract;
+  adaptive?: Partial<AdaptiveOptions>;
   jobId?: string;
 }): Promise<{ jobId: string; directory: string }> {
   const workspace = path.resolve(options.workspace);
@@ -236,7 +181,9 @@ export async function createJob(options: {
   if (!Number.isFinite(options.maxTurns) || options.maxTurns < 1) throw new Error("maxTurns 必须是正整数。");
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 100)) throw new Error("timeoutMs 必须不小于 100ms。");
   if (options.maxRetries !== undefined && (!Number.isInteger(options.maxRetries) || options.maxRetries < 0)) throw new Error("maxRetries 必须是非负整数。");
-  const taskContract = normalizeTaskContract(options.taskContract);
+  const adaptive = normalizeAdaptiveOptions(options.adaptive);
+  if (adaptive.enabled && !options.review) throw new Error("adaptive.enabled=true 需要 review=true，以便 done 通过结构化证据门。");
+  const taskContract = normalizeTaskContract(options.taskContract) ?? (adaptive.enabled ? { goal: options.task.trim() } : undefined);
   // autoCommit 隐含 isolated：提交到 worktree 才安全，避免把主工作区无关改动一起提交。
   // 不抛错——autoCommit=true 时自动开启 isolated，保留告警让用户知道发生了隐含提升。
   if (options.autoCommit && !options.isolated) {
@@ -267,10 +214,11 @@ export async function createJob(options: {
     reviewRequested: options.review, isolated: options.isolated, permissionMode: options.permissionMode,
     maxTurns: options.maxTurns, timeoutMs: options.timeoutMs ?? 30 * 60_000,
     maxRetries: options.maxRetries ?? 1, keepWorktree: options.keepWorktree ?? false,
-    reviewRules: options.reviewRules, approvalBeforeRun: options.approvalBeforeRun ?? false,
+    reviewRules: options.reviewRules, approvalBeforeRun: options.approvalBeforeRun ?? false, approvalBeforeComplete: options.approvalBeforeComplete ?? false,
     autoBranch: options.autoBranch ?? false, autoCommit: options.autoCommit ?? false,
     commitMessage: options.commitMessage ?? "chore(cbx): apply task",
     executor: options.executor ?? "codebuddy", reviewExecutor: options.reviewExecutor,
+    adaptive: adaptive.enabled ? { ...adaptive, managerExecutor: adaptive.managerExecutor ?? options.executor ?? "codebuddy" } : undefined,
     taskContract,
     trustMode: options.trustMode ?? "trusted",
     gitRoot: baseline?.root ?? gitRoot(workspace), baseCommit: baseline?.commit, baseBranch: baseline?.branch,
@@ -292,9 +240,8 @@ export async function cleanupWorktree(workspaceInput: string, jobId: string): Pr
   return cleanupRecordedWorktree(workspace, directory);
 }
 
-function promptFor(directory: string, phase: string, extra = "", label = "编码代理", hasSnapshot = false): string {
-  const snapshotLine = hasSnapshot ? `- ${path.join(directory, "context-snapshot.md")}\n` : "";
-  return `你是 ${label} 执行代理。\n\n必须先读取：\n- ${path.join(directory, "request.md")}\n${snapshotLine}- ${path.join(directory, "context.json")}\n\n当前阶段：${phase}\n\n持久化要求：\n- 完成后将交接报告写入 ${path.join(directory, "handback.md")}。\n- 报告必须包含：修改文件、关键设计、运行过的命令、结果、未解决问题。\n- 不要把关键信息只放在聊天输出中。\n\n${extra}`;
+function promptFor(phase: string, extra = "", label = "编码代理", contextPack: string): string {
+  return `你是 ${label} 执行代理。\n\n只读取当前角色上下文包：\n- ${contextPack}\n\n上下文包是编排器生成的最小化脱敏投影；只可额外读取其中 artifacts 明确列出的文件，不要读取任何未列材料或历史轨迹。\n当前阶段：${phase}\n\n${extra}`;
 }
 
 async function invokeBuiltin(spec: ReturnType<typeof resolveExecutor> & {}, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number): Promise<ProcessResult> {
@@ -351,7 +298,16 @@ async function runTest(directory: string, workdir: string, command: string | und
   return result;
 }
 
-const ARTIFACTS = new Set(["request.md", "context-snapshot.md", "context-contract.json", "understanding.json", "context.json", "state.json", "events.ndjson", "agent.log", "handback.md", "review.md", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt", "result.json"]);
+const ARTIFACTS = new Set(["request.md", "context-snapshot.md", "context-contract.json", "understanding.json", "context.json", "state.json", "events.ndjson", "agent.log", "handback.md", "review.md", "audit.json", "verified-progress.json", "manager-context.json", "executor-context.json", "auditor-context.json", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt", "result.json"]);
+const AUDIT_CANDIDATE = "audit-candidate.json";
+
+function contextArtifacts(directory: string, names: readonly ContextArtifact[]): ContextArtifact[] {
+  return names.filter(name => existsSync(path.join(directory, name)));
+}
+
+function contextRedactor(governance?: RuntimeConfig["governance"]): (text: string) => string {
+  return text => redactText(text, governance?.redactFields, governance?.redactPatterns);
+}
 
 export async function listJobs(workspaceInput: string): Promise<JobState[]> {
   const workspace = path.resolve(workspaceInput);
@@ -405,21 +361,31 @@ export async function listArtifacts(workspaceInput: string, jobId: string): Prom
 
 async function writeResult(workspace: string, jobId: string, state: JobState): Promise<void> {
   const directory = jobDir(workspace, jobId);
+  if (state.audit) await saveJson(path.join(directory, "audit.json"), state.audit);
+  if (state.verifiedProgress) await saveJson(path.join(directory, "verified-progress.json"), state.verifiedProgress);
   const files = await listArtifacts(workspace, jobId);
   const context = await loadJson<JobContext>(path.join(directory, "context.json"));
   const text = async (name: string): Promise<string | null> => existsSync(path.join(directory, name)) ? readFile(path.join(directory, name), "utf8") : null;
   const handback = await text("handback.md");
   const status = await text("git-status.txt");
   const artifactHashes: Record<string, string> = {};
-  const stableEvidence = new Set(["request.md", "context-snapshot.md", "context-contract.json", "understanding.json", "handback.md", "review.md", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt"]);
+  const stableEvidence = new Set(["request.md", "context-snapshot.md", "context-contract.json", "understanding.json", "handback.md", "review.md", "audit.json", "verified-progress.json", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt"]);
   for (const file of files) {
     if (stableEvidence.has(file) || (file.startsWith("stage-") && file.endsWith("-handback.md"))) {
       artifactHashes[file] = createHash("sha256").update(await readFile(path.join(directory, file))).digest("hex");
     }
   }
   const changedFiles = (status ?? "").split(/\r?\n/).filter(Boolean).map(line => line.slice(3).replace(/^.* -> /, ""));
-  const evidenceArtifacts = ["complete.patch", "test.log", ...(context.reviewRequested ? ["review.md"] : [])].filter(file => existsSync(path.join(directory, file)));
-  const acceptanceEvidence = (context.taskContract?.acceptanceCriteria ?? []).map(criterion => ({ criterion, status: evidenceArtifacts.length === (context.reviewRequested ? 3 : 2) ? "evidence_available" : "unverified", artifacts: evidenceArtifacts }));
+  const requiredEvidenceArtifacts = ["complete.patch", "test.log", ...(context.reviewRequested ? ["review.md"] : [])];
+  const evidenceArtifacts = requiredEvidenceArtifacts.filter(file => existsSync(path.join(directory, file)));
+  const evidenceAvailable = state.status === "done" && state.testExitCode === 0 && (!context.reviewRequested || state.reviewVerdict === "PASS" || (!structuredAuditRequested(context) && (state.reviewVerdict === null || state.reviewVerdict === undefined))) && evidenceArtifacts.length === requiredEvidenceArtifacts.length;
+  const progress = state.verifiedProgress as VerifiedProgress | undefined;
+  const progressById = new Map((progress?.criteria ?? []).map(item => [item.id, item]));
+  const acceptanceEvidence = criterionDefinitions(context.taskContract?.acceptanceCriteria ?? []).map(({ id, criterion }) => {
+    const judgement = progressById.get(id);
+    const verified = structuredAuditRequested(context) ? judgement?.status === "verified" : true;
+    return { criterion, status: evidenceAvailable && verified ? "evidence_available" : "unverified", artifacts: judgement?.evidence.map(item => item.artifact) ?? evidenceArtifacts };
+  });
   await saveJson(path.join(directory, "result.json"), {
     jobId, status: state.status, phase: state.phase, attempt: state.attempt,
     error: state.error ?? null, executorExitCode: state.executorExitCode ?? null,
@@ -427,7 +393,7 @@ async function writeResult(workspace: string, jobId: string, state: JobState): P
     baseCommit: context.baseCommit ?? null, baseBranch: context.baseBranch ?? null, baseDirty: context.baseDirty ?? null,
     baselineDrift: state.baselineDrift ?? false, changedFiles, handback,
     tests: [{ command: context.testCommand ?? null, exitCode: state.testExitCode ?? null, timedOut: state.phase === "testing" ? Boolean(state.timedOut) : false }],
-    acceptanceEvidence, artifactHashes, files,
+    acceptanceEvidence, audit: state.audit ?? null, verifiedProgress: progress ?? null, humanGate: state.humanGate ?? null, artifactHashes, files,
     stages: Array.isArray(state.stages) ? state.stages : null,
     updatedAt: now(),
   });
@@ -470,12 +436,16 @@ async function performContextHandshake(
   context: JobContext,
   workdir: string,
   extra: string,
+  redact: (text: string) => string,
   finish: (updates: Json) => Promise<JobState>,
 ): Promise<JobState | undefined> {
   const beforeHandshake = await snapshotDiff(workdir);
   const executor = context.taskContract?.stages?.[0]?.executor ?? context.executor;
   const label = resolveExecutor(executor)?.label ?? "编码代理";
-  const handshakePrompt = promptFor(directory, "context handshake", `只确认任务理解，不要修改代码。将 JSON 写入 ${path.join(directory, "understanding.json")}，字段为 interpretedGoal、plannedFiles、acceptanceCriteria、assumptions、blockingQuestions。没有阻塞问题时 blockingQuestions 必须是空数组；需要产品决策、公共契约选择或上下文冲突时写入问题并停止。${extra ? `\n\n主 Agent 补充：\n${extra}` : ""}`, label, existsSync(path.join(directory, "context-snapshot.md")));
+  const handshakeStage = context.taskContract?.stages?.[0] ?? { name: "context-handshake", executor, task: "确认任务理解" };
+  const currentState = await loadState(workspace, context.jobId);
+  const contextPack = await createExecutorContextPack({ directory, taskContract: context.taskContract, verifiedProgress: currentState.verifiedProgress, audit: currentState.audit, recentFailure: { phase: currentState.phase, error: currentState.error as string | undefined, retryReason: currentState.retryReason as string | undefined }, userInstructions: extra, artifactNames: contextArtifacts(directory, ["context-snapshot.md"]), redact, stage: handshakeStage, attempt: Number(currentState.attempt ?? 0) });
+  const handshakePrompt = promptFor("context handshake", `只确认上下文包中的任务理解，不要修改代码。将 JSON 写入 ${path.join(directory, "understanding.json")}，字段为 interpretedGoal、plannedFiles、acceptanceCriteria、assumptions、blockingQuestions。没有阻塞问题时 blockingQuestions 必须是空数组；需要产品决策、公共契约选择或上下文冲突时写入问题并停止。`, label, contextPack.path);
   let handshake: ProcessResult;
   try { handshake = await invokeExecutor(executor, workspace, directory, workdir, handshakePrompt, context.permissionMode, context.maxTurns, context.timeoutMs); }
   catch (error) { return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: String(error) }); }
@@ -484,7 +454,10 @@ async function performContextHandshake(
   if (handshake.code !== 0 || handshake.timedOut || !existsSync(path.join(directory, "understanding.json"))) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "执行代理未能生成有效的 understanding.json。" });
   const understanding = await loadJson<Understanding>(path.join(directory, "understanding.json"));
   if (!Array.isArray(understanding.blockingQuestions)) return finish({ status: "needs_fix", phase: "context_handshake", contextIssue: true, error: "understanding.json 缺少 blockingQuestions 数组。" });
-  if (understanding.blockingQuestions.length) return finish({ status: "needs_fix", phase: "awaiting_clarification", contextIssue: true, blockingQuestions: understanding.blockingQuestions, error: "任务存在阻塞性歧义，需要主 Agent 纠偏。" });
+  if (understanding.blockingQuestions.length) {
+    const questions = understanding.blockingQuestions.map(question => redact(String(question)).slice(0, 1_000));
+    return finish({ status: "needs_fix", phase: "awaiting_clarification", contextIssue: true, blockingQuestions: questions, humanGate: createHumanGate("needs_input", { questions, detail: "任务存在阻塞性歧义，需要主 Agent 纠偏。" }), error: "任务存在阻塞性歧义，需要主 Agent 纠偏。" });
+  }
   return undefined;
 }
 
@@ -505,15 +478,53 @@ interface StageOutcome {
   attemptExtra: string;
 }
 
+class ManagerWorktreeMutationError extends Error {}
+class ManagerDecisionError extends Error {}
+class ManagerInvocationError extends Error {}
+
+async function requestAdaptiveAction(params: {
+  workspace: string; directory: string; workdir: string; context: JobContext;
+  round: number; state: JobState; userSupplement: string; redact: (text: string) => string;
+}): Promise<NextAction> {
+  const { workspace, directory, workdir, context, round, state, userSupplement, redact } = params;
+  const candidate = path.join(directory, "manager-decision-candidate.json");
+  if (existsSync(candidate)) await unlink(candidate);
+  const before = await snapshotDiff(workdir);
+  const adaptive = context.adaptive!;
+  const contextPack = await createManagerContextPack({ directory, taskContract: context.taskContract, verifiedProgress: state.verifiedProgress, audit: state.audit, recentFailure: { phase: state.phase, error: state.error as string | undefined, retryReason: state.retryReason as string | undefined, count: (state.failureTracker as { count?: number } | undefined)?.count }, userInstructions: userSupplement, artifactNames: contextArtifacts(directory, ["context-snapshot.md", "complete.patch", "test.log", "review.md", "handback.md", "audit.json", "verified-progress.json"]), redact, round, maxRounds: adaptive.maxRounds });
+  let result: ProcessResult | undefined;
+  let invocationError: unknown;
+  try { result = await invokeExecutor(adaptive.managerExecutor ?? context.executor, workspace, directory, workdir, managerPrompt(candidate, contextPack.path), context.permissionMode, context.maxTurns, context.timeoutMs); }
+  catch (error) { invocationError = error; }
+  const after = await snapshotDiff(workdir);
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    await collectDiff(directory, workdir);
+    throw new ManagerWorktreeMutationError("Adaptive Manager 修改了工作区，任务已安全停止。");
+  }
+  if (invocationError) throw new ManagerInvocationError(invocationError instanceof Error ? invocationError.message : String(invocationError));
+  if (!result) throw new ManagerInvocationError("Adaptive Manager 未返回执行结果。");
+  if (result.code !== 0 || result.timedOut) throw new ManagerInvocationError(result.timedOut ? `Adaptive Manager 超时（${context.timeoutMs}ms）` : "Adaptive Manager 执行失败。");
+  if (!existsSync(candidate)) throw new ManagerDecisionError("Adaptive Manager 未生成 manager-decision-candidate.json。");
+  let raw: unknown;
+  try { raw = await loadJson<unknown>(candidate); }
+  catch (error) {
+    await unlink(candidate);
+    throw new ManagerDecisionError(error instanceof Error ? error.message : String(error));
+  }
+  await unlink(candidate);
+  try { return parseNextAction(raw); }
+  catch (error) { throw new ManagerDecisionError(error instanceof Error ? error.message : String(error)); }
+}
+
 async function runStage(params: {
   workspace: string; jobId: string; directory: string; workdir: string;
   context: JobContext; stage: TaskStage; stageIndex: number; stageLabel: string;
   stageExtra: string; attempt: number; attemptExtra: string; maxAttempts: number;
-  cancelMarker: string;
+  cancelMarker: string; redact: (text: string) => string;
   finish: (updates: Json) => Promise<JobState>;
   finishCancelled: () => Promise<JobState>;
 }): Promise<StageOutcome> {
-  const { workspace, jobId, directory, workdir, context, stage, stageIndex, stageLabel, stageExtra, maxAttempts, cancelMarker, finish, finishCancelled } = params;
+  const { workspace, jobId, directory, workdir, context, stage, stageIndex, stageLabel, stageExtra, maxAttempts, cancelMarker, redact, finish, finishCancelled } = params;
   let attempt = params.attempt;
   let attemptExtra = params.attemptExtra;
   let lastError = "";
@@ -525,8 +536,10 @@ async function runStage(params: {
     if (existsSync(cancelMarker)) return { terminal: true, state: await finishCancelled(), report: { name: stage.name, executor: stage.executor, exitCode: -1, testExitCode: null, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
     attempt += 1;
     await writeState(workspace, jobId, { status: "running", phase: "executing", stage: stage.name, stageIndex, attempt, workdir, error: lastError || null });
+    const executorState = await loadState(workspace, jobId);
+    const executorPack = await createExecutorContextPack({ directory, taskContract: context.taskContract, verifiedProgress: executorState.verifiedProgress, audit: executorState.audit, recentFailure: { phase: executorState.phase, error: lastError || undefined, retryReason: executorState.retryReason as string | undefined, count: (executorState.failureTracker as { count?: number } | undefined)?.count }, userInstructions: [stageExtra, attemptExtra].filter(Boolean).join("\n\n"), artifactNames: contextArtifacts(directory, ["context-snapshot.md", "complete.patch", "test.log", "review.md", "handback.md", "audit.json", "verified-progress.json"]), redact, stage, attempt });
     let agent: ProcessResult;
-    try { agent = await invokeExecutor(stage.executor, workspace, directory, workdir, promptFor(directory, `stage ${stageIndex}: ${stage.name}`, [stageExtra, attemptExtra].filter(Boolean).join("\n\n"), stageLabel, existsSync(path.join(directory, "context-snapshot.md"))), context.permissionMode, context.maxTurns, context.timeoutMs); }
+    try { agent = await invokeExecutor(stage.executor, workspace, directory, workdir, promptFor(`stage ${stageIndex}: ${stage.name}`, `按上下文包 current.stage 与 userInstructions 执行。完成后将修改摘要、测试结果和遗留问题写入 ${path.join(directory, "handback.md")}。`, stageLabel, executorPack.path), context.permissionMode, context.maxTurns, context.timeoutMs); }
     catch (error) {
       lastError = String(error);
       if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError }); continue; }
@@ -561,11 +574,20 @@ async function runStage(params: {
       return { terminal: false, state: await loadState(workspace, jobId), report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict, attempts: tryNumber }, attempt, attemptExtra };
     }
     await writeState(workspace, jobId, { status: "running", phase: "reviewing", stage: stage.name, testExitCode: 0 });
-    const reviewExtra = `审查以下材料：\n- ${path.join(directory, "complete.patch")}\n- ${path.join(directory, "git-status.txt")}\n- ${path.join(directory, "untracked-files.txt")}\n- ${path.join(directory, "test.log")}\n- ${path.join(directory, "handback.md")}（如果存在）\n\n不要修改代码。将结果写入 ${path.join(directory, "review.md")}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL。若失败源于需求歧义、公共契约冲突或基线问题，第二行写 CLASSIFICATION: SEMANTIC；普通代码缺陷无需 classification。按严重程度列出问题、文件和行号。\n\n审查规则：\n${context.reviewRules ?? "关注正确性、回归风险、安全性、测试覆盖和改动范围。"}`;
+    const definitions = criterionDefinitions(context.taskContract?.acceptanceCriteria ?? []);
+    const structuredAuditExtra = structuredAuditRequested(context)
+      ? `\n同时将严格 JSON 写入 ${path.join(directory, AUDIT_CANDIDATE)}：{"version":1,"completion":"complete|incomplete|blocked","cleanliness":"clean|suspect|violation","alignment":"aligned|unknown|needs_revision|invalid","criteria":[{"id":"criterion id","status":"verified|unverified|blocked","evidence":["complete.patch"]}]}。criteria 必须恰好覆盖上下文包 current.criteria 的全部 ID；verified 必须引用至少一个证据；evidence 只能引用上下文包 artifacts 中实际存在的文件名。`
+      : "";
+    const reviewExtra = `只审查上下文包 artifacts 中列出的证据，不要修改代码。将结果写入 ${path.join(directory, "review.md")}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL。若失败源于需求歧义、公共契约冲突或基线问题，第二行写 CLASSIFICATION: SEMANTIC；普通代码缺陷无需 classification。按严重程度列出问题、文件和行号。${structuredAuditExtra}`;
     let reviewAgent: ProcessResult;
     const reviewExecutor = stage.reviewExecutor ?? context.reviewExecutor ?? stage.executor;
     const reviewLabel = resolveExecutor(reviewExecutor)?.label ?? "审查代理";
-    try { reviewAgent = await invokeExecutor(reviewExecutor, workspace, directory, workdir, promptFor(directory, "independent review", reviewExtra, reviewLabel, existsSync(path.join(directory, "context-snapshot.md"))), context.permissionMode, context.maxTurns, context.timeoutMs); }
+    const auditCandidate = path.join(directory, AUDIT_CANDIDATE);
+    if (existsSync(auditCandidate)) await unlink(auditCandidate);
+    if (structuredAuditRequested(context) && existsSync(path.join(directory, "review.md"))) await unlink(path.join(directory, "review.md"));
+    const auditorState = await loadState(workspace, jobId);
+    const auditorPack = await createAuditorContextPack({ directory, taskContract: context.taskContract, verifiedProgress: auditorState.verifiedProgress, audit: auditorState.audit, recentFailure: { phase: auditorState.phase, error: auditorState.error as string | undefined, retryReason: auditorState.retryReason as string | undefined, count: (auditorState.failureTracker as { count?: number } | undefined)?.count }, userInstructions: "执行独立审查", artifactNames: contextArtifacts(directory, ["context-snapshot.md", "complete.patch", "test.log", "handback.md", "audit.json", "verified-progress.json"]), redact, stage, reviewRules: context.reviewRules ?? "关注正确性、回归风险、安全性、测试覆盖和改动范围。", criteria: definitions });
+    try { reviewAgent = await invokeExecutor(reviewExecutor, workspace, directory, workdir, promptFor("independent review", reviewExtra, reviewLabel, auditorPack.path), context.permissionMode, context.maxTurns, context.timeoutMs); }
     catch (error) {
       lastError = String(error);
       if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError }); continue; }
@@ -586,6 +608,21 @@ async function runStage(params: {
       const state = await finish({ status: "review_failed", phase: "reviewing", stage: stage.name, reviewExitCode: reviewAgent.code, timedOut: reviewAgent.timedOut, error: lastError });
       return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
     }
+    if (structuredAuditRequested(context)) {
+      try {
+        if (!existsSync(auditCandidate)) throw new Error("审查代理未生成 audit-candidate.json。");
+        const hashes = await evidenceHashes(directory);
+        const audit = parseStructuredAudit(await loadJson<unknown>(auditCandidate), definitions, hashes);
+        const currentState = await loadState(workspace, jobId);
+        const verifiedProgress = reconcileVerifiedProgress(definitions, currentState.verifiedProgress as VerifiedProgress | undefined, audit, hashes);
+        await writeState(workspace, jobId, { audit, verifiedProgress, auditError: null });
+      } catch (error) {
+        lastError = `结构化审计无效：${error instanceof Error ? error.message : String(error)}`;
+        if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError, auditError: lastError }); continue; }
+        const state = await finish({ status: "review_failed", phase: "reviewing", stage: stage.name, reviewVerdict: "FAIL", reviewExitCode: reviewAgent.code, auditError: lastError, error: lastError });
+        return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: "FAIL", attempts: tryNumber }, attempt, attemptExtra };
+      }
+    }
     const review = existsSync(path.join(directory, "review.md")) ? await readFile(path.join(directory, "review.md"), "utf8") : "";
     const firstLine = review.replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0].trim();
     const pass = /^VERDICT\s*:\s*PASS$/i.test(firstLine);
@@ -596,7 +633,8 @@ async function runStage(params: {
     lastError = "审查发现问题";
     attemptExtra = `请读取 ${path.join(directory, "review.md")}，修复其中的问题后重新执行。`;
     if (semanticReviewFailure(review)) {
-      const state = await finish({ status: "needs_fix", phase: "awaiting_clarification", stage: stage.name, reviewVerdict: "FAIL", reviewExitCode: 0, contextIssue: true, error: "审查发现语义或契约问题，需要主 Agent 纠偏。" });
+      const detail = "审查发现语义或契约问题，需要主 Agent 纠偏。";
+      const state = await finish({ status: "needs_fix", phase: "awaiting_clarification", stage: stage.name, reviewVerdict: "FAIL", reviewExitCode: 0, contextIssue: true, humanGate: createHumanGate("semantic_conflict", { detail }), error: detail });
       return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: "FAIL", attempts: tryNumber }, attempt, attemptExtra };
     }
     reviewVerdict = "FAIL";
@@ -620,8 +658,13 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
     console.error(`cbx: ${warning}`);
   }
   assertExecutionPolicy(context.trustMode ?? "trusted", context.isolated);
+  const governance = (await loadConfig(workspace)).governance;
+  const redact = contextRedactor(governance);
+  if (initial.status === "awaiting_approval" && initial.phase === "before_complete") return initial;
   if (context.approvalBeforeRun && initial.approved !== true) {
-    return writeState(workspace, jobId, { status: "awaiting_approval", phase: "before_run", approvalRequired: true }, queueEntryId);
+    const existingGate = initial.humanGate ? parseHumanGate(initial.humanGate) : undefined;
+    const humanGate = existingGate?.status === "waiting" && existingGate.reason === "before_run" ? existingGate : createHumanGate("before_run", { detail: "任务执行前需要人工批准。" });
+    return writeState(workspace, jobId, { status: "awaiting_approval", phase: "before_run", approvalRequired: true, humanGate }, queueEntryId);
   }
   const drift = evaluateBaselineDrift(context, workspace);
   if (context.isolated && context.baseDirty) {
@@ -652,17 +695,55 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
   const cancelMarker = path.join(directory, "cancel.requested");
 
   const finish = async (updates: Json): Promise<JobState> => {
+    const currentState = await loadState(workspace, jobId);
     let finalUpdates = { ...updates };
-    if (updates.status === "done" && context.autoCommit) {
-      try {
-        const commitHash = commitWorktree(workdir, context.commitMessage);
-        if (commitHash) finalUpdates.gitCommit = commitHash;
-      } catch (error) {
-        finalUpdates = { status: "failed", phase: "git_commit", error: String(error), gitCommit: null };
+    if (structuredAuditRequested(context)) {
+      const definitions = criterionDefinitions(context.taskContract?.acceptanceCriteria ?? []);
+      const hashes = await evidenceHashes(directory);
+      const audit = (updates.audit ?? currentState.audit) as StructuredAudit | undefined;
+      const verifiedProgress = reconcileVerifiedProgress(definitions, (updates.verifiedProgress ?? currentState.verifiedProgress) as VerifiedProgress | undefined, audit, hashes);
+      finalUpdates = { ...finalUpdates, audit: audit ?? null, verifiedProgress };
+      if (updates.status === "done") {
+        const candidateState = { ...currentState, ...finalUpdates };
+        const requiredEvidence = ["complete.patch", "test.log", "review.md"];
+        const verified = candidateState.testExitCode === 0 && candidateState.reviewVerdict === "PASS" && auditAllowsCompletion(audit, verifiedProgress, requiredEvidence, hashes);
+        if (!verified) finalUpdates = { ...finalUpdates, status: "needs_fix", phase: "verification_gate", error: "结构化完成门未通过：需要 complete + clean + aligned、全部验收标准已验证，且测试/审查证据齐全。" };
       }
     }
+    const status = String(finalUpdates.status ?? currentState.status);
+    const phase = String(finalUpdates.phase ?? currentState.phase);
+    if (finalUpdates.status === "done" && context.approvalBeforeComplete) {
+      const hashes = await evidenceHashes(directory);
+      const candidateState = { ...currentState, ...finalUpdates };
+      if (!completionEvidenceValid(context, candidateState, hashes)) {
+        finalUpdates = { ...finalUpdates, status: "needs_fix", phase: "verification_gate", error: "完成审批前证据门未通过。" };
+      } else {
+        const pendingCompletion: PendingCompletion = { version: 1, evidenceHashes: hashes, worktreeSha256: worktreeSha256(await snapshotDiff(workdir)), createdAt: now() };
+        finalUpdates = { ...finalUpdates, status: "awaiting_approval", phase: "before_complete", approvalRequired: true, pendingCompletion, humanGate: createHumanGate("completion", { detail: "证据门已通过，等待完成审批。" }) };
+      }
+    }
+    // repeated_failure 检测放在结构化审计门与审批门之后，确保 verification_gate 失败也被计入。
+    const finalStatus = String(finalUpdates.status ?? status);
+    const finalPhase = String(finalUpdates.phase ?? phase);
+    const error = typeof finalUpdates.error === "string" ? finalUpdates.error : undefined;
+    const gateExcluded = ["awaiting_clarification", "adaptive_ask", "adaptive_blocked", "adaptive_max_rounds"].includes(finalPhase) || finalPhase.includes("safety");
+    if (error && !finalUpdates.humanGate && !gateExcluded && ["failed", "needs_fix", "review_failed"].includes(finalStatus)) {
+      const failureTracker = trackFailure(currentState.failureTracker, error);
+      finalUpdates = { ...finalUpdates, failureTracker };
+      if (failureTracker.count >= 3) finalUpdates = { ...finalUpdates, status: "needs_fix", phase: "repeated_failure", humanGate: createHumanGate("repeated_failure", { detail: redact(error).slice(0, 2_000) }) };
+    }
+if (finalUpdates.status === "done" && context.autoCommit) {
+	      try {
+	        const commitHash = commitWorktree(workdir, context.commitMessage);
+	        if (commitHash) finalUpdates.gitCommit = commitHash;
+	      } catch (error) {
+	        finalUpdates = { ...finalUpdates, status: "failed", phase: "git_commit", error: String(error), gitCommit: null };
+	      }
+	    }
     const result = await writeState(workspace, jobId, finalUpdates, queueEntryId);
-    if (!context.keepWorktree && ["done", "failed", "needs_fix", "review_failed"].includes(String(result.status))) {
+const waitingHumanGate = result.humanGate ? parseHumanGate(result.humanGate).status === "waiting" : false;
+	    const recoverablePause = (context.adaptive?.enabled && result.status === "needs_fix") || waitingHumanGate || result.phase === "verification_gate";
+	    if (!context.keepWorktree && !recoverablePause && ["done", "failed", "needs_fix", "review_failed"].includes(String(result.status))) {
       try { await cleanupWorktree(workspace, jobId); await writeState(workspace, jobId, { worktreeCleaned: true }); }
       catch (error) { await writeState(workspace, jobId, { cleanupError: String(error) }); }
     }
@@ -678,8 +759,74 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
   };
 
   if (context.taskContract && !existsSync(path.join(directory, "understanding.json"))) {
-    const handshakeOutcome = await performContextHandshake(workspace, directory, context, workdir, extra, finish);
+    const handshakeOutcome = await performContextHandshake(workspace, directory, context, workdir, extra, redact, finish);
     if (handshakeOutcome) return handshakeOutcome;
+  }
+
+  if (context.adaptive?.enabled) {
+    const persistedRound = Number(initial.adaptiveRound ?? 0);
+    if (!Number.isInteger(persistedRound) || persistedRound < 0) return finish({ status: "needs_fix", phase: "adaptive_state", error: "adaptiveRound 持久状态无效。" });
+    let round = persistedRound;
+    let adaptiveRounds = Array.isArray(initial.adaptiveRounds) ? initial.adaptiveRounds as Json[] : [];
+    const stageReports = Array.isArray(initial.stages) ? initial.stages as unknown as StageReport[] : [];
+    const userSupplement = redact(extra);
+    while (round < context.adaptive.maxRounds) {
+      if (existsSync(cancelMarker)) return finishCancelled();
+      round += 1;
+      const priorManagerState = await loadState(workspace, jobId);
+      await writeState(workspace, jobId, { status: "running", phase: "adaptive_manager", adaptiveRound: round, workdir });
+      let decision: NextAction;
+      try { decision = await requestAdaptiveAction({ workspace, directory, workdir, context, round, state: priorManagerState, userSupplement, redact }); }
+      catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const phase = error instanceof ManagerWorktreeMutationError ? "adaptive_manager_safety" : error instanceof ManagerDecisionError ? "adaptive_manager_decision" : "adaptive_manager";
+        const status = error instanceof ManagerDecisionError ? "needs_fix" : "failed";
+        adaptiveRounds = [...adaptiveRounds, { round, action: "error", phase, error: message }];
+        return finish({ status, phase, adaptiveRound: round, adaptiveRounds, error: message });
+      }
+      if (existsSync(cancelMarker)) return finishCancelled();
+      logJobEvent(workspace, jobId, "adaptive_decision", { round, action: decision.action });
+      if (decision.action === "ask") {
+        const questions = decision.questions.map(question => redact(question).slice(0, 1_000));
+        adaptiveRounds = [...adaptiveRounds, { round, action: decision.action, questions }];
+        return finish({ status: "needs_fix", phase: "adaptive_ask", adaptiveRound: round, adaptiveRounds, blockingQuestions: questions, humanGate: createHumanGate("needs_input", { questions, detail: "Adaptive Manager 需要用户补充信息。" }), error: "Adaptive Manager 需要用户补充信息。" });
+      }
+      if (decision.action === "blocked") {
+        const reason = redact(decision.reason).slice(0, 1_000);
+        adaptiveRounds = [...adaptiveRounds, { round, action: decision.action, reason }];
+        return finish({ status: "needs_fix", phase: "adaptive_blocked", adaptiveRound: round, adaptiveRounds, blockedReason: reason, humanGate: createHumanGate("needs_input", { questions: [reason], detail: reason }), error: reason });
+      }
+if (decision.action === "done") {
+	        adaptiveRounds = [...adaptiveRounds, { round, action: decision.action }];
+	        const lastReview = stageReports.at(-1)?.reviewVerdict ?? null;
+	        const lastTest = stageReports.length ? (stageReports.at(-1)?.testExitCode ?? null) : 0;
+	        return finish({ status: "done", phase: "done", adaptiveRound: round, adaptiveRounds, stages: stageReports, reviewVerdict: lastReview === "skipped" ? null : lastReview, reviewExitCode: 0, testExitCode: lastTest });
+      }
+
+      const stage = decision.stage as TaskStage;
+      const stageIndex = stageReports.length;
+      const stageLabel = resolveExecutor(stage.executor)?.label ?? "编码代理";
+      logJobEvent(workspace, jobId, "stage_started", { stage: stage.name, executor: stage.executor, index: stageIndex, adaptiveRound: round });
+      const outcome = await runStage({ workspace, jobId, directory, workdir, context, stage, stageIndex, stageLabel, stageExtra: [extra, stage.task].filter(Boolean).join("\n\n"), attempt, attemptExtra, maxAttempts, cancelMarker, redact, finish, finishCancelled });
+      stageReports.push(outcome.report);
+      adaptiveRounds = [...adaptiveRounds, { round, action: decision.action, stage, report: outcome.report }];
+      if (outcome.terminal) {
+        const finalState = await writeState(workspace, jobId, { adaptiveRound: round, adaptiveRounds, stages: stageReports });
+        await writeResult(workspace, jobId, finalState);
+        return finalState;
+      }
+      attempt = outcome.attempt;
+      attemptExtra = outcome.attemptExtra;
+      const handbackFile = path.join(directory, "handback.md");
+      if (existsSync(handbackFile)) {
+        const safeName = stage.name.replace(/[^A-Za-z0-9._-]+/g, "-");
+        await writeFile(path.join(directory, `stage-${stageIndex}-${safeName}-handback.md`), await readFile(handbackFile, "utf8"), "utf8");
+      }
+      await writeState(workspace, jobId, { phase: "adaptive_manager_next", adaptiveRound: round, adaptiveRounds, stages: stageReports, reviewVerdict: outcome.report.reviewVerdict, testExitCode: outcome.report.testExitCode, error: null, retryReason: null });
+      logJobEvent(workspace, jobId, "stage_finished", { stage: stage.name, executor: stage.executor, index: stageIndex, adaptiveRound: round, exitCode: outcome.report.exitCode, reviewVerdict: outcome.report.reviewVerdict ?? "skipped" });
+    }
+    const maxRoundsError = `Adaptive Manager 已达累计轮次上限 ${context.adaptive.maxRounds}。`;
+    return finish({ status: "needs_fix", phase: "adaptive_max_rounds", adaptiveRound: round, adaptiveRounds, stages: stageReports, humanGate: createHumanGate("max_rounds", { detail: maxRoundsError }), error: maxRoundsError });
   }
 
   // Stage chain: stages from taskContract, or single synthetic stage for backward compat.
@@ -696,7 +843,7 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
       ? await readFile(path.join(directory, "handback.md"), "utf8") : "";
     const stageExtra = [extra, prevHandback ? `上一阶段交接：\n${prevHandback}` : "", stage.task].filter(Boolean).join("\n\n");
     logJobEvent(workspace, jobId, "stage_started", { stage: stage.name, executor: stageExecutor, index: stageIndex, total: stages.length });
-    const outcome = await runStage({ workspace, jobId, directory, workdir, context, stage, stageIndex, stageLabel, stageExtra, attempt, attemptExtra, maxAttempts, cancelMarker, finish, finishCancelled });
+    const outcome = await runStage({ workspace, jobId, directory, workdir, context, stage, stageIndex, stageLabel, stageExtra, attempt, attemptExtra, maxAttempts, cancelMarker, redact, finish, finishCancelled });
     if (outcome.terminal) {
       // 终态由 runStage 内的 finish 写入；补挂已累积的 stage 报告，否则中途失败时 result.json 丢失 stages。
       stageReports.push(outcome.report);
@@ -722,8 +869,46 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
   return finish({ status: "done", phase: "done", stages: stageReports, reviewVerdict: lastReview === "skipped" ? null : lastReview, reviewExitCode: 0, testExitCode: 0 });
 }
 
-export async function executeJob(workspaceInput: string, jobId: string, extra = "", queueEntryId?: string): Promise<JobState> {
+async function prepareContinuationUnlocked(workspace: string, jobId: string, instructions: string, extraRounds = 0): Promise<{ instructions: string; blocked?: JobState }> {
+  if (!Number.isInteger(extraRounds) || extraRounds < 0) throw new Error("extra_rounds 必须是非负整数。");
+  const state = await loadState(workspace, jobId);
+  const config = await loadConfig(workspace);
+  const redact = contextRedactor(config.governance);
+  const safeInstructions = redact(instructions);
+  if (!state.humanGate) {
+    if (extraRounds) throw new Error("当前任务没有等待追加轮次的 Human Gate。");
+    return { instructions: safeInstructions };
+  }
+  const gate = parseHumanGate(state.humanGate);
+  if (gate.status === "resolved") {
+    if (extraRounds) throw new Error("当前 Human Gate 已解决，不能追加轮次。");
+    return { instructions: safeInstructions };
+  }
+  if (gate.reason === "before_run" || gate.reason === "completion") return { instructions: safeInstructions, blocked: state };
+  if (gate.reason === "max_rounds") {
+    if (!extraRounds) return { instructions: safeInstructions, blocked: state };
+    const directory = jobDir(workspace, jobId);
+    const context = await loadJson<JobContext>(path.join(directory, "context.json"));
+    if (!context.adaptive?.enabled) throw new Error("max_rounds gate 缺少 Adaptive 配置。");
+    context.adaptive.maxRounds = extendRoundLimit(context.adaptive.maxRounds, extraRounds);
+    await saveJson(path.join(directory, "context.json"), context);
+  } else if (extraRounds) {
+    throw new Error("extra_rounds 只能用于 max_rounds Human Gate。");
+  }
+  const humanGate = resolveHumanGate(gate, safeInstructions, redact);
+  // 用户已针对 gate 给出纠偏：重置失败计数，避免旧 error 在续跑时被重复计入。
+  await writeState(workspace, jobId, { humanGate, continuationInstructions: humanGate.instructions ?? null, blockingQuestions: null, blockedReason: null, failureTracker: null });
+  return { instructions: safeInstructions };
+}
+
+async function prepareContinuation(workspace: string, jobId: string, instructions: string, extraRounds = 0): Promise<{ instructions: string; blocked?: JobState }> {
+  return withFileLock(path.join(jobDir(workspace, jobId), "gate.lock"), () => prepareContinuationUnlocked(workspace, jobId, instructions, extraRounds), { retries: 0, busyMessage: `Human Gate 正在更新：${jobId}` });
+}
+
+export async function executeJob(workspaceInput: string, jobId: string, extra = "", queueEntryId?: string, extraRounds = 0): Promise<JobState> {
   const workspace = path.resolve(workspaceInput);
+  const continuation = await prepareContinuation(workspace, jobId, extra, extraRounds);
+  if (continuation.blocked) return continuation.blocked;
   const span = startSpan("cbx.job", { jobId });
   const lock = path.join(jobDir(workspace, jobId), "run.lock");
   return withFileLock(lock, async () => {
@@ -739,7 +924,7 @@ export async function executeJob(workspaceInput: string, jobId: string, extra = 
           return current;
         }
       }
-      const result = await executeJobLocked(workspace, jobId, extra, queueEntryId);
+      const result = await executeJobLocked(workspace, jobId, continuation.instructions, queueEntryId);
       if (queueEntryId) await dispatchQueue(workspace);
       return result;
     } finally {
@@ -751,11 +936,55 @@ export async function executeJob(workspaceInput: string, jobId: string, extra = 
   }, { retries: 0, busyMessage: `任务正在运行中：${jobId}` });
 }
 
-export async function approveJob(workspaceInput: string, jobId: string): Promise<JobState> {
+async function approveJobLocked(workspaceInput: string, jobId: string): Promise<JobState> {
   const workspace = path.resolve(workspaceInput);
   const state = await loadState(workspace, jobId);
   if (state.status !== "awaiting_approval") throw new Error(`任务当前不需要批准：${jobId}`);
-  return writeState(workspace, jobId, { status: "queued", phase: "queued", approved: true, approvalRequired: false });
+  const gate = state.humanGate ? parseHumanGate(state.humanGate) : state.phase === "before_run" ? createHumanGate("before_run") : state.phase === "before_complete" ? createHumanGate("completion") : (() => { throw new Error("等待审批的任务缺少 Human Gate。"); })();
+  if (gate.status !== "waiting") throw new Error("Human Gate 已解决，不能重复批准。");
+  const config = await loadConfig(workspace);
+  const redact = contextRedactor(config.governance);
+  if (state.phase === "before_run" && gate.reason === "before_run") {
+    return writeApprovalState(workspace, jobId, { status: "queued", phase: "queued", approved: true, approvalRequired: false, humanGate: resolveHumanGate(gate, "approved", redact) }, "done");
+  }
+  if (state.phase !== "before_complete" || gate.reason !== "completion") throw new Error("审批状态与 Human Gate 不一致。");
+  const directory = jobDir(workspace, jobId);
+  const context = await loadJson<JobContext>(path.join(directory, "context.json"));
+  const pending = parsePendingCompletion(state.pendingCompletion);
+  const worktreeFile = path.join(directory, "worktree.json");
+  const recorded = existsSync(worktreeFile) ? await loadJson<{ path: string }>(worktreeFile) : undefined;
+  const workdir = context.isolated ? recorded?.path : workspace;
+  const hashes = await evidenceHashes(directory);
+  const evidenceMatches = JSON.stringify(hashes) === JSON.stringify(pending.evidenceHashes);
+  const snapshotMatches = Boolean(workdir && existsSync(workdir)) && worktreeSha256(await snapshotDiff(workdir!)) === pending.worktreeSha256;
+  if (!evidenceMatches || !snapshotMatches || !completionEvidenceValid(context, state, hashes)) {
+    const humanGate = resolveHumanGate(gate, "approval rejected because completion evidence changed", redact);
+    const stale = await writeApprovalState(workspace, jobId, { status: "needs_fix", phase: "completion_evidence_stale", approvalRequired: false, pendingCompletion: null, humanGate, error: "完成审批证据或 worktree 已变化；拒绝完成，请重新执行验证。" }, "failed");
+    await writeResult(workspace, jobId, stale);
+    return stale;
+  }
+  const updates: Json = { status: "done", phase: "done", approvalRequired: false, completionApproved: true, approvedAt: now(), pendingCompletion: null, humanGate: resolveHumanGate(gate, "approved", redact), error: null };
+  if (context.autoCommit) {
+    try { updates.gitCommit = commitWorktree(workdir!, context.commitMessage) ?? null; }
+    catch (error) {
+      const failed = await writeApprovalState(workspace, jobId, { status: "failed", phase: "git_commit", approvalRequired: false, pendingCompletion: null, humanGate: resolveHumanGate(gate, "approval accepted; commit failed", redact), error: String(error), gitCommit: null }, "failed");
+      await writeResult(workspace, jobId, failed);
+      return failed;
+    }
+  }
+  await writeApprovalState(workspace, jobId, updates, "done");
+  if (!context.keepWorktree) {
+    try { await cleanupWorktree(workspace, jobId); await writeState(workspace, jobId, { worktreeCleaned: true }); }
+    catch (error) { await writeState(workspace, jobId, { cleanupError: String(error) }); }
+  }
+  const completed = await loadState(workspace, jobId);
+  await writeResult(workspace, jobId, completed);
+  return completed;
+}
+
+export async function approveJob(workspaceInput: string, jobId: string): Promise<JobState> {
+  const workspace = path.resolve(workspaceInput);
+  return withFileLock(path.join(jobDir(workspace, jobId), "run.lock"), () => approveJobLocked(workspace, jobId), { retries: 0, busyMessage: `任务正在运行中：${jobId}` });
 }
 
 const queueRuntime: QueueRuntime = { loadConfig, loadState, writeState, saveStateAndQueue, finishQueueEntryPersisted: savePersistedStateAndFinishQueue, jobDir };
@@ -801,9 +1030,11 @@ export async function retryQueueJob(workspaceInput: string, jobId: string, prior
   return queue.retryQueueJob(queueRuntime, workspaceInput, jobId, priority);
 }
 
-export async function startBackground(workspaceInput: string, jobId: string, extra = "", priority = 0, contextSnapshot?: string, shouldRefreshBaseline = false): Promise<void> {
+export async function startBackground(workspaceInput: string, jobId: string, extra = "", priority = 0, contextSnapshot?: string, shouldRefreshBaseline = false, extraRounds = 0): Promise<void> {
   const workspace = path.resolve(workspaceInput);
   const directory = jobDir(workspace, jobId);
+  const continuation = await prepareContinuation(workspace, jobId, extra, extraRounds);
+  if (continuation.blocked) throw new Error(continuation.blocked.phase === "adaptive_max_rounds" ? "任务已达 max_rounds；请显式提供 extra_rounds。" : "任务等待 approve，不能通过 continue 恢复。");
   // 显式重新入队（continue/approve/start）：清除上次取消留下的标记。
   await unlink(path.join(directory, "cancel.requested")).catch(() => undefined);
   if (contextSnapshot !== undefined) {
@@ -816,7 +1047,7 @@ export async function startBackground(workspaceInput: string, jobId: string, ext
   if (shouldRefreshBaseline) {
     await refreshBaseline(workspace, jobId, directory);
   }
-  await enqueueJob(workspaceInput, jobId, extra, priority);
+  await enqueueJob(workspaceInput, jobId, continuation.instructions, priority);
 }
 
 export async function cancelJob(workspaceInput: string, jobId: string): Promise<JobState> {

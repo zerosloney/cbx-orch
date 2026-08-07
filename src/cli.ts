@@ -64,6 +64,7 @@ async function main(): Promise<void> {
     const defaults = mergeConfig(fileConfig, {
       testCommand: option(args, "--test"),
       review: has(args, "--review") ? true : has(args, "--no-review") ? false : undefined,
+      approvalBeforeComplete: has(args, "--approval-before-complete") ? true : has(args, "--no-approval-before-complete") ? false : undefined,
       isolated: has(args, "--isolated") ? true : has(args, "--no-isolated") ? false : undefined,
       timeoutMs: option(args, "--timeout-ms") ? Number(option(args, "--timeout-ms")) : undefined,
       maxRetries: option(args, "--max-retries") ? Number(option(args, "--max-retries")) : undefined,
@@ -76,6 +77,11 @@ async function main(): Promise<void> {
       autoCommit: has(args, "--auto-commit") ? true : has(args, "--no-auto-commit") ? false : undefined,
       commitMessage: option(args, "--commit-message"),
       trustMode: option(args, "--trust-mode") as "trusted" | "untrusted" | undefined,
+      adaptive: {
+        enabled: has(args, "--adaptive") ? true : has(args, "--no-adaptive") ? false : undefined,
+        maxRounds: option(args, "--adaptive-max-rounds") ? Number(option(args, "--adaptive-max-rounds")) : undefined,
+        managerExecutor: option(args, "--manager-executor"),
+      },
     });
     const existingJob = option(args, "--job-id");
     let jobId = existingJob;
@@ -90,11 +96,13 @@ async function main(): Promise<void> {
         keepWorktree: defaults.keepWorktree,
         reviewRules: fileConfig.reviewRules,
         approvalBeforeRun: defaults.approvalBeforeRun,
+        approvalBeforeComplete: defaults.approvalBeforeComplete,
         autoBranch: defaults.autoBranch,
         autoCommit: defaults.autoCommit,
         commitMessage: defaults.commitMessage,
         executor: defaults.executor,
         reviewExecutor: defaults.reviewExecutor,
+        adaptive: defaults.adaptive,
         trustMode: defaults.trustMode,
         allowUnsafePermissions: has(args, "--dangerously-skip-permissions"),
       });
@@ -190,19 +198,22 @@ async function main(): Promise<void> {
   }
   if (command === "continue") {
     const message = option(args, "--message", "请根据 review.md 修复问题，完成后重新运行验收命令。")!;
+    const extraRoundsOption = option(args, "--extra-rounds");
+    const extraRounds = extraRoundsOption === undefined ? 0 : Number(extraRoundsOption);
+    if (extraRoundsOption !== undefined && (!Number.isInteger(extraRounds) || extraRounds < 1 || extraRounds > 100)) throw new Error("--extra-rounds 必须是 1 到 100 的整数。");
     if (has(args, "--foreground")) {
       await unlink(path.join(jobDir(workspace, args[0]), "cancel.requested")).catch(() => undefined);
-      print(await executeJob(workspace, args[0], message));
+      print(await executeJob(workspace, args[0], message, undefined, extraRounds));
       return;
     }
-    await startBackground(workspace, args[0], message, Number(option(args, "--priority", "0")), undefined, has(args, "--refresh-baseline"));
+    await startBackground(workspace, args[0], message, Number(option(args, "--priority", "0")), undefined, has(args, "--refresh-baseline"), extraRounds);
     print({ jobId: args[0], status: "queued" });
     return;
   }
   if (command === "cancel") { print(await cancelJob(workspace, args[0])); return; }
   if (command === "approve") {
     const state = await approveJob(workspace, args[0]);
-    await startBackground(workspace, args[0]);
+    if (state.status === "queued") await startBackground(workspace, args[0]);
     print(state);
     return;
   }

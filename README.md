@@ -128,6 +128,8 @@ node dist/src/cli.js queue pause --workspace .
 node dist/src/cli.js queue resume --workspace .
 node dist/src/cli.js retry JOB_ID --priority 10 --workspace .
 node dist/src/cli.js watch JOB_ID --ci --workspace .
+node dist/src/cli.js review-gate --workspace .          # 对工作区未提交改动跑独立审查（非零退出 = 有发现）
+node dist/src/cli.js stop-review-gate                   # Stop hook 入口（stdin 读 cwd，fail-open 契约）
 
 # 本地 Web UI / TUI
 node dist/src/cli.js ui --workspace . --port 4173
@@ -135,14 +137,23 @@ node dist/src/cli.js tui --workspace .
 
 # 多 workspace 模式:一个 UI 看多个项目,顶部 workspace 选择器 + Dashboard 卡片
 node dist/src/cli.js ui --workspace ~/code/proj-a --workspace ~/code/proj-b --port 4173
-node dist/src/cli.js ui --workspaces-dir ~/code --port 4173
+node dist/src/cli.js ui --workspaces-dir ~/code --port 4173  # 仅扫描直接子目录（1 层，不递归）
 # 单 workspace 时 ws-list 自动隐藏;Dashboard 卡片和实时秒表对单/多模式都生效
 
-# Web UI 新接口(直接可读)
-curl http://127.0.0.1:4173/api/workspaces              # 所有 workspace 状态摘要
-curl http://127.0.0.1:4173/api/jobs/<id>/timeline      # 阶段时间线(stages + currentStage + elapsedSec)
-curl http://127.0.0.1:4173/api/jobs/<id>/executor      # PID/heartbeat/命令 + 进程是否还活
-curl http://127.0.0.1:4173/api/jobs/<id>/agent.log?since=0  # agent.log 增量(默认 256KB)
+# Web UI 接口（直接可读）
+curl http://127.0.0.1:4173/                                    # HTML 仪表板
+curl http://127.0.0.1:4173/events                               # SSE 实时事件流
+curl http://127.0.0.1:4173/api/workspaces                       # 所有 workspace 状态摘要
+curl http://127.0.0.1:4173/api/jobs                             # 任务列表
+curl http://127.0.0.1:4173/api/jobs/<id>                        # 单个任务详情
+curl http://127.0.0.1:4173/api/jobs/<id>/artifacts              # 可用 artifact 列表
+curl http://127.0.0.1:4173/api/jobs/<id>/artifact/<name>        # 读取 artifact（handback.md / complete.patch / test.log / review.md 等）
+curl http://127.0.0.1:4173/api/jobs/<id>/timeline               # 阶段时间线(stages + currentStage + elapsedSec)
+curl http://127.0.0.1:4173/api/jobs/<id>/executor               # PID/heartbeat/命令 + 进程是否还活
+curl http://127.0.0.1:4173/api/jobs/<id>/agent.log?since=0     # agent.log 增量(默认 256KB)
+curl http://127.0.0.1:4173/api/queue                            # 队列状态
+curl http://127.0.0.1:4173/healthz                              # 健康检查
+curl http://127.0.0.1:4173/api/metrics                          # 运行指标
 
 # CI 模式：任务失败时返回非 0 退出码
 node dist/src/cli.js run --ci --workspace . --task "实现某功能" --test "npm test"
@@ -211,7 +222,7 @@ MCP 还提供 `resources/list` 和 `resources/read`，可直接读取任务的 `
 
 非平凡任务可在 `cbx_start` 中传结构化 `task_contract`（目标、验收标准、非目标、约束、相关文件、决策与假设）。执行器会先生成 `understanding.json`；存在阻塞问题时任务以 `needs_fix / awaiting_clarification` 暂停。创建任务时还会记录 Git commit、branch、dirty 状态及 dirty 内容指纹。`isolated: true` 且创建基线包含未提交内容时，任务会在创建 worktree 前以 `needs_fix / dirty_baseline` 暂停，避免未提交内容被静默遗漏；请先提交或清理这些内容，确认当前基线符合预期后再以 `refresh_baseline: true` 继续。隔离 worktree 随后固定从确认过的 commit 创建。非隔离任务仅在 HEAD 或 dirty 内容指纹相对创建基线发生漂移时暂停，dirty 内容未变时可正常执行。`review_executor` 可指定独立审查 CLI，默认仍沿用 `executor`。
 
-`result.json` 包含 changed files、handback、测试与验收摘要、基线信息及 artifact SHA-256。最终交付仍应通过 `cbx_artifact` 或 MCP resources 读取并核对 `handback.md`、`complete.patch`、`test.log` 和 `review.md`，不要只根据状态元数据总结。
+`result.json` 包含 changed files、handback、`stages` 数组（每阶段 exit code 与 review verdict）、测试与验收摘要、基线信息及 artifact SHA-256。最终交付仍应通过 `cbx_artifact` 或 MCP resources 读取并核对 `handback.md`、`complete.patch`、`test.log` 和 `review.md`，不要只根据状态元数据总结。
 
 ## ZCode 插件
 

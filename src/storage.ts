@@ -2,12 +2,13 @@ import { mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/pr
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
+import { normalizeAdaptiveOptions } from "./adaptive-manager.js";
 
 export function now(): string { return new Date().toISOString(); }
 
 export interface RuntimeConfig {
   testCommand?: string; review?: boolean; isolated?: boolean; timeoutMs?: number; maxRetries?: number; maxTurns?: number;
-  keepWorktree?: boolean; permissionMode?: string; reviewRules?: string; approval?: { beforeRun?: boolean }; maxConcurrent?: number;
+  keepWorktree?: boolean; permissionMode?: string; reviewRules?: string; approval?: { beforeRun?: boolean; beforeComplete?: boolean }; maxConcurrent?: number;
   git?: { autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string }; ci?: { failOnReview?: boolean }; executor?: string; reviewExecutor?: string;
   execution?: { trustMode?: "trusted" | "untrusted" };
   plugins?: { enforce?: boolean; allowPaths?: string[]; allowSha256?: string[] };
@@ -15,6 +16,7 @@ export interface RuntimeConfig {
   telemetry?: { enabled?: boolean; endpoint?: string; serviceName?: string; timeoutMs?: number; maxRetries?: number; retryBaseMs?: number };
   governance?: { retentionDays?: number; redactFields?: string[]; redactPatterns?: string[] };
   reviewGate?: { enabled?: boolean };
+  adaptive?: { enabled?: boolean; maxRounds?: number; managerExecutor?: string };
 }
 
 function object(value: unknown, name: string): Record<string, unknown> {
@@ -36,9 +38,9 @@ export async function loadRuntimeConfig(workspaceInput: string): Promise<Runtime
   try { parsed = JSON.parse(await readFile(file, "utf8")); }
   catch (error) { if (isMissing(error)) return {}; throw error; }
   const config = object(parsed, ".cbx.json");
-  known(config, ".cbx.json", ["testCommand", "review", "isolated", "timeoutMs", "maxRetries", "maxTurns", "keepWorktree", "permissionMode", "reviewRules", "approval", "maxConcurrent", "git", "ci", "executor", "reviewExecutor", "execution", "plugins", "notifications", "telemetry", "governance", "reviewGate"]);
+  known(config, ".cbx.json", ["testCommand", "review", "isolated", "timeoutMs", "maxRetries", "maxTurns", "keepWorktree", "permissionMode", "reviewRules", "approval", "maxConcurrent", "git", "ci", "executor", "reviewExecutor", "execution", "plugins", "notifications", "telemetry", "governance", "reviewGate", "adaptive"]);
   optionalString(config.testCommand, "testCommand"); optionalBoolean(config.review, "review"); optionalBoolean(config.isolated, "isolated"); optionalInteger(config.timeoutMs, "timeoutMs", 100); optionalInteger(config.maxRetries, "maxRetries", 0); optionalInteger(config.maxTurns, "maxTurns", 1); optionalBoolean(config.keepWorktree, "keepWorktree"); optionalString(config.permissionMode, "permissionMode"); optionalString(config.reviewRules, "reviewRules"); optionalInteger(config.maxConcurrent, "maxConcurrent", 1); optionalString(config.executor, "executor"); optionalString(config.reviewExecutor, "reviewExecutor");
-  if (config.approval !== undefined) { const value = object(config.approval, "approval"); known(value, "approval", ["beforeRun"]); optionalBoolean(value.beforeRun, "approval.beforeRun"); }
+  if (config.approval !== undefined) { const value = object(config.approval, "approval"); known(value, "approval", ["beforeRun", "beforeComplete"]); optionalBoolean(value.beforeRun, "approval.beforeRun"); optionalBoolean(value.beforeComplete, "approval.beforeComplete"); }
   if (config.git !== undefined) { const value = object(config.git, "git"); known(value, "git", ["autoBranch", "autoCommit", "commitMessage"]); optionalBoolean(value.autoBranch, "git.autoBranch"); optionalBoolean(value.autoCommit, "git.autoCommit"); optionalString(value.commitMessage, "git.commitMessage"); }
   if (config.ci !== undefined) { const value = object(config.ci, "ci"); known(value, "ci", ["failOnReview"]); optionalBoolean(value.failOnReview, "ci.failOnReview"); }
   if (config.execution !== undefined) { const value = object(config.execution, "execution"); known(value, "execution", ["trustMode"]); if (value.trustMode !== undefined && value.trustMode !== "trusted" && value.trustMode !== "untrusted") throw new Error("execution.trustMode 必须是 trusted 或 untrusted。"); }
@@ -49,6 +51,7 @@ export async function loadRuntimeConfig(workspaceInput: string): Promise<Runtime
   }
   if (config.governance !== undefined) { const value = object(config.governance, "governance"); known(value, "governance", ["retentionDays", "redactFields", "redactPatterns"]); optionalInteger(value.retentionDays, "governance.retentionDays", 1, 3650); if (value.redactFields !== undefined && (!Array.isArray(value.redactFields) || value.redactFields.length > 100 || value.redactFields.some(field => typeof field !== "string" || !field.trim()))) throw new Error("governance.redactFields 必须是最多 100 个非空字符串。"); if (value.redactPatterns !== undefined) { if (!Array.isArray(value.redactPatterns) || value.redactPatterns.length > 100) throw new Error("governance.redactPatterns 必须是最多 100 个正则字符串。"); for (const pattern of value.redactPatterns) { if (typeof pattern !== "string" || !pattern.trim()) throw new Error("governance.redactPatterns 必须是非空正则字符串。"); try { new RegExp(pattern); } catch { throw new Error(`governance.redactPatterns 包含无效正则：${pattern}`); } } } }
   if (config.reviewGate !== undefined) { const value = object(config.reviewGate, "reviewGate"); known(value, "reviewGate", ["enabled"]); optionalBoolean(value.enabled, "reviewGate.enabled"); }
+  if (config.adaptive !== undefined) normalizeAdaptiveOptions(config.adaptive);
   return config as RuntimeConfig;
 }
 
@@ -160,6 +163,18 @@ export async function savePersistedStateAndFinishQueue(workspace: string, jobId:
     const queue = JSON.parse(row.state_json) as { entries?: Array<Record<string, unknown>> };
     const entry = queue.entries?.find(item => item.queueId === queueId);
     if (entry) { const status = String(state.status); entry.status = status === "done" ? "done" : status === "cancelled" ? "cancelled" : status === "awaiting_approval" ? "awaiting_approval" : "failed"; entry.finishedAt = now(); entry.pid = undefined; }
+    db.prepare("INSERT INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at").run(jobId, JSON.stringify(state), now());
+    db.prepare("UPDATE queue_state SET state_json = ?, updated_at = ? WHERE singleton = 1").run(JSON.stringify(queue), now());
+  })();
+}
+export async function savePersistedStateAndResolveApprovalQueue(workspace: string, jobId: string, state: Record<string, unknown>, queueStatus: "done" | "failed"): Promise<void> {
+  const db = await database(workspace); await legacyQueue(path.resolve(workspace), db, { entries: [] });
+  db.transaction(() => {
+    const row = db.prepare("SELECT state_json FROM queue_state WHERE singleton = 1").get() as { state_json: string };
+    const queue = JSON.parse(row.state_json) as { entries?: Array<Record<string, unknown>> };
+    for (const entry of queue.entries ?? []) {
+      if (entry.jobId === jobId && entry.status === "awaiting_approval") { entry.status = queueStatus; entry.finishedAt = now(); entry.pid = undefined; }
+    }
     db.prepare("INSERT INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at").run(jobId, JSON.stringify(state), now());
     db.prepare("UPDATE queue_state SET state_json = ?, updated_at = ? WHERE singleton = 1").run(JSON.stringify(queue), now());
   })();
