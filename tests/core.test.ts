@@ -65,6 +65,7 @@ if (jobDir) {
     if (process.env.FAKE_REVIEW_MUTATE === "1") await writeFile(process.cwd() + "/reviewer-change.txt", "untested reviewer change\\n");
   } else {
     await writeFile(jobDir + "/handback.md", "fake handback\\n");
+    if (process.env.FAKE_MUTATE_DEP === "1") await writeFile(process.cwd() + "/package.json", '{"name":"modified"}', "utf8");
     await writeFile(process.cwd() + "/fake-change.txt", "changed\\n");
     if (process.env.FAKE_STAGE_CHANGE === "1") (await import("node:child_process")).spawnSync("git", ["add", "fake-change.txt"], { cwd: process.cwd() });
   }
@@ -108,6 +109,7 @@ async function setupFake(): Promise<{ workspace: string; script: string }> {
   delete process.env.FAKE_COUNTER_FILE;
   delete process.env.FAKE_PROMPT_FILE;
   delete process.env.FAKE_BLOCKING_QUESTION;
+  delete process.env.FAKE_MUTATE_DEP;
   return { workspace, script };
 }
 
@@ -793,6 +795,39 @@ test("stage handback artifacts are readable via readArtifact", async () => {
   await writeFile(path.join(job.directory, "stage-0-s1-handback.md"), "stage handback", "utf8");
   assert.equal(await readArtifact(workspace, job.jobId, "stage-0-s1-handback.md"), "stage handback");
   await assert.rejects(() => readArtifact(workspace, job.jobId, "stage-0-../evil-handback.md"), /不允许读取/);
+});
+
+test("smart retry separates execution retries from fix retries", async () => {
+  const { workspace } = await setupFake();
+  const counter = path.join(workspace, "counter.txt");
+  process.env.FAKE_COUNTER_FILE = counter;
+  process.env.FAKE_EXIT_SEQUENCE = "1,1,0";
+  const job = await createJob({ workspace, task: "智能重试", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 2, jobId: "smart-retry" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "done");
+  assert.equal(state.attempt, 3);
+});
+
+test("dependency guard blocks unauthorized package.json changes", async () => {
+  const { workspace } = await setupFake();
+  await writeFile(path.join(workspace, "package.json"), '{"name":"test"}', "utf8");
+  const job = await createJob({ workspace, task: "依赖守卫", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, dependencyGuard: true, jobId: "dep-guard" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  process.env.FAKE_MUTATE_DEP = "1";
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "needs_fix");
+  assert.equal(state.phase, "dependency_guard");
+  assert.match(String(state.error), /未经授权修改了依赖文件/);
+});
+
+test("dependency guard allows unchanged package.json", async () => {
+  const { workspace } = await setupFake();
+  await writeFile(path.join(workspace, "package.json"), '{"name":"test"}', "utf8");
+  const job = await createJob({ workspace, task: "依赖守卫通过", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, dependencyGuard: true, jobId: "dep-guard-ok" });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "done");
 });
 
 test("approval gate pauses and resumes a task", async () => {

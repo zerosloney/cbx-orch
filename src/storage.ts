@@ -17,6 +17,7 @@ export interface RuntimeConfig {
   governance?: { retentionDays?: number; redactFields?: string[]; redactPatterns?: string[] };
   reviewGate?: { enabled?: boolean };
   adaptive?: { enabled?: boolean; maxRounds?: number; managerExecutor?: string };
+  dependencyGuard?: boolean;
 }
 
 function object(value: unknown, name: string): Record<string, unknown> {
@@ -38,8 +39,8 @@ export async function loadRuntimeConfig(workspaceInput: string): Promise<Runtime
   try { parsed = JSON.parse(await readFile(file, "utf8")); }
   catch (error) { if (isMissing(error)) return {}; throw error; }
   const config = object(parsed, ".cbx.json");
-  known(config, ".cbx.json", ["testCommand", "review", "isolated", "timeoutMs", "maxRetries", "maxTurns", "keepWorktree", "permissionMode", "reviewRules", "approval", "maxConcurrent", "git", "ci", "executor", "reviewExecutor", "execution", "plugins", "notifications", "telemetry", "governance", "reviewGate", "adaptive"]);
-  optionalString(config.testCommand, "testCommand"); optionalBoolean(config.review, "review"); optionalBoolean(config.isolated, "isolated"); optionalInteger(config.timeoutMs, "timeoutMs", 100); optionalInteger(config.maxRetries, "maxRetries", 0); optionalInteger(config.maxTurns, "maxTurns", 1); optionalBoolean(config.keepWorktree, "keepWorktree"); optionalString(config.permissionMode, "permissionMode"); optionalString(config.reviewRules, "reviewRules"); optionalInteger(config.maxConcurrent, "maxConcurrent", 1); optionalString(config.executor, "executor"); optionalString(config.reviewExecutor, "reviewExecutor");
+  known(config, ".cbx.json", ["testCommand", "review", "isolated", "timeoutMs", "maxRetries", "maxTurns", "keepWorktree", "permissionMode", "reviewRules", "approval", "maxConcurrent", "git", "ci", "executor", "reviewExecutor", "execution", "plugins", "notifications", "telemetry", "governance", "reviewGate", "adaptive", "dependencyGuard"]);
+  optionalString(config.testCommand, "testCommand"); optionalBoolean(config.review, "review"); optionalBoolean(config.isolated, "isolated"); optionalInteger(config.timeoutMs, "timeoutMs", 100); optionalInteger(config.maxRetries, "maxRetries", 0); optionalInteger(config.maxTurns, "maxTurns", 1); optionalBoolean(config.keepWorktree, "keepWorktree"); optionalString(config.permissionMode, "permissionMode"); optionalString(config.reviewRules, "reviewRules"); optionalInteger(config.maxConcurrent, "maxConcurrent", 1); optionalString(config.executor, "executor"); optionalString(config.reviewExecutor, "reviewExecutor"); optionalBoolean(config.dependencyGuard, "dependencyGuard");
   if (config.approval !== undefined) { const value = object(config.approval, "approval"); known(value, "approval", ["beforeRun", "beforeComplete"]); optionalBoolean(value.beforeRun, "approval.beforeRun"); optionalBoolean(value.beforeComplete, "approval.beforeComplete"); }
   if (config.git !== undefined) { const value = object(config.git, "git"); known(value, "git", ["autoBranch", "autoCommit", "commitMessage"]); optionalBoolean(value.autoBranch, "git.autoBranch"); optionalBoolean(value.autoCommit, "git.autoCommit"); optionalString(value.commitMessage, "git.commitMessage"); }
   if (config.ci !== undefined) { const value = object(config.ci, "ci"); known(value, "ci", ["failOnReview"]); optionalBoolean(value.failOnReview, "ci.failOnReview"); }
@@ -365,4 +366,12 @@ export async function withFileLock<T>(file: string, action: () => Promise<T>, op
       if (current.token === token) await unlink(file);
     } catch { /* replaced or already released */ }
   }
+}
+
+export async function updateJobContext(workspace: string, jobId: string, updates: Record<string, unknown>): Promise<void> {
+  const directory = path.join(workspace, ".cbx", "jobs", jobId);
+  const file = path.join(directory, "context.json");
+  const current = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+  Object.assign(current, updates);
+  await saveJson(file, current);
 }

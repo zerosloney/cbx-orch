@@ -77,6 +77,7 @@ async function main(): Promise<void> {
       autoCommit: has(args, "--auto-commit") ? true : has(args, "--no-auto-commit") ? false : undefined,
       commitMessage: option(args, "--commit-message"),
       trustMode: option(args, "--trust-mode") as "trusted" | "untrusted" | undefined,
+      dependencyGuard: has(args, "--dependency-guard") ? true : has(args, "--no-dependency-guard") ? false : undefined,
       adaptive: {
         enabled: has(args, "--adaptive") ? true : has(args, "--no-adaptive") ? false : undefined,
         maxRounds: option(args, "--adaptive-max-rounds") ? Number(option(args, "--adaptive-max-rounds")) : undefined,

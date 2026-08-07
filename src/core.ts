@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { finishSpan, publishEvent, startSpan } from "./observability.js";
 import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from "./executor.js";
 import { findExecutable, resolveExecutor } from "./executors/builtin.js";
-import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, redactText, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, savePersistedStateAndResolveApprovalQueue, withFileLock, type RuntimeConfig } from "./storage.js";
+import { listPersistedStates, loadJson, loadPersistedState, loadRuntimeConfig, now, persistedMetrics, prunePersistedData, redactText, saveJson, savePersistedState, savePersistedStateAndFinishQueue, savePersistedStateAndQueue, savePersistedStateAndResolveApprovalQueue, updateJobContext, withFileLock, type RuntimeConfig } from "./storage.js";
 import { runProcess, runShell, terminateTree, type ProcessResult } from "./process-runner.js";
 import { auditAllowsCompletion, criterionDefinitions, parseStructuredAudit, reconcileVerifiedProgress, type StructuredAudit, type VerifiedProgress } from "./progress.js";
 import { managerPrompt, normalizeAdaptiveOptions, parseNextAction, type AdaptiveOptions, type NextAction } from "./adaptive-manager.js";
@@ -40,6 +40,8 @@ export interface JobContext {
   maxTurns: number;
   timeoutMs: number;
   maxRetries: number;
+  executionRetries: number;
+  fixRetries: number;
   keepWorktree: boolean;
   reviewRules?: string;
   approvalBeforeRun: boolean;
@@ -58,6 +60,7 @@ export interface JobContext {
   trustMode: "trusted" | "untrusted";
   gitRoot?: string;
   adaptive?: AdaptiveOptions;
+  dependencyGuard?: boolean;
 }
 
 export type TaskStage = TaskStageType;
@@ -98,7 +101,7 @@ export async function loadConfig(workspaceInput: string): Promise<CbxConfig> {
   return loadRuntimeConfig(workspaceInput);
 }
 
-export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & { approvalBeforeRun?: boolean; approvalBeforeComplete?: boolean; autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string; trustMode?: "trusted" | "untrusted" }): Required<Pick<CbxConfig, "review" | "isolated" | "timeoutMs" | "maxRetries" | "maxTurns" | "keepWorktree" | "permissionMode" | "maxConcurrent">> & Pick<CbxConfig, "testCommand" | "reviewRules" | "executor" | "reviewExecutor"> & { approvalBeforeRun: boolean; approvalBeforeComplete: boolean; autoBranch: boolean; autoCommit: boolean; commitMessage: string; trustMode: "trusted" | "untrusted"; adaptive: AdaptiveOptions } {
+export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & { approvalBeforeRun?: boolean; approvalBeforeComplete?: boolean; autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string; trustMode?: "trusted" | "untrusted" }): Required<Pick<CbxConfig, "review" | "isolated" | "timeoutMs" | "maxRetries" | "maxTurns" | "keepWorktree" | "permissionMode" | "maxConcurrent" | "dependencyGuard">> & Pick<CbxConfig, "testCommand" | "reviewRules" | "executor" | "reviewExecutor"> & { approvalBeforeRun: boolean; approvalBeforeComplete: boolean; autoBranch: boolean; autoCommit: boolean; commitMessage: string; trustMode: "trusted" | "untrusted"; adaptive: AdaptiveOptions } {
   const adaptive = normalizeAdaptiveOptions(overrides.adaptive, normalizeAdaptiveOptions(config.adaptive));
   return {
     testCommand: overrides.testCommand ?? config.testCommand,
@@ -119,6 +122,7 @@ export function mergeConfig(config: CbxConfig, overrides: Partial<CbxConfig> & {
     executor: overrides.executor ?? config.executor ?? "codebuddy",
     reviewExecutor: overrides.reviewExecutor ?? config.reviewExecutor,
     trustMode: overrides.trustMode ?? config.execution?.trustMode ?? "trusted",
+    dependencyGuard: overrides.dependencyGuard ?? config.dependencyGuard ?? false,
     adaptive,
   };
 }
@@ -171,6 +175,7 @@ export async function createJob(options: {
   contextSnapshot?: string;
   taskContract?: TaskContract;
   adaptive?: Partial<AdaptiveOptions>;
+  dependencyGuard?: boolean;
   jobId?: string;
 }): Promise<{ jobId: string; directory: string }> {
   const workspace = path.resolve(options.workspace);
@@ -213,7 +218,8 @@ export async function createJob(options: {
     appVersion: APP_VERSION, jobId, workspace, createdAt: now(), testCommand: options.testCommand,
     reviewRequested: options.review, isolated: options.isolated, permissionMode: options.permissionMode,
     maxTurns: options.maxTurns, timeoutMs: options.timeoutMs ?? 30 * 60_000,
-    maxRetries: options.maxRetries ?? 1, keepWorktree: options.keepWorktree ?? false,
+    maxRetries: options.maxRetries ?? 1, executionRetries: Math.max(1, (options.maxRetries ?? 1) + 1),
+    fixRetries: Math.max(1, (options.maxRetries ?? 1)), keepWorktree: options.keepWorktree ?? false,
     reviewRules: options.reviewRules, approvalBeforeRun: options.approvalBeforeRun ?? false, approvalBeforeComplete: options.approvalBeforeComplete ?? false,
     autoBranch: options.autoBranch ?? false, autoCommit: options.autoCommit ?? false,
     commitMessage: options.commitMessage ?? "chore(cbx): apply task",
@@ -223,6 +229,7 @@ export async function createJob(options: {
     trustMode: options.trustMode ?? "trusted",
     gitRoot: baseline?.root ?? gitRoot(workspace), baseCommit: baseline?.commit, baseBranch: baseline?.branch,
     baseDirty: baseline?.dirty, baseStatus: baseline?.status, dirtyFingerprint,
+    dependencyGuard: options.dependencyGuard ?? false,
   };
   await saveJson(path.join(directory, "context.json"), context);
   const state: JobState = {
@@ -531,9 +538,23 @@ async function runStage(params: {
   let executorExitCode = 0;
   let testExitCode: number | null = null;
   let reviewVerdict: string | null = null;
+  const executionRetries = context.executionRetries ?? maxAttempts;
+  const fixRetries = context.fixRetries ?? maxAttempts;
+  let executionUsed = 0;
+  let fixUsed = 0;
+  const DEP_FILES = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"];
+  const depBaseline: Record<string, string> = {};
+  if (context.dependencyGuard) {
+    for (const file of DEP_FILES) {
+      const fullPath = path.join(workdir, file);
+      if (existsSync(fullPath)) {
+        depBaseline[file] = createHash("sha256").update(await readFile(fullPath)).digest("hex");
+      }
+    }
+  }
 
-  for (let tryNumber = 1; tryNumber <= maxAttempts; tryNumber += 1) {
-    if (existsSync(cancelMarker)) return { terminal: true, state: await finishCancelled(), report: { name: stage.name, executor: stage.executor, exitCode: -1, testExitCode: null, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
+  for (; ;) {
+    if (existsSync(cancelMarker)) return { terminal: true, state: await finishCancelled(), report: { name: stage.name, executor: stage.executor, exitCode: -1, testExitCode: null, reviewVerdict: null, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     attempt += 1;
     await writeState(workspace, jobId, { status: "running", phase: "executing", stage: stage.name, stageIndex, attempt, workdir, error: lastError || null });
     const executorState = await loadState(workspace, jobId);
@@ -542,36 +563,70 @@ async function runStage(params: {
     try { agent = await invokeExecutor(stage.executor, workspace, directory, workdir, promptFor(`stage ${stageIndex}: ${stage.name}`, `按上下文包 current.stage 与 userInstructions 执行。完成后将修改摘要、测试结果和遗留问题写入 ${path.join(directory, "handback.md")}。`, stageLabel, executorPack.path), context.permissionMode, context.maxTurns, context.timeoutMs); }
     catch (error) {
       lastError = String(error);
-      if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError }); continue; }
+      if (executionUsed < executionRetries) {
+        executionUsed += 1;
+        await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError });
+        continue;
+      }
       const state = await finish({ status: "failed", phase: "executing", stage: stage.name, error: lastError });
-      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: -1, testExitCode: null, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
+      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: -1, testExitCode: null, reviewVerdict: null, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     }
-    if (existsSync(cancelMarker)) return { terminal: true, state: await finishCancelled(), report: { name: stage.name, executor: stage.executor, exitCode: agent.code, testExitCode: null, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
+    if (existsSync(cancelMarker)) return { terminal: true, state: await finishCancelled(), report: { name: stage.name, executor: stage.executor, exitCode: agent.code, testExitCode: null, reviewVerdict: null, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     await collectDiff(directory, workdir);
+    if (context.dependencyGuard) {
+      let depChanged = false;
+      const changedDepFiles: string[] = [];
+      for (const file of DEP_FILES) {
+        const fullPath = path.join(workdir, file);
+        if (existsSync(fullPath) && depBaseline[file]) {
+          const currentHash = createHash("sha256").update(await readFile(fullPath)).digest("hex");
+          if (currentHash !== depBaseline[file]) { depChanged = true; changedDepFiles.push(file); }
+        }
+      }
+      if (depChanged) {
+        lastError = `依赖守卫：未经授权修改了依赖文件：${changedDepFiles.join(", ")}。`;
+        if (fixUsed < fixRetries) {
+          fixUsed += 1;
+          attemptExtra = `请恢复 ${changedDepFiles.join("、")} 至任务开始前的状态，或通过 --no-dependency-guard 禁用依赖守卫。`;
+          await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError });
+          continue;
+        }
+        const state = await finish({ status: "needs_fix", phase: "dependency_guard", stage: stage.name, error: lastError });
+        return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: null, reviewVerdict: null, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
+      }
+    }
     if (agent.code !== 0 || agent.timedOut) {
       lastError = agent.timedOut ? `${stageLabel} 超时（${context.timeoutMs}ms）` : `${stageLabel} 执行失败`;
       executorExitCode = agent.code;
-      if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError, executorExitCode: agent.code }); continue; }
+      if (executionUsed < executionRetries) {
+        executionUsed += 1;
+        await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError, executorExitCode: agent.code });
+        continue;
+      }
       const state = await finish({ status: "failed", phase: "executing", stage: stage.name, executorExitCode: agent.code, timedOut: agent.timedOut, error: lastError });
-      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: agent.code, testExitCode: null, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
+      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: agent.code, testExitCode: null, reviewVerdict: null, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     }
     executorExitCode = 0;
     await writeState(workspace, jobId, { phase: "testing", stage: stage.name, executorExitCode: 0 });
     const test = await runTest(directory, workdir, context.testCommand, context.timeoutMs);
-    if (existsSync(cancelMarker)) return { terminal: true, state: await finishCancelled(), report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: test.code, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
+    if (existsSync(cancelMarker)) return { terminal: true, state: await finishCancelled(), report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: test.code, reviewVerdict: null, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     const reviewedSnapshot = await collectDiff(directory, workdir);
     if (test.code !== 0 || test.timedOut) {
       lastError = test.timedOut ? `验收命令超时（${context.timeoutMs}ms）` : "验收命令失败";
       testExitCode = test.code;
-      attemptExtra = `请读取 ${path.join(directory, "test.log")}，修复失败原因后重新执行。`;
-      if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError, testExitCode: test.code }); continue; }
+      if (fixUsed < fixRetries) {
+        fixUsed += 1;
+        attemptExtra = `请读取 ${path.join(directory, "test.log")}，修复失败原因后重新执行。`;
+        await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError, testExitCode: test.code });
+        continue;
+      }
       const state = await finish({ status: "needs_fix", phase: "testing", stage: stage.name, testExitCode: test.code, timedOut: test.timedOut, error: lastError });
-      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: test.code, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
+      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: test.code, reviewVerdict: null, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     }
     testExitCode = 0;
     if (stage.skipReview || !context.reviewRequested) {
       reviewVerdict = stage.skipReview ? "skipped" : null;
-      return { terminal: false, state: await loadState(workspace, jobId), report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict, attempts: tryNumber }, attempt, attemptExtra };
+      return { terminal: false, state: await loadState(workspace, jobId), report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     }
     await writeState(workspace, jobId, { status: "running", phase: "reviewing", stage: stage.name, testExitCode: 0 });
     const definitions = criterionDefinitions(context.taskContract?.acceptanceCriteria ?? []);
@@ -590,23 +645,31 @@ async function runStage(params: {
     try { reviewAgent = await invokeExecutor(reviewExecutor, workspace, directory, workdir, promptFor("independent review", reviewExtra, reviewLabel, auditorPack.path), context.permissionMode, context.maxTurns, context.timeoutMs); }
     catch (error) {
       lastError = String(error);
-      if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError }); continue; }
+      if (fixUsed < fixRetries) {
+        fixUsed += 1;
+        await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError });
+        continue;
+      }
       const state = await finish({ status: "review_failed", phase: "reviewing", stage: stage.name, error: lastError });
-      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
+      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: null, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     }
-    if (existsSync(cancelMarker)) return { terminal: true, state: await finishCancelled(), report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
+    if (existsSync(cancelMarker)) return { terminal: true, state: await finishCancelled(), report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: null, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     const afterReview = await snapshotDiff(workdir);
     if (JSON.stringify(afterReview) !== JSON.stringify(reviewedSnapshot)) {
       await collectDiff(directory, workdir);
       lastError = "审查代理修改了工作区；为避免交付未经测试的代码，任务已停止";
       const state = await finish({ status: "review_failed", phase: "reviewing", stage: stage.name, reviewExitCode: reviewAgent.code, reviewerModifiedWorktree: true, error: lastError });
-      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: "FAIL", attempts: tryNumber }, attempt, attemptExtra };
+      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: "FAIL", attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     }
     if (reviewAgent.code !== 0 || reviewAgent.timedOut) {
       lastError = reviewAgent.timedOut ? `审查超时（${context.timeoutMs}ms）` : "审查代理执行失败";
-      if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError }); continue; }
+      if (fixUsed < fixRetries) {
+        fixUsed += 1;
+        await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError });
+        continue;
+      }
       const state = await finish({ status: "review_failed", phase: "reviewing", stage: stage.name, reviewExitCode: reviewAgent.code, timedOut: reviewAgent.timedOut, error: lastError });
-      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: null, attempts: tryNumber }, attempt, attemptExtra };
+      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: null, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     }
     if (structuredAuditRequested(context)) {
       try {
@@ -618,9 +681,13 @@ async function runStage(params: {
         await writeState(workspace, jobId, { audit, verifiedProgress, auditError: null });
       } catch (error) {
         lastError = `结构化审计无效：${error instanceof Error ? error.message : String(error)}`;
-        if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError, auditError: lastError }); continue; }
+        if (fixUsed < fixRetries) {
+          fixUsed += 1;
+          await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError, auditError: lastError });
+          continue;
+        }
         const state = await finish({ status: "review_failed", phase: "reviewing", stage: stage.name, reviewVerdict: "FAIL", reviewExitCode: reviewAgent.code, auditError: lastError, error: lastError });
-        return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: "FAIL", attempts: tryNumber }, attempt, attemptExtra };
+        return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: "FAIL", attempts: executionUsed + fixUsed }, attempt, attemptExtra };
       }
     }
     const review = existsSync(path.join(directory, "review.md")) ? await readFile(path.join(directory, "review.md"), "utf8") : "";
@@ -628,19 +695,23 @@ async function runStage(params: {
     const pass = /^VERDICT\s*:\s*PASS$/i.test(firstLine);
     if (pass) {
       reviewVerdict = "PASS";
-      return { terminal: false, state: await loadState(workspace, jobId), report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict, attempts: tryNumber }, attempt, attemptExtra };
+      return { terminal: false, state: await loadState(workspace, jobId), report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict, attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     }
     lastError = "审查发现问题";
     attemptExtra = `请读取 ${path.join(directory, "review.md")}，修复其中的问题后重新执行。`;
     if (semanticReviewFailure(review)) {
       const detail = "审查发现语义或契约问题，需要主 Agent 纠偏。";
       const state = await finish({ status: "needs_fix", phase: "awaiting_clarification", stage: stage.name, reviewVerdict: "FAIL", reviewExitCode: 0, contextIssue: true, humanGate: createHumanGate("semantic_conflict", { detail }), error: detail });
-      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: "FAIL", attempts: tryNumber }, attempt, attemptExtra };
+      return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: "FAIL", attempts: executionUsed + fixUsed }, attempt, attemptExtra };
     }
     reviewVerdict = "FAIL";
-    if (tryNumber < maxAttempts) { await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError }); continue; }
+    if (fixUsed < fixRetries) {
+      fixUsed += 1;
+      await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError });
+      continue;
+    }
     const state = await finish({ status: "needs_fix", phase: "reviewing", stage: stage.name, reviewVerdict: "FAIL", reviewExitCode: 0, error: lastError });
-    return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: "FAIL", attempts: tryNumber }, attempt, attemptExtra };
+    return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: 0, testExitCode: 0, reviewVerdict: "FAIL", attempts: executionUsed + fixUsed }, attempt, attemptExtra };
   }
   const state = await finish({ status: "failed", phase: "executing", stage: stage.name, error: lastError || "任务未能完成" });
   return { terminal: true, state, report: { name: stage.name, executor: stage.executor, exitCode: executorExitCode, testExitCode, reviewVerdict, attempts: maxAttempts }, attempt, attemptExtra };
@@ -650,7 +721,13 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
   const directory = jobDir(workspace, jobId);
   const initial = await loadState(workspace, jobId);
   const context = await loadJson<JobContext>(path.join(directory, "context.json"));
-  // intentional-simple: 只比对主版本。旧 job 跨版本续跑时告警但不硬阻断——context schema 向后兼容。
+  // intentional-simple: 旧 job 跨版本续跑时告警但不硬阻断——context schema 向后兼容。
+  // 新功能字段（如 dependencyGuard）从 .cbx.json 同步到已持久化 context，避免旧任务遗漏。
+  const runtimeConfig = await loadConfig(workspace);
+  if (runtimeConfig.dependencyGuard && !context.dependencyGuard) {
+    await updateJobContext(workspace, jobId, { dependencyGuard: true });
+    context.dependencyGuard = true;
+  }
   const jobMajor = String(context.appVersion ?? "").split(".")[0];
   if (jobMajor && jobMajor !== APP_VERSION.split(".")[0]) {
     const warning = `任务由 cbx v${context.appVersion} 创建，当前运行 v${APP_VERSION}；context schema 可能不兼容。`;
