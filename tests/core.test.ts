@@ -1227,6 +1227,8 @@ test("3A.4 completion approval with autoCommit failure preserves worktree and ve
   const { workspace } = await setupFake();
   // 初始化 git 仓库；用空 GIT_AUTHOR_NAME/COMMITTER_NAME 让 approve 阶段的 git commit 失败
   spawnSync("git", ["init", "-b", "main"], { cwd: workspace, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "cbx@example.test"], { cwd: workspace });
+  spawnSync("git", ["config", "user.name", "CBX Test"], { cwd: workspace });
   await writeFile(path.join(workspace, "README.md"), "base\n", "utf8");
   spawnSync("git", ["add", "README.md"], { cwd: workspace });
   spawnSync("git", ["commit", "-m", "initial", "--author=CBX Test <cbx@example.test>"], { cwd: workspace, encoding: "utf8" });
