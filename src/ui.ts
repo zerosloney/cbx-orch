@@ -1,5 +1,6 @@
 import { createServer, type Server, type ServerResponse, type IncomingMessage } from "node:http";
 import { open, readFile, stat } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { health, jobDir, listArtifacts, listJobs, listQueue, loadState, readArtifact } from "./core.js";
 import { capture } from "./process-runner.js";
@@ -603,7 +604,25 @@ export function createWebUiServer(workspace: string | string[], host = "127.0.0.
         return res.end(JSON.stringify({ error: "unauthorized" }));
       }
       if (url.pathname === "/") return text(res, page.replace(/__CBX_TOKEN__/g, token ? JSON.stringify(token) : "undefined"), "text/html; charset=utf-8");
-      if (url.pathname === "/events") { res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }); clients.add(res); res.write(`data: ${JSON.stringify({ at: new Date().toISOString(), type: "connected", workspaces })}\n\n`); req.on("close", () => clients.delete(res)); return; }
+      if (url.pathname === "/events") {
+        const bearer = req.headers["authorization"];
+        const bearerToken = bearer && bearer.startsWith("Bearer ") ? bearer.slice(7) : undefined;
+        const queryToken = url.searchParams.get("token");
+        const presented = bearerToken || queryToken;
+        if (!presented || (token && !constantTimeEqual(presented, token))) {
+          res.writeHead(401, { "www-authenticate": "Bearer", "content-type": "application/json; charset=utf-8" });
+          return res.end(JSON.stringify({ error: "unauthorized" }));
+        }
+        if (token) {
+          // 单次 token 消费：首次连接即作废，防止 replay / 日志泄漏被复用。
+          token = crypto.randomUUID ? crypto.randomUUID().replace(/-/g, "") : randomBytes(32).toString("hex");
+        }
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+        clients.add(res);
+        res.write(`data: ${JSON.stringify({ at: new Date().toISOString(), type: "connected", workspaces })}\n\n`);
+        req.on("close", () => clients.delete(res));
+        return;
+      }
       if (url.pathname === "/api/workspaces") {
         const summaries = await Promise.all(workspaces.map((ws) => summarizeWorkspace(ws).catch((error) => ({ path: ws, name: path.basename(ws) || ws, error: error instanceof Error ? error.message : String(error) }))));
         return json(res, { workspaces: summaries, default: defaultWorkspace });
