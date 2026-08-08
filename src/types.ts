@@ -1,9 +1,21 @@
 import type { AdaptiveOptions } from "./adaptive-manager.js";
-import type { TaskStage as TaskStageType, TaskContract as TaskContractType } from "./validation.js";
+import type {
+  TaskStage as TaskStageType,
+  TaskContract as TaskContractType,
+} from "./validation.js";
 import type { RuntimeConfig } from "./storage.js";
+import type { ContextBudget } from "./context-pack.js";
 
 export type Json = Record<string, unknown>;
-export type JobStatus = "queued" | "running" | "awaiting_approval" | "needs_fix" | "review_failed" | "failed" | "done" | "cancelled";
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "awaiting_approval"
+  | "needs_fix"
+  | "review_failed"
+  | "failed"
+  | "done"
+  | "cancelled";
 
 export type CbxConfig = RuntimeConfig;
 
@@ -40,6 +52,7 @@ export interface JobContext {
   gitRoot?: string;
   adaptive?: AdaptiveOptions;
   dependencyGuard?: boolean;
+  contextBudget?: ContextBudget;
 }
 
 export type TaskStage = TaskStageType;
@@ -74,6 +87,17 @@ export interface StageOutcome {
   attemptExtra: string;
 }
 
-export interface Understanding { interpretedGoal?: string; plannedFiles?: string[]; acceptanceCriteria?: string[]; assumptions?: string[]; blockingQuestions?: string[]; }
+export interface Understanding {
+  interpretedGoal?: string;
+  plannedFiles?: string[];
+  acceptanceCriteria?: string[];
+  assumptions?: string[];
+  blockingQuestions?: string[];
+}
 
-export interface BaselineDrift { commitDrift: boolean; dirtyDrift: boolean; currentBaseline?: import("./git-ops.js").GitBaseline; currentDirtyFingerprint?: string; }
+export interface BaselineDrift {
+  commitDrift: boolean;
+  dirtyDrift: boolean;
+  currentBaseline?: import("./git-ops.js").GitBaseline;
+  currentDirtyFingerprint?: string;
+}

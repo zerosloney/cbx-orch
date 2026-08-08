@@ -103,6 +103,13 @@ node dist\src\cli.js clean JOB_ID
     "maxRounds": 8,
     "managerExecutor": "codebuddy"
   },
+  "context": {
+    "tokenBudget": {
+      "manager": 6000,
+      "executor": 8000,
+      "auditor": 8000
+    }
+  },
   "notifications": {
     "webhook": "https://example.test/cbx-events",
     "timeoutMs": 3000,
@@ -152,7 +159,7 @@ node dist/src/cli.js ui --workspaces-dir ~/code --port 4173  # 仅扫描直接�
 
 # Web UI 接口（直接可读）
 curl http://127.0.0.1:4173/                                    # HTML 仪表板
-curl http://127.0.0.1:4173/events                               # SSE 实时事件流
+curl http://127.0.0.1:4173/events                               # SSE 实时事件流（支持 Last-Event-ID 回放）
 curl http://127.0.0.1:4173/api/workspaces                       # 所有 workspace 状态摘要
 curl http://127.0.0.1:4173/api/jobs                             # 任务列表
 curl http://127.0.0.1:4173/api/jobs/<id>                        # 单个任务详情
@@ -179,6 +186,39 @@ node dist/src/cli.js health --workspace .
 ```
 
 `ui` 命令支持 token 鉴权：通过 `--ui-token <token>` 或 `.cbx.json` 的 `ui.token` 配置。启用后 API 端点需要 `Authorization: Bearer <token>` 请求头；SSE（EventSource）不支持自定义请求头，可通过 `?token=<token>` 查询参数传递。`/healthz` 健康检查和 `/` 首页无需 token。
+
+### SSE 事件回放
+
+`/events` 端点支持标准 `Last-Event-ID` 回放机制：每个事件携带 workspace 内单调递增的 `seq`（持久化于 SQLite，进程重启后续编）。客户端连接时带上 `Last-Event-ID` 头（或 `?last_event_id=` query），服务端自动补发 `seq > lastEventId` 的历史事件（上限 1000 条，超限发 `replay_truncated` 警告并只补最近 N 条）。浏览器 `EventSource` 在断线重连时自动携带 lastEventId，无需前端改动。无 lastEventId 时只推新事件（保持旧行为）。
+
+### 上下文包 token 预算
+
+上下文包在打包时按 per-role token 预算裁剪（启发式估算：ASCII ≈ chars/4，CJK ≈ chars/1.5）。默认 manager 6000 / executor 8000 / auditor 8000 tokens，可经 `.cbx.json` 的 `context.tokenBudget.{manager,executor,auditor}` 覆盖（最小 100）。超预算时按优先级裁剪 taskContract 低优先字段（assumptions/rejectedOptions/decisions → constraints/relevantFiles → nonGoals；goal + acceptanceCriteria + stages 永不裁剪），再裁 recentFailure.retryReason 与 userInstructions。触发裁剪时 pack 标记 `truncated: true` 并记录 `estimatedTokens`。既有 24K 字符硬上限仍作为最终兜底。
+
+### Stage 依赖声明
+
+`taskContract.stages[].dependsOn` 接受前置 stage name 数组，用于声明阶段间依赖关系：
+
+```json
+{
+  "taskContract": {
+    "goal": "重构认证模块",
+    "acceptanceCriteria": ["登录流程通过", "权限校验正确"],
+    "stages": [
+      { "name": "api", "executor": "codebuddy", "task": "实现后端 API" },
+      { "name": "ui", "executor": "codebuddy", "task": "实现前端界面" },
+      {
+        "name": "integrate",
+        "executor": "codebuddy",
+        "task": "集成联调",
+        "dependsOn": ["api", "ui"]
+      }
+    ]
+  }
+}
+```
+
+前置 stage 进入失败终态（review FAIL / 非零退出）后，后继 stage 标记 skipped 而非执行（失败传播），并记 `stage_skipped` 事件。stage 的 handback 注入会聚合所有 dependsOn stage 的交接文档。悬空依赖（引用不存在的 name）与循环依赖在任务创建时即被拒绝。当前层内仍串行执行（单 worktree 安全），物理并行执行为后续规划。
 
 `continue` 默认将任务重新入队（后台执行）。加 `--foreground` 走前台同步语义（阻塞至完成）。
 
