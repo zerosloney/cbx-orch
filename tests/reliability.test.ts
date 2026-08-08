@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createJob, dispatchQueue, executeJob, health, listJobs, listQueue, validateTestCommand, writeState } from "../src/core.js";
+import { createJob, dispatchQueue, executeJob, health, listJobs, listQueue, loadState, retryQueueJob, validateTestCommand, writeState } from "../src/core.js";
 import { loadPersistedQueue, savePersistedQueue } from "../src/storage.js";
 
 // ---- validateTestCommand：注入向量与破坏性命令拦截矩阵 ----
@@ -65,6 +65,25 @@ test("reclaim circuit breaker fails a dead worker past the threshold", async () 
   assert.match(entry.error ?? "", /停止自动重派/);
 });
 
+test("reclaim of a worker that produced a heartbeat decays reclaimCount to zero", async () => {
+  // 回归：worker 产出过 heartbeat 后崩溃（运行中崩溃，非瞬时失败链），回收时 reclaimCount 归零，
+  // 避免合法长任务因 OOM/被杀等正常运行后崩溃累积计数而误熔断。
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-reclaim-decay-"));
+  const job = await createJob({ workspace, task: "心跳衰减", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "reclaim-decay" });
+  await mkdir(path.join(workspace, ".cbx"), { recursive: true });
+  await writeFile(path.join(workspace, ".cbx", "queue.json"), deadWorkerQueue(workspace, job.jobId, 3), "utf8");
+  // 产出过 heartbeat（mtime 早于 STALE 阈值，使回收判定为 stale 但走衰减分支）。
+  const heartbeatPath = path.join(workspace, ".cbx", "jobs", job.jobId, "worker.heartbeat");
+  await mkdir(path.dirname(heartbeatPath), { recursive: true });
+  const stale = new Date(Date.now() - 120_000);
+  await writeFile(heartbeatPath, stale.toISOString(), "utf8");
+  await utimes(heartbeatPath, stale, stale);
+  await dispatchQueue(workspace);
+  const entry = (await listQueue(workspace)).entries[0];
+  assert.equal(entry.status, "queued");
+  assert.equal(entry.reclaimCount, 0);
+});
+
 // ---- 终态双写与调度器的队列锁序列化 ----
 
 test("terminal queue write finishes the entry and survives a later dispatch sweep", async () => {
@@ -81,6 +100,22 @@ test("terminal queue write finishes the entry and survives a later dispatch swee
   // 再扫一次调度：终态条目不得被倒退。
   await dispatchQueue(workspace);
   assert.equal((await listQueue(workspace)).entries.find(entry => entry.queueId === queueId)?.status, "done");
+});
+
+// ---- 重试计数器：显式 retry 重置持久预算 ----
+
+test("retryQueueJob resets persisted executionUsed/fixUsed to zero", async () => {
+  // 回归：重试计数器现持久化于 state.json，显式 retry 启动新一轮尝试时必须归零，
+  // 否则上一轮已消耗的预算会让新任务在 runStage 中预算不足而过早失败。
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-retry-reset-"));
+  const job = await createJob({ workspace, task: "重试重置", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "retry-reset" });
+  // 预置一个已 failed 且计数器已消耗的 state，模拟崩溃后队列回收链累积的预算消耗。
+  await writeState(workspace, job.jobId, { status: "failed", phase: "executing", attempt: 2, executionUsed: 1, fixUsed: 2, error: "前一轮崩溃" });
+  await retryQueueJob(workspace, job.jobId, 0);
+  const state = await loadState(workspace, job.jobId);
+  assert.equal(state.status, "queued");
+  assert.equal(state.executionUsed, 0);
+  assert.equal(state.fixUsed, 0);
 });
 
 // ---- legacy 导入：损坏行跳过而非锁死 workspace ----

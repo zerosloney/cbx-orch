@@ -31,6 +31,14 @@ test("parseCliArgs supports --name=value, repeated options and the -- separator"
   assert.throws(() => parseCliArgs(["--task"]), /缺少值/);
 });
 
+test("parseCliArgs does not swallow the -- separator as an option value", () => {
+  // 回归：值选项紧跟 `--` 时，`--` 必须作为分隔符而非选项值；其余位置参数照常收集。
+  assert.throws(() => parseCliArgs(["--task", "--", "foo"]), /缺少值/);
+  const parsed = parseCliArgs(["run", "--message", "hi", "--", "--task"]);
+  assert.equal(parsed.option("--message"), "hi");
+  assert.deepEqual(parsed.positionals, ["run", "--task"]);
+});
+
 test("cli resolves jobId positionally even when flags come first", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-cli-parse-"));
   const job = await createJob({ workspace, task: "CLI 解析", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "cli-parse" });
@@ -90,6 +98,23 @@ test("context.json schema validation accepts valid files and rejects corruption"
   // 非对象拒绝。
   await writeFile(file, "[]", "utf8");
   await assert.rejects(() => loadJobContext(job.directory), /context\.json 无效/);
+});
+
+test("context.json rejects non-integer or negative executionRetries/fixRetries", async () => {
+  // 回归：executionRetries/fixRetries 必须是 0 及以上的整数，防止 -1 触发零重试或 1.5 产生部分重试。
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-ctx-int-"));
+  const job = await createJob({ workspace, task: "整数校验", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "ctx-int" });
+  const context = await loadJobContext(job.directory);
+  const file = path.join(job.directory, "context.json");
+  for (const bad of [-1, 1.5, NaN]) {
+    await writeFile(file, JSON.stringify({ ...context, executionRetries: bad }), "utf8");
+    await assert.rejects(() => loadJobContext(job.directory), (error: unknown) => isCbxError(error, "E_INVALID_CONTEXT") && /executionRetries/.test((error as Error).message));
+  }
+  // 合法的 0 与正整数通过。
+  await writeFile(file, JSON.stringify({ ...context, executionRetries: 0, fixRetries: 3 }), "utf8");
+  const ok = await loadJobContext(job.directory);
+  assert.equal(ok.executionRetries, 0);
+  assert.equal(ok.fixRetries, 3);
 });
 
 // ---- redactText 分支覆盖 ----
