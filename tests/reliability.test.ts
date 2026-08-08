@@ -118,6 +118,51 @@ test("retryQueueJob resets persisted executionUsed/fixUsed to zero", async () =>
   assert.equal(state.fixUsed, 0);
 });
 
+test("per-stage retry budget allows stage 2 to retry even after stage 1 consumed all its retries", async () => {
+  // 回归：重试预算按 stage 独立记账，stage 1 消耗完预算后 stage 2 仍拥有全新预算。
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-stage-retry-"));
+  const plugin = path.join(workspace, "stage-retry-executor.mjs");
+  await writeFile(plugin, `
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+export default {
+  manifest: { name: "stage-retry-executor", version: "1.0.0", apiVersion: "cbx.executor/v1", capabilities: ["execute"] },
+  async run(request) {
+    if (request.prompt.includes("context handshake") || request.prompt.includes("understanding.json")) {
+      await writeFile(path.join(request.directory, "understanding.json"), JSON.stringify({ interpretedGoal: "per-stage retry", plannedFiles: [], acceptanceCriteria: [], assumptions: [], blockingQuestions: [] }));
+      return { code: 0, output: "handshake done" };
+    }
+    const counter = path.join(request.workdir, "retry-counter.txt");
+    let n = 0;
+    try { n = Number(await readFile(counter, "utf8")); } catch {}
+    n += 1;
+    await writeFile(counter, String(n), "utf8");
+    // 奇数调用失败(触犯重试), 偶数调用成功; 每 stage 独立预算下 stage 1 的失败仍可重试。
+    return { code: n % 2 === 1 ? 1 : 0, output: "invocation " + n };
+  }
+};
+`, "utf8");
+  const job = await createJob({
+    workspace, task: "per-stage retry", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, maxRetries: 0, jobId: "stage-retry",
+    taskContract: {
+      goal: "per-stage retry test",
+      stages: [
+        { name: "stage-one", executor: plugin, task: "first stage" },
+        { name: "stage-two", executor: plugin, task: "second stage" },
+      ],
+    },
+  });
+  const state = await executeJob(workspace, job.jobId);
+  // 每 stage 独立预算: stage 1 消耗 1 次重试后成功, stage 2 也消耗 1 次重试后成功 → done.
+  // 若全局预算 (旧行为): stage 1 消耗完后 stage 2 无重试 → 第 3 次调用失败后无预算 → needs_fix.
+  assert.equal(state.status, "done");
+  assert.ok(Array.isArray(state.stages));
+  assert.equal(state.stages.length, 2);
+  // attempts = 消耗的重试次数 (非总调用次数): 每 stage 各消耗 1 次重试。
+  assert.equal(state.stages[0].attempts, 1);
+  assert.equal(state.stages[1].attempts, 1);
+});
+
 // ---- legacy 导入：损坏行跳过而非锁死 workspace ----
 
 test("legacy import skips corrupt records instead of locking the workspace", async () => {

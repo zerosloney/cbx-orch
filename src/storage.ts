@@ -413,6 +413,10 @@ function requireContextNumber(raw: Record<string, unknown>, field: string): void
   const value = raw[field];
   if (typeof value !== "number" || !Number.isFinite(value)) throw contextFieldError(field, "必须是有限数字");
 }
+function requireContextNonNegInt(raw: Record<string, unknown>, field: string, minimum = 0): void {
+  const value = raw[field];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < minimum) throw contextFieldError(field, `必须是不小于 ${minimum} 的整数`);
+}
 function optionalContextString(raw: Record<string, unknown>, field: string): void {
   const value = raw[field];
   // 允许空字符串：git status 等来源合法地产生 ""；仅拒绝非字符串类型。
@@ -442,7 +446,9 @@ export function validateJobContext(value: unknown): JobContext {
   const raw = value as Record<string, unknown>;
   for (const field of ["appVersion", "jobId", "workspace", "createdAt", "permissionMode", "executor"]) requireContextString(raw, field);
   for (const field of ["reviewRequested", "isolated"]) requireContextBoolean(raw, field);
-  for (const field of ["maxTurns", "timeoutMs", "maxRetries"]) requireContextNumber(raw, field);
+  requireContextNonNegInt(raw, "maxTurns", 1);
+  requireContextNumber(raw, "timeoutMs");
+  requireContextNonNegInt(raw, "maxRetries", 0);
   for (const field of ["testCommand", "reviewRules", "reviewExecutor", "commitMessage", "baseCommit", "baseBranch", "baseStatus", "dirtyFingerprint", "gitRoot"]) optionalContextString(raw, field);
   for (const field of ["keepWorktree", "approvalBeforeRun", "approvalBeforeComplete", "autoBranch", "autoCommit", "baseDirty", "dependencyGuard"]) optionalContextBoolean(raw, field);
   for (const field of ["executionRetries", "fixRetries"]) optionalContextNonNegInt(raw, field);

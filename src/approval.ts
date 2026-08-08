@@ -4,7 +4,7 @@ import { loadJson, loadJobContext, now, withFileLock } from "./storage.js";
 import { loadState, loadConfig, writeState, writeApprovalState, jobDir } from "./state.js";
 import { contextRedactor } from "./artifacts.js";
 import { writeResult } from "./result.js";
-import { parseHumanGate, resolveHumanGate } from "./human-gate.js";
+import { createHumanGate, parseHumanGate, resolveHumanGate } from "./human-gate.js";
 import { parsePendingCompletion, evidenceHashes, completionEvidenceValid, worktreeSha256 } from "./evidence.js";
 import { snapshotDiff, commitWorktree } from "./git-ops.js";
 import { cleanupWorktree } from "./worktree.js";
@@ -14,7 +14,7 @@ async function approveJobLocked(workspaceInput: string, jobId: string): Promise<
   const workspace = path.resolve(workspaceInput);
   const state = await loadState(workspace, jobId);
   if (state.status !== "awaiting_approval") throw new Error(`任务当前不需要批准：${jobId}`);
-  const gate = state.humanGate ? parseHumanGate(state.humanGate) : state.phase === "before_run" ? { version: 1, reason: "before_run", status: "waiting", createdAt: now(), detail: undefined } : state.phase === "before_complete" ? { version: 1, reason: "completion", status: "waiting", createdAt: now(), detail: undefined } : (() => { throw new Error("等待审批的任务缺少 Human Gate。"); })();
+  const gate = state.humanGate ? parseHumanGate(state.humanGate) : state.phase === "before_run" ? createHumanGate("before_run", { detail: "任务执行前需要人工批准。" }) : state.phase === "before_complete" ? createHumanGate("completion", { detail: "等待完成审批。" }) : (() => { throw new Error("等待审批的任务缺少 Human Gate。"); })();
   if (gate.status !== "waiting") throw new Error("Human Gate 已解决，不能重复批准。");
   const config = await loadConfig(workspace);
   const redact = contextRedactor(config.governance);

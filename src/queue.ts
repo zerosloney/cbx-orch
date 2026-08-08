@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { stat, unlink, writeFile } from "node:fs/promises";
+import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireServiceLease, loadPersistedQueue, now, processAlive, savePersistedQueue, withQueueLock } from "./storage.js";
 import { isCbxError } from "./errors.js";
+import { terminateTree } from "./process-runner.js";
 
 /** 队列降级路径失败原因落到 job 事件流。 */
 function logJobEvent(runtime: QueueRuntime, workspace: string, jobId: string, event: string, detail: Record<string, unknown> = {}): void {
@@ -231,8 +232,14 @@ export async function retryQueueJob(runtime: QueueRuntime, workspaceInput: strin
   const workspace = path.resolve(workspaceInput);
   const state = await runtime.loadState(workspace, jobId);
   if (["running", "queued"].includes(state.status)) throw new Error(`任务当前仍在执行或排队：${jobId}`);
-  // 显式重跑：清除上一次取消留下的标记，避免 executeJob 再次把任务直接判为 cancelled。
-  try { await unlink(path.join(runtime.jobDir(workspace, jobId), "cancel.requested")); } catch { /* 无待取消标记 */ }
+  const directory = runtime.jobDir(workspace, jobId);
+  // 旧 worker 可能仍是僵尸进程(已被回收但进程未退出)：写取消标记 + 终止进程树，
+  // 避免新 entry 启动时 run.lock 被旧进程持有而 E_LOCK_BUSY 失败。
+  await writeFile(path.join(directory, "cancel.requested"), now(), "utf8").catch(() => undefined);
+  const oldPid = Number(await readFile(path.join(directory, "active.pid"), "utf8").catch(() => ""));
+  if (Number.isSafeInteger(oldPid) && oldPid > 0) await terminateTree(oldPid);
+  // 清除取消标记，避免 executeJob 把新 entry 直接判为 cancelled。
+  try { await unlink(path.join(directory, "cancel.requested")); } catch { /* 无待取消标记 */ }
   // 单事务完成：老 queued/running entry 标 cancelled + 插新 entry + 状态重置。删外层 busy-wait，避免 dispatch 锁竞争时新老 entry 并存。
   const replacement = await withQueueLock(workspace, async () => {
     const queue = await loadQueue(workspace);
@@ -243,7 +250,7 @@ export async function retryQueueJob(runtime: QueueRuntime, workspaceInput: strin
     const created: QueueEntry = { queueId: `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`, jobId, workspace, extra: "请读取已有的 test.log、review.md 和 result.json，修复失败原因后重新执行。", status: "queued", createdAt: now(), priority };
     queue.entries.push(created);
     queue.updatedAt = now();
-    await runtime.saveStateAndQueue(workspace, jobId, { ...current, status: "queued", phase: "queued", error: null, timedOut: false, updatedAt: now(), executionUsed: 0, fixUsed: 0 }, queue);
+    await runtime.saveStateAndQueue(workspace, jobId, { ...current, status: "queued", phase: "queued", error: null, timedOut: false, updatedAt: now(), executionUsed: 0, fixUsed: 0, stageRetries: {} }, queue);
     return created;
   });
   await dispatchQueue(runtime, workspace);

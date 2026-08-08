@@ -6,20 +6,17 @@ import { capture } from "./process-runner.js";
 import { constantTimeEqual, processAlive } from "./storage.js";
 import { isCbxError } from "./errors.js";
 
-/** 从请求中提取 Bearer token；SSE 支持 ?token= 查询参数（EventSource 无法设置 header）。 */
-function extractToken(req: IncomingMessage, url: URL): string | undefined {
-  const auth = req.headers["authorization"];
-  if (auth && auth.startsWith("Bearer ")) return auth.slice(7);
-  const queryToken = url.searchParams.get("token");
-  if (queryToken) return queryToken;
-  return undefined;
-}
-
-/** 校验 token；未配置 token 时始终放行。比较走常量时间路径，避免时序侧信道泄漏 token 前缀。 */
-function isAuthorized(req: IncomingMessage, url: URL, expectedToken: string | undefined): boolean {
+/** 校验 token; 未配置 token 时始终放行。常量时间比较避免时序侧信道。
+ *  query token 仅对 `/events` 放行 (EventSource 无法设 header), 其余 API 强制 Bearer header。 */
+function isAuthorized(req: IncomingMessage, url: URL, expectedToken: string | undefined, allowQueryToken = false): boolean {
   if (!expectedToken) return true;
-  const provided = extractToken(req, url);
-  return provided !== undefined && constantTimeEqual(provided, expectedToken);
+  const auth = req.headers["authorization"];
+  if (auth && auth.startsWith("Bearer ")) return constantTimeEqual(auth.slice(7), expectedToken);
+  if (allowQueryToken) {
+    const q = url.searchParams.get("token");
+    if (q) return constantTimeEqual(q, expectedToken);
+  }
+  return false;
 }
 
 interface WorkspaceSummary {
@@ -190,18 +187,21 @@ export async function readExecutorStatus(workspace: string, jobId: string): Prom
 
 interface AgentLogChunk { content: string; nextOffset: number; truncated: boolean; }
 
-/** 增量读 agent.log(类比 readEventsIncremental):since=0 全量,since>0 按 offset 续读。 */
+/** 增量读 agent.log: since=0 读尾部 maxBytes 初始展示, since>0 按字节游标续读,截到最后一个完整行。 */
 export async function readAgentLogIncremental(workspace: string, jobId: string, since = 0, maxBytes = 256 * 1024): Promise<AgentLogChunk> {
   const file = path.join(jobDir(workspace, jobId), "agent.log");
   let raw: Buffer;
   try { raw = await readFile(file); } catch { return { content: "", nextOffset: 0, truncated: false }; }
-  // agent.log 可能很大;只读最后 maxBytes 字节避免前端一次塞爆。
-  const start = raw.length > maxBytes ? raw.length - maxBytes : 0;
+  // since=0: 尾部 maxBytes; since>0: 从该字节续读增量。
+  const tailStart = raw.length > maxBytes ? raw.length - maxBytes : 0;
+  const start = since > 0 && since <= raw.length ? since : tailStart;
   const slice = raw.subarray(start);
   const text = slice.toString("utf8");
-  // 简单行计数:取首 since 行跳过,但这里用字节位置;返回 nextOffset 供下次续读。
-  const content = text;
-  return { content, nextOffset: raw.length, truncated: start > 0 };
+  // 截到最后一个完整行, 避免半行
+  const lastNl = text.lastIndexOf("\n");
+  const end = lastNl >= 0 ? lastNl + 1 : text.length;
+  const content = text.slice(0, end);
+  return { content, nextOffset: start + Buffer.byteLength(content, "utf8"), truncated: start > 0 };
 }
 
 const page = `<!doctype html>
@@ -289,7 +289,8 @@ pre.art-view{white-space:pre-wrap;background:#080b11;padding:10px;border-radius:
 <div id="stream"></div>
 <script>
 console.log('cbx-ui: script start, page loaded at', new Date().toISOString());
-var allWorkspaces=[];
+	window.CBX_TOKEN=__CBX_TOKEN__;
+	var allWorkspaces=[];
 var currentWorkspace=null;
 var selected=null;
 function rowAttr(id){return String(id).replace(/[^\w-]/g,function(c){return'\\\\'+c})}
@@ -507,7 +508,7 @@ setInterval(function(){
   });
 },1000);
 var stream=document.querySelector('#stream');
-var es=new EventSource('/events');
+	var es=new EventSource('/events?token='+encodeURIComponent(window.CBX_TOKEN||''));
 es.onmessage=function(e){
   var d=JSON.parse(e.data);
   if(d.type==='heartbeat'||d.type==='connected')return;
@@ -596,11 +597,12 @@ export function createWebUiServer(workspace: string | string[], host = "127.0.0.
       if (req.method !== "GET") return json(res, { error: "method not allowed" }, 405);
       const url = new URL(req.url ?? "/", `http://${host}:${port}`);
       // /healthz 保持开放供健康检查；/ 首页保持开放（UI 外壳，API 调用仍需鉴权）。
-      if (url.pathname !== "/healthz" && url.pathname !== "/" && !isAuthorized(req, url, token)) {
+      // /events 允许 query token (EventSource 无法设 Authorization header)。
+      if (url.pathname !== "/healthz" && url.pathname !== "/" && !isAuthorized(req, url, token, url.pathname === "/events")) {
         res.writeHead(401, { "www-authenticate": "Bearer", "content-type": "application/json; charset=utf-8" });
         return res.end(JSON.stringify({ error: "unauthorized" }));
       }
-      if (url.pathname === "/") return text(res, page, "text/html; charset=utf-8");
+      if (url.pathname === "/") return text(res, page.replace(/__CBX_TOKEN__/g, token ? JSON.stringify(token) : "undefined"), "text/html; charset=utf-8");
       if (url.pathname === "/events") { res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }); clients.add(res); res.write(`data: ${JSON.stringify({ at: new Date().toISOString(), type: "connected", workspaces })}\n\n`); req.on("close", () => clients.delete(res)); return; }
       if (url.pathname === "/api/workspaces") {
         const summaries = await Promise.all(workspaces.map((ws) => summarizeWorkspace(ws).catch((error) => ({ path: ws, name: path.basename(ws) || ws, error: error instanceof Error ? error.message : String(error) }))));

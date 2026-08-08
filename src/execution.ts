@@ -80,10 +80,10 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
     if (structuredAuditRequested(context)) {
       const definitions = criterionDefinitions(context.taskContract?.acceptanceCriteria ?? []);
       const hashes = await evidenceHashes(directory);
-      const audit = (updates.audit ?? currentState.audit) as StructuredAudit | undefined;
-      const verifiedProgress = reconcileVerifiedProgress(definitions, (updates.verifiedProgress ?? currentState.verifiedProgress) as VerifiedProgress | undefined, audit, hashes);
+      const audit = (finalUpdates.audit ?? currentState.audit) as StructuredAudit | undefined;
+      const verifiedProgress = reconcileVerifiedProgress(definitions, (finalUpdates.verifiedProgress ?? currentState.verifiedProgress) as VerifiedProgress | undefined, audit, hashes);
       finalUpdates = { ...finalUpdates, audit: audit ?? null, verifiedProgress };
-      if (updates.status === "done") {
+      if (finalUpdates.status === "done") {
         const candidateState = { ...currentState, ...finalUpdates };
         const requiredEvidence = ["complete.patch", "test.log", "review.md"];
         const verified = candidateState.testExitCode === 0 && candidateState.reviewVerdict === "PASS" && auditAllowsCompletion(audit, verifiedProgress, requiredEvidence, hashes);
@@ -277,7 +277,7 @@ async function prepareContinuationUnlocked(workspace: string, jobId: string, ins
   }
   const humanGate = resolveHumanGate(gate, safeInstructions, redact);
   // 用户已针对 gate 给出纠偏：重置失败计数与重试预算，避免旧 error/旧计数在续跑时被重复计入或预算过早耗尽。
-  await writeState(workspace, jobId, { humanGate, continuationInstructions: humanGate.instructions ?? null, blockingQuestions: null, blockedReason: null, failureTracker: null, executionUsed: 0, fixUsed: 0 });
+  await writeState(workspace, jobId, { humanGate, continuationInstructions: humanGate.instructions ?? null, blockingQuestions: null, blockedReason: null, failureTracker: null, executionUsed: 0, fixUsed: 0, stageRetries: {} });
   return { instructions: safeInstructions };
 }
 

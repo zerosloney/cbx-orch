@@ -75,10 +75,20 @@ export async function runStage(params: {
   // 重试计数器持久化于 state.json：崩溃后被队列回收重入 runStage 时按持久值恢复，避免每次 resume 都拿满预算绕过 maxRetries；
   // 显式 retry / 用户 resolve Human Gate 时由 prepareContinuation、retryQueueJob 归零。
   const persistedUsage = await loadState(workspace, jobId);
-  let executionUsed = Math.max(0, Math.floor(Number(persistedUsage.executionUsed) || 0));
-  let fixUsed = Math.max(0, Math.floor(Number(persistedUsage.fixUsed) || 0));
-  const useExecutionRetry = async (): Promise<void> => { executionUsed += 1; await writeState(workspace, jobId, { executionUsed }); };
-  const useFixRetry = async (): Promise<void> => { fixUsed += 1; await writeState(workspace, jobId, { fixUsed }); };
+  // 每 stage 独立重试预算: stageRetries 是 { [stageIndex]: { execution, fix } } 映射。
+  // 崩溃后队列回收重入时读持久化值恢复，不拿满预算绕过 maxRetries。
+  const stageRetries = (persistedUsage.stageRetries as Record<string, { execution: number; fix: number }> | undefined) ?? {};
+  const stageKey = String(stageIndex);
+  const stageEntry = stageRetries[stageKey] ?? { execution: 0, fix: 0 };
+  let executionUsed = Math.max(0, Math.floor(Number(stageEntry.execution) || 0));
+  let fixUsed = Math.max(0, Math.floor(Number(stageEntry.fix) || 0));
+  const persistRetries = async (): Promise<void> => {
+    const current = await loadState(workspace, jobId);
+    const currentRetries = (current.stageRetries as Record<string, { execution: number; fix: number }> | undefined) ?? {};
+    await writeState(workspace, jobId, { stageRetries: { ...currentRetries, [stageKey]: { execution: executionUsed, fix: fixUsed } } });
+  };
+  const useExecutionRetry = async (): Promise<void> => { executionUsed += 1; await persistRetries(); };
+  const useFixRetry = async (): Promise<void> => { fixUsed += 1; await persistRetries(); };
   const DEP_FILES = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"];
   const depBaseline: Record<string, string> = {};
   if (context.dependencyGuard) {

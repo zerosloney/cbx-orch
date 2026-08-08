@@ -61,9 +61,9 @@ async function main(): Promise<void> {
       review: parsed.has("--review") ? true : parsed.has("--no-review") ? false : undefined,
       approvalBeforeComplete: parsed.has("--approval-before-complete") ? true : parsed.has("--no-approval-before-complete") ? false : undefined,
       isolated: parsed.has("--isolated") ? true : parsed.has("--no-isolated") ? false : undefined,
-      timeoutMs: parsed.option("--timeout-ms") ? Number(parsed.option("--timeout-ms")) : undefined,
-      maxRetries: parsed.option("--max-retries") ? Number(parsed.option("--max-retries")) : undefined,
-      maxTurns: parsed.option("--max-turns") ? Number(parsed.option("--max-turns")) : undefined,
+      timeoutMs: parsed.intOption("--timeout-ms", undefined, { min: 100 }),
+      maxRetries: parsed.intOption("--max-retries", undefined, { min: 0 }),
+      maxTurns: parsed.intOption("--max-turns", undefined, { min: 1 }),
       keepWorktree: parsed.has("--keep-worktree") ? true : parsed.has("--no-keep-worktree") ? false : undefined,
       permissionMode: parsed.has("--dangerously-skip-permissions") ? "dontAsk" : parsed.option("--permission-mode"),
       executor: parsed.option("--executor"),
@@ -75,7 +75,7 @@ async function main(): Promise<void> {
       dependencyGuard: parsed.has("--dependency-guard") ? true : parsed.has("--no-dependency-guard") ? false : undefined,
       adaptive: {
         enabled: parsed.has("--adaptive") ? true : parsed.has("--no-adaptive") ? false : undefined,
-        maxRounds: parsed.option("--adaptive-max-rounds") ? Number(parsed.option("--adaptive-max-rounds")) : undefined,
+        maxRounds: parsed.intOption("--adaptive-max-rounds", undefined, { min: 1 }),
         managerExecutor: parsed.option("--manager-executor"),
       },
     });
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
       jobId = created.jobId;
     }
     if (command === "start") {
-      await startBackground(workspace, jobId!, parsed.option("--message", ""), Number(parsed.option("--priority", "0")));
+      await startBackground(workspace, jobId!, parsed.option("--message", ""), parsed.intOption("--priority", 0) ?? 0);
       print({ jobId, status: "queued" });
       return;
     }
@@ -126,7 +126,7 @@ async function main(): Promise<void> {
       }
     }
     print(result);
-    if (parsed.has("--ci") && result.status !== "done") process.exitCode = 2;
+    if (parsed.has("--ci") && result.status !== "done") process.exit(2);
     return;
   }
   if (command === "mcp") { const { runMcpServer } = await import("./mcp-server.js"); runMcpServer(); return; }
@@ -142,7 +142,7 @@ async function main(): Promise<void> {
   if (command === "dispatch") { print(await dispatchQueue(workspace)); return; }
   if (command === "health" || command === "metrics") { print(await health(workspace)); return; }
   if (command === "serve") {
-    const service = await serveQueue(workspace, Number(parsed.option("--interval-ms", "30000")));
+    const service = await serveQueue(workspace, parsed.intOption("--interval-ms", 30000, { min: 50 })!);
     print({ workspace, status: "serving" });
     const signal = new Promise<void>(resolve => {
       process.once("SIGINT", () => resolve()); process.once("SIGTERM", () => resolve());
@@ -161,14 +161,14 @@ async function main(): Promise<void> {
   if (command === "result") { console.log(await readArtifact(workspace, requireJobId(parsed, command), "result.json")); return; }
   if (command === "watch") {
     const jobId = requireJobId(parsed, command);
-    const interval = Number(parsed.option("--interval-ms", "1000"));
+    const interval = parsed.intOption("--interval-ms", 1000, { min: 1 })!;
     let last = "";
     while (true) {
       const state = await loadState(workspace, jobId);
       const snapshot = JSON.stringify(state);
       if (snapshot !== last) { print(state); last = snapshot; }
       if (["done", "failed", "needs_fix", "review_failed", "cancelled"].includes(state.status)) {
-        if (parsed.has("--ci") && state.status !== "done") process.exitCode = 2;
+        if (parsed.has("--ci") && state.status !== "done") process.exit(2);
         return;
       }
       await new Promise(resolve => setTimeout(resolve, interval));
@@ -186,13 +186,13 @@ async function main(): Promise<void> {
     const uiToken = cliToken ?? configToken;
     if (workspaces.length === 0) {
       // 向后兼容:无显式参数时退化为 cwd 单 workspace,与旧版一致。
-      await startWebUi(workspace, Number(parsed.option("--port", "4173")), parsed.option("--host", "127.0.0.1"), uiToken);
+      await startWebUi(workspace, parsed.intOption("--port", 4173, { min: 1, max: 65535 })!, parsed.option("--host", "127.0.0.1"), uiToken);
       return;
     }
-    await startWebUi(workspaces, Number(parsed.option("--port", "4173")), parsed.option("--host", "127.0.0.1"), uiToken);
+    await startWebUi(workspaces, parsed.intOption("--port", 4173, { min: 1, max: 65535 })!, parsed.option("--host", "127.0.0.1"), uiToken);
     return;
   }
-  if (command === "tui") { await runTui(workspace, Number(parsed.option("--interval-ms", "1000"))); return; }
+  if (command === "tui") { await runTui(workspace, parsed.intOption("--interval-ms", 1000, { min: 1 })!); return; }
   if (command === "review") {
     try { console.log(await readFile(`${jobDir(workspace, requireJobId(parsed, command))}/review.md`, "utf8")); }
     catch { console.log("尚无 review.md"); }
@@ -201,15 +201,13 @@ async function main(): Promise<void> {
   if (command === "continue") {
     const jobId = requireJobId(parsed, command);
     const message = parsed.option("--message", "请根据 review.md 修复问题，完成后重新运行验收命令。")!;
-    const extraRoundsOption = parsed.option("--extra-rounds");
-    const extraRounds = extraRoundsOption === undefined ? 0 : Number(extraRoundsOption);
-    if (extraRoundsOption !== undefined && (!Number.isInteger(extraRounds) || extraRounds < 1 || extraRounds > 100)) throw new Error("--extra-rounds 必须是 1 到 100 的整数。");
+    const extraRounds = parsed.intOption("--extra-rounds", 0, { min: 1, max: 100 }) ?? 0;
     if (parsed.has("--foreground")) {
       await unlink(path.join(jobDir(workspace, jobId), "cancel.requested")).catch(() => undefined);
       print(await executeJob(workspace, jobId, message, undefined, extraRounds));
       return;
     }
-    await startBackground(workspace, jobId, message, Number(parsed.option("--priority", "0")), undefined, parsed.has("--refresh-baseline"), extraRounds);
+    await startBackground(workspace, jobId, message, parsed.intOption("--priority", 0) ?? 0, undefined, parsed.has("--refresh-baseline"), extraRounds);
     print({ jobId, status: "queued" });
     return;
   }
@@ -221,12 +219,12 @@ async function main(): Promise<void> {
     print(state);
     return;
   }
-  if (command === "retry") { print(await retryQueueJob(workspace, requireJobId(parsed, command), Number(parsed.option("--priority", "0")))); return; }
+  if (command === "retry") { print(await retryQueueJob(workspace, requireJobId(parsed, command), parsed.intOption("--priority", 0) ?? 0)); return; }
   if (command === "clean") { const jobId = requireJobId(parsed, command); print({ jobId, cleaned: await cleanupWorktree(workspace, jobId) }); return; }
   if (command === "review-gate") {
-    const result = await runReviewGate(workspace, { executor: parsed.option("--executor"), timeoutMs: parsed.option("--timeout-ms") ? Number(parsed.option("--timeout-ms")) : undefined });
+    const result = await runReviewGate(workspace, { executor: parsed.option("--executor"), timeoutMs: parsed.intOption("--timeout-ms", undefined, { min: 100 }) });
     print({ pass: result.pass, reason: result.reason, verdict: result.verdict });
-    if (!result.pass) process.exitCode = 2;
+    if (!result.pass) process.exit(2);
     return;
   }
   if (command === "stop-review-gate") {
