@@ -45,7 +45,8 @@ export function validateTestCommand(command?: string): void {
     throw new Error("测试命令包含不允许的 shell 操作符、换行或命令替换。");
   }
   // 拒绝递归/强制删除与编码执行等破坏性命令（覆盖常见参数变体）。
-  const destructive = /(?:\brm\s+(?:-[a-z]*[rf]|--recurs|--forc)|\brd\s+\/s|\brmdir\s+\/s|Remove-Item|\bdel\s+\/s|\bdeltree\b|\bformat\s+)/i;
+  // 软防线：无法穷举所有变体，非隔离任务仍依赖运行环境隔离。补 find -delete/git clean/truncate/dd/shred 等。
+  const destructive = /(?:\brm\s+(?:-[a-z]*[rf]|--recurs|--forc)|\brd\s+\/s|\brmdir\s+\/s|Remove-Item|\bdel\s+\/s|\bdeltree\b|\bformat\s+|\bfind\s+.*\b-delete\b|\bgit\s+clean\b|\btruncate\b|\bdd\b.*\bof=|\bshred\b)/i;
   const encodedCommand = /\s-(?:enc|encodedcommand)\b/i;
   if (destructive.test(command) || encodedCommand.test(command)) {
     throw new Error("测试命令包含不允许的破坏性命令或编码执行。");
@@ -53,7 +54,7 @@ export function validateTestCommand(command?: string): void {
 }
 
 export function validatePermissionMode(mode: string, allowUnsafe = false): void {
-  const allowed = new Set(["default", "acceptEdits", "auto", "dontAsk", "plan"]);
+  const allowed = new Set(["default", "acceptEdits", "auto", "dontAsk"]);
   if (!allowed.has(mode)) throw new Error(`不支持的 permission mode：${mode}`);
   if (mode === "dontAsk" && !allowUnsafe) throw new Error("dontAsk 需要显式使用 --dangerously-skip-permissions；请在编排器外部确认后再启用。");
 }

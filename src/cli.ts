@@ -201,7 +201,7 @@ async function main(): Promise<void> {
   if (command === "continue") {
     const jobId = requireJobId(parsed, command);
     const message = parsed.option("--message", "请根据 review.md 修复问题，完成后重新运行验收命令。")!;
-    const extraRounds = parsed.intOption("--extra-rounds", 0, { min: 1, max: 100 }) ?? 0;
+    const extraRounds = parsed.intOption("--extra-rounds", 0, { min: 0, max: 100 }) ?? 0;
     if (parsed.has("--foreground")) {
       await unlink(path.join(jobDir(workspace, jobId), "cancel.requested")).catch(() => undefined);
       print(await executeJob(workspace, jobId, message, undefined, extraRounds));

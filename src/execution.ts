@@ -179,7 +179,7 @@ async function executeJobLocked(workspace: string, jobId: string, extra = "", qu
       if (decision.action === "done") {
         adaptiveRounds = [...adaptiveRounds, { round, action: decision.action }];
         const lastReview = stageReports.at(-1)?.reviewVerdict ?? null;
-        const lastTest = stageReports.length ? (stageReports.at(-1)?.testExitCode ?? null) : 0;
+        const lastTest = stageReports.length ? (stageReports.at(-1)?.testExitCode ?? 0) : 0;
         return finish({ status: "done", phase: "done", adaptiveRound: round, adaptiveRounds, stages: stageReports, reviewVerdict: lastReview === "skipped" ? null : lastReview, reviewExitCode: 0, testExitCode: lastTest });
       }
 

@@ -1,6 +1,5 @@
 import { createServer, type Server, type ServerResponse, type IncomingMessage } from "node:http";
 import { open, readFile, stat } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { health, jobDir, listArtifacts, listJobs, listQueue, loadState, readArtifact } from "./core.js";
 import { capture } from "./process-runner.js";
@@ -198,9 +197,10 @@ export async function readAgentLogIncremental(workspace: string, jobId: string, 
   const start = since > 0 && since <= raw.length ? since : tailStart;
   const slice = raw.subarray(start);
   const text = slice.toString("utf8");
-  // 截到最后一个完整行, 避免半行
+  // 截到最后一个完整行, 避免半行：末尾是换行则全保留；内部有换行但末尾非换行则退到上一个换行；
+  // 完全无换行（单行/二进制）无法判断半行，全保留交给前端展示。
   const lastNl = text.lastIndexOf("\n");
-  const end = lastNl >= 0 ? lastNl + 1 : text.length;
+  const end = text.endsWith("\n") || lastNl < 0 ? text.length : lastNl + 1;
   const content = text.slice(0, end);
   return { content, nextOffset: start + Buffer.byteLength(content, "utf8"), truncated: start > 0 };
 }
@@ -298,10 +298,16 @@ function rowAttr(id){return String(id).replace(/[^\w-]/g,function(c){return'\\\\
 function totalJobs(w){return Object.values(w.jobsByStatus||{}).reduce(function(a,b){return a+b;},0)}
 function fmt(iso){try{return new Date(iso).toLocaleTimeString()}catch(e){return iso}}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function cbxFetch(url,opts){
+  opts=opts||{};
+  opts.headers=Object.assign({},opts.headers||{});
+  if(window.CBX_TOKEN)opts.headers['Authorization']='Bearer '+window.CBX_TOKEN;
+  return fetch(url,opts);
+}
 async function refresh(){
   var ws=encodeURIComponent(currentWorkspace||'');
-  var jobs=await fetch('/api/jobs?workspace='+ws).then(function(r){return r.json()});
-  var q=await fetch('/api/queue?workspace='+ws).then(function(r){return r.json()});
+  var jobs=await cbxFetch('/api/jobs?workspace='+ws).then(function(r){return r.json()});
+  var q=await cbxFetch('/api/queue?workspace='+ws).then(function(r){return r.json()});
   updateCards(jobs,q);
   document.querySelector('#jobs').innerHTML=jobs.map(rowHtml).join('');
   if(selected){var row=document.querySelector('tr.job[data-id="'+rowAttr(selected)+'"]');if(row)row.classList.add('selected');}
@@ -325,7 +331,7 @@ function updateCards(jobs,q){
 async function loadWorkspaces(){
   console.log('cbx-ui: loadWorkspaces called');
   try{
-    var response=await fetch('/api/workspaces');
+    var response=await cbxFetch('/api/workspaces');
     console.log('cbx-ui: fetch status', response.status);
     if(!response.ok) throw new Error('HTTP '+response.status);
     var data=await response.json();
@@ -393,7 +399,7 @@ async function loadDetail(id){
   body.innerHTML='<p>\\u52a0\\u8f7d\\u4e2d\\u2026</p>';
   // Stage chain (top): 受 result.json.stages 驱动,失败/通过着色
   var result=null;
-  try{result=JSON.parse(await fetch('/api/jobs/'+id+'/artifact/result.json').then(function(r){return r.text()}));}catch(e){}
+  try{result=JSON.parse(await cbxFetch('/api/jobs/'+id+'/artifact/result.json').then(function(r){return r.text()}));}catch(e){}
   var stageHtml='';
   if(result&&result.stages&&result.stages.length){
     stageHtml+='<div class="stages">';
@@ -448,7 +454,7 @@ async function loadTab(id,tab,panelsEl,result){
       panel.innerHTML=html;
     }
     else if(tab==='timeline'){
-      var tl=await fetch('/api/jobs/'+id+'/timeline').then(function(r){return r.json()});
+      var tl=await cbxFetch('/api/jobs/'+id+'/timeline').then(function(r){return r.json()});
       if(!tl.stages||!tl.stages.length){panel.innerHTML='<p class="hint">\\u65e0\\u9636\\u6bb5\\u8f6c\\u6362\\u8bb0\\u5f55\\u3002</p>';return;}
       var maxMs=Math.max.apply(null,tl.stages.map(function(s){return s.durationMs||0;}).concat([1000]));
       var rows=tl.stages.map(function(s){
@@ -461,7 +467,7 @@ async function loadTab(id,tab,panelsEl,result){
       panel.innerHTML='<div style="margin-bottom:8px;color:#888">\\u5f53\\u524d\\u9636\\u6bb5\\uff1a<b>'+esc(tl.currentStage||'\\u2014')+'</b> \\u00b7 \\u5df2\\u8dd1 '+tl.elapsedSec+'s</div>'+rows;
     }
     else if(tab==='executor'){
-      var ex=await fetch('/api/jobs/'+id+'/executor').then(function(r){return r.json()});
+      var ex=await cbxFetch('/api/jobs/'+id+'/executor').then(function(r){return r.json()});
       var pulse=ex.alive===true?'pulse-alive':ex.alive===false?'pulse-dead':'pulse-unknown';
       var html='<div class="exec-card">';
       html+='<div><div class="field-label">PID</div><div class="field-value"><span class="pulse '+pulse+'"></span>'+(ex.pid!=null?ex.pid:'\\u2014')+'</div></div>';
@@ -471,7 +477,7 @@ async function loadTab(id,tab,panelsEl,result){
       html+='</div>';
       if(ex.command)html+='<div class="cmd">'+esc(ex.command)+'</div>';
       // 增量 agent.log 拉取(默认读尾部 256KB)
-      var log=await fetch('/api/jobs/'+id+'/agent.log?since=0').then(function(r){return r.json()});
+      var log=await cbxFetch('/api/jobs/'+id+'/agent.log?since=0').then(function(r){return r.json()});
       if(log.content){
         html+='<h3 style="margin:14px 0 6px;color:#9ecbff">agent.log \\u5c3e\\u90e8</h3>';
         html+='<pre class="art-view" style="display:block;max-height:240px;white-space:pre-wrap">'+esc(log.content)+'</pre>';
@@ -479,15 +485,15 @@ async function loadTab(id,tab,panelsEl,result){
       panel.innerHTML=html;
     }
     else if(tab==='diff'){
-      var txt=await fetch('/api/jobs/'+id+'/artifact/complete.patch').then(function(r){return r.text()});
+      var txt=await cbxFetch('/api/jobs/'+id+'/artifact/complete.patch').then(function(r){return r.text()});
       panel.innerHTML='<pre class="art-view" style="display:block;max-height:380px;white-space:pre">'+esc(txt)+'</pre>';
     }
     else if(tab==='test'){
-      try{var txt=await fetch('/api/jobs/'+id+'/artifact/test.log').then(function(r){return r.text()});panel.innerHTML='<pre class="art-view" style="display:block;max-height:380px;white-space:pre-wrap">'+esc(txt)+'</pre>';}
+      try{var txt=await cbxFetch('/api/jobs/'+id+'/artifact/test.log').then(function(r){return r.text()});panel.innerHTML='<pre class="art-view" style="display:block;max-height:380px;white-space:pre-wrap">'+esc(txt)+'</pre>';}
       catch(e){panel.innerHTML='<p class="hint">\\u4efb\\u52a1\\u672a\\u8fd0\\u884c\\u6d4b\\u8bd5\\u6216\\u8fd8\\u6ca1\\u6d4b\\u8bd5\\u65e5\\u5fd7\\u3002</p>';}
     }
     else if(tab==='review'){
-      try{var txt=await fetch('/api/jobs/'+id+'/artifact/review.md').then(function(r){return r.text()});panel.innerHTML='<pre class="art-view" style="display:block;max-height:380px;white-space:pre-wrap">'+esc(txt)+'</pre>';}
+      try{var txt=await cbxFetch('/api/jobs/'+id+'/artifact/review.md').then(function(r){return r.text()});panel.innerHTML='<pre class="art-view" style="display:block;max-height:380px;white-space:pre-wrap">'+esc(txt)+'</pre>';}
       catch(e){panel.innerHTML='<p class="hint">\\u4efb\\u52a1\\u672a\\u542f\\u7528 review \\u6216\\u5ba1\\u67e5\\u8fd8\\u5728\\u8fdb\\u884c\\u3002</p>';}
     }
   } catch(e){
@@ -612,10 +618,6 @@ export function createWebUiServer(workspace: string | string[], host = "127.0.0.
         if (!presented || (token && !constantTimeEqual(presented, token))) {
           res.writeHead(401, { "www-authenticate": "Bearer", "content-type": "application/json; charset=utf-8" });
           return res.end(JSON.stringify({ error: "unauthorized" }));
-        }
-        if (token) {
-          // 单次 token 消费：首次连接即作废，防止 replay / 日志泄漏被复用。
-          token = crypto.randomUUID ? crypto.randomUUID().replace(/-/g, "") : randomBytes(32).toString("hex");
         }
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
         clients.add(res);

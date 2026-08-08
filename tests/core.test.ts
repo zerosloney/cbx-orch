@@ -515,9 +515,9 @@ test("CLI adaptive flags persist opt-in settings", async () => {
   const context = JSON.parse(await readFile(path.join(directory, "context.json"), "utf8"));
   assert.deepEqual(context.adaptive, { enabled: true, maxRounds: 1, managerExecutor: "codebuddy" });
   assert.equal(context.approvalBeforeComplete, true);
-  const invalidRounds = spawnSync(process.execPath, [path.resolve("dist/src/cli.js"), "continue", "missing", "--workspace", workspace, "--extra-rounds", "0", "--foreground"], { encoding: "utf8" });
+  const invalidRounds = spawnSync(process.execPath, [path.resolve("dist/src/cli.js"), "continue", "missing", "--workspace", workspace, "--extra-rounds", "-1", "--foreground"], { encoding: "utf8" });
   assert.notEqual(invalidRounds.status, 0);
-  assert.match(invalidRounds.stderr, /--extra-rounds 必须是 1 到 100/);
+  assert.match(invalidRounds.stderr, /--extra-rounds 必须是 0 到 100/);
 });
 
 test("structured task contract performs a plan-only handshake and pauses on ambiguity", async () => {

@@ -233,15 +233,16 @@ export async function retryQueueJob(runtime: QueueRuntime, workspaceInput: strin
   const state = await runtime.loadState(workspace, jobId);
   if (["running", "queued"].includes(state.status)) throw new Error(`任务当前仍在执行或排队：${jobId}`);
   const directory = runtime.jobDir(workspace, jobId);
-  // 旧 worker 可能仍是僵尸进程(已被回收但进程未退出)：写取消标记 + 终止进程树，
-  // 避免新 entry 启动时 run.lock 被旧进程持有而 E_LOCK_BUSY 失败。
-  await writeFile(path.join(directory, "cancel.requested"), now(), "utf8").catch(() => undefined);
-  const oldPid = Number(await readFile(path.join(directory, "active.pid"), "utf8").catch(() => ""));
-  if (Number.isSafeInteger(oldPid) && oldPid > 0) await terminateTree(oldPid);
-  // 清除取消标记，避免 executeJob 把新 entry 直接判为 cancelled。
-  try { await unlink(path.join(directory, "cancel.requested")); } catch { /* 无待取消标记 */ }
-  // 单事务完成：老 queued/running entry 标 cancelled + 插新 entry + 状态重置。删外层 busy-wait，避免 dispatch 锁竞争时新老 entry 并存。
+  // 单事务完成：老 entry 标 cancelled + 终止僵尸进程 + 插新 entry + 状态重置。
+  // terminateTree 与 entry 状态变更必须同在队列锁内，否则与 dispatchQueue 回收并发时会误杀新 worker 或互相覆盖。
   const replacement = await withQueueLock(workspace, async () => {
+    // 旧 worker 可能仍是僵尸进程(已被回收但进程未退出)：写取消标记 + 终止进程树，
+    // 避免新 entry 启动时 run.lock 被旧进程持有而 E_LOCK_BUSY 失败。
+    await writeFile(path.join(directory, "cancel.requested"), now(), "utf8").catch(() => undefined);
+    const oldPid = Number(await readFile(path.join(directory, "active.pid"), "utf8").catch(() => ""));
+    if (Number.isSafeInteger(oldPid) && oldPid > 0) await terminateTree(oldPid);
+    // 清除取消标记，避免 executeJob 把新 entry 直接判为 cancelled。
+    try { await unlink(path.join(directory, "cancel.requested")); } catch { /* 无待取消标记 */ }
     const queue = await loadQueue(workspace);
     for (const entry of queue.entries.filter(item => item.jobId === jobId && ["queued", "running"].includes(item.status))) {
       entry.status = "cancelled"; entry.finishedAt = now(); entry.error = "被新的 retry 请求取代"; entry.pid = undefined;
