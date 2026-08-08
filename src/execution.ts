@@ -276,8 +276,8 @@ async function prepareContinuationUnlocked(workspace: string, jobId: string, ins
     throw new Error("extra_rounds 只能用于 max_rounds Human Gate。");
   }
   const humanGate = resolveHumanGate(gate, safeInstructions, redact);
-  // 用户已针对 gate 给出纠偏：重置失败计数，避免旧 error 在续跑时被重复计入。
-  await writeState(workspace, jobId, { humanGate, continuationInstructions: humanGate.instructions ?? null, blockingQuestions: null, blockedReason: null, failureTracker: null });
+  // 用户已针对 gate 给出纠偏：重置失败计数与重试预算，避免旧 error/旧计数在续跑时被重复计入或预算过早耗尽。
+  await writeState(workspace, jobId, { humanGate, continuationInstructions: humanGate.instructions ?? null, blockingQuestions: null, blockedReason: null, failureTracker: null, executionUsed: 0, fixUsed: 0 });
   return { instructions: safeInstructions };
 }
 

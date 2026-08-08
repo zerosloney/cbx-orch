@@ -72,8 +72,13 @@ export async function runStage(params: {
   let reviewVerdict: string | null = null;
   const executionRetries = context.executionRetries ?? maxAttempts;
   const fixRetries = context.fixRetries ?? maxAttempts;
-  let executionUsed = 0;
-  let fixUsed = 0;
+  // 重试计数器持久化于 state.json：崩溃后被队列回收重入 runStage 时按持久值恢复，避免每次 resume 都拿满预算绕过 maxRetries；
+  // 显式 retry / 用户 resolve Human Gate 时由 prepareContinuation、retryQueueJob 归零。
+  const persistedUsage = await loadState(workspace, jobId);
+  let executionUsed = Math.max(0, Math.floor(Number(persistedUsage.executionUsed) || 0));
+  let fixUsed = Math.max(0, Math.floor(Number(persistedUsage.fixUsed) || 0));
+  const useExecutionRetry = async (): Promise<void> => { executionUsed += 1; await writeState(workspace, jobId, { executionUsed }); };
+  const useFixRetry = async (): Promise<void> => { fixUsed += 1; await writeState(workspace, jobId, { fixUsed }); };
   const DEP_FILES = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"];
   const depBaseline: Record<string, string> = {};
   if (context.dependencyGuard) {
@@ -96,7 +101,7 @@ export async function runStage(params: {
     catch (error) {
       lastError = String(error);
       if (executionUsed < executionRetries) {
-        executionUsed += 1;
+        await useExecutionRetry();
         await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError });
         continue;
       }
@@ -118,7 +123,7 @@ export async function runStage(params: {
       if (depChanged) {
         lastError = `依赖守卫：未经授权修改了依赖文件：${changedDepFiles.join(", ")}。`;
         if (fixUsed < fixRetries) {
-          fixUsed += 1;
+          await useFixRetry();
           attemptExtra = `请恢复 ${changedDepFiles.join("、")} 至任务开始前的状态，或通过 --no-dependency-guard 禁用依赖守卫。`;
           await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError });
           continue;
@@ -131,7 +136,7 @@ export async function runStage(params: {
       lastError = agent.timedOut ? `${stageLabel} 超时（${context.timeoutMs}ms）` : `${stageLabel} 执行失败`;
       executorExitCode = agent.code;
       if (executionUsed < executionRetries) {
-        executionUsed += 1;
+        await useExecutionRetry();
         await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError, executorExitCode: agent.code });
         continue;
       }
@@ -147,7 +152,7 @@ export async function runStage(params: {
       lastError = test.timedOut ? `验收命令超时（${context.timeoutMs}ms）` : "验收命令失败";
       testExitCode = test.code;
       if (fixUsed < fixRetries) {
-        fixUsed += 1;
+        await useFixRetry();
         attemptExtra = `请读取 ${path.join(directory, "test.log")}，修复失败原因后重新执行。`;
         await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError, testExitCode: test.code });
         continue;
@@ -178,7 +183,7 @@ export async function runStage(params: {
     catch (error) {
       lastError = String(error);
       if (fixUsed < fixRetries) {
-        fixUsed += 1;
+        await useFixRetry();
         await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError });
         continue;
       }
@@ -196,7 +201,7 @@ export async function runStage(params: {
     if (reviewAgent.code !== 0 || reviewAgent.timedOut) {
       lastError = reviewAgent.timedOut ? `审查超时（${context.timeoutMs}ms）` : "审查代理执行失败";
       if (fixUsed < fixRetries) {
-        fixUsed += 1;
+        await useFixRetry();
         await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError });
         continue;
       }
@@ -214,7 +219,7 @@ export async function runStage(params: {
       } catch (error) {
         lastError = `结构化审计无效：${error instanceof Error ? error.message : String(error)}`;
         if (fixUsed < fixRetries) {
-          fixUsed += 1;
+          await useFixRetry();
           await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError, auditError: lastError });
           continue;
         }
@@ -239,7 +244,7 @@ export async function runStage(params: {
     }
     reviewVerdict = "FAIL";
     if (fixUsed < fixRetries) {
-      fixUsed += 1;
+      await useFixRetry();
       await writeState(workspace, jobId, { phase: "retrying", stage: stage.name, retryReason: lastError });
       continue;
     }

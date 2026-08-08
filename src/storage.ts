@@ -426,6 +426,10 @@ function optionalContextNumber(raw: Record<string, unknown>, field: string): voi
   const value = raw[field];
   if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) throw contextFieldError(field, "缺省或为有限数字");
 }
+function optionalContextNonNegInt(raw: Record<string, unknown>, field: string): void {
+  const value = raw[field];
+  if (value !== undefined && (typeof value !== "number" || !Number.isInteger(value) || value < 0)) throw contextFieldError(field, "缺省或为非负整数");
+}
 function optionalContextObject(raw: Record<string, unknown>, field: string): void {
   const value = raw[field];
   if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) throw contextFieldError(field, "缺省或为对象");
@@ -441,7 +445,7 @@ export function validateJobContext(value: unknown): JobContext {
   for (const field of ["maxTurns", "timeoutMs", "maxRetries"]) requireContextNumber(raw, field);
   for (const field of ["testCommand", "reviewRules", "reviewExecutor", "commitMessage", "baseCommit", "baseBranch", "baseStatus", "dirtyFingerprint", "gitRoot"]) optionalContextString(raw, field);
   for (const field of ["keepWorktree", "approvalBeforeRun", "approvalBeforeComplete", "autoBranch", "autoCommit", "baseDirty", "dependencyGuard"]) optionalContextBoolean(raw, field);
-  for (const field of ["executionRetries", "fixRetries"]) optionalContextNumber(raw, field);
+  for (const field of ["executionRetries", "fixRetries"]) optionalContextNonNegInt(raw, field);
   if (raw.trustMode !== undefined && raw.trustMode !== "trusted" && raw.trustMode !== "untrusted") throw contextFieldError("trustMode", "缺省或为 trusted/untrusted");
   optionalContextObject(raw, "taskContract");
   optionalContextObject(raw, "adaptive");

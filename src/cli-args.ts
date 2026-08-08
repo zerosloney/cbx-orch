@@ -37,8 +37,10 @@ export function parseCliArgs(argv: string[]): CliArgs {
       const name = eq >= 0 ? arg.slice(0, eq) : arg;
       if (eq >= 0) { push(values, name, arg.slice(eq + 1)); continue; }
       if (VALUE_OPTIONS.has(name)) {
-        if (i + 1 >= argv.length) throw new Error(`选项 ${name} 缺少值。`);
-        push(values, name, argv[i + 1]);
+        // 下一个 token 是 `--`（分隔符）或不存在时，视为缺值，避免把 `--` 当选项值吞掉。
+        const next = argv[i + 1];
+        if (next === undefined || next === "--") throw new Error(`选项 ${name} 缺少值。`);
+        push(values, name, next);
         i += 1;
       } else {
         flags.add(name);

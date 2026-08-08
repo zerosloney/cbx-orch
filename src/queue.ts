@@ -92,7 +92,9 @@ export async function dispatchQueue(runtime: QueueRuntime, workspaceInput: strin
           reclaimed = state.status === "done" ? "done" : state.status === "cancelled" ? "cancelled" : "queued";
         } catch (error) { logJobEvent(runtime, workspace, entry.jobId, "queue_reclaim_failed", { error: error instanceof Error ? error.message : String(error) }); reclaimed = "queued"; }
         if (reclaimed === "queued") {
-          entry.reclaimCount = (entry.reclaimCount ?? 0) + 1;
+          // 区分瞬时崩溃与运行中崩溃：产出过 heartbeat 的回收视为正常运行后崩溃（OOM/被杀），归零 reclaimCount；
+          // 从未产出 heartbeat（spawn 后 grace 期内即失活）才是瞬时失败链，累计计数以触发熔断。
+          entry.reclaimCount = heartbeatModifiedAt !== undefined ? 0 : (entry.reclaimCount ?? 0) + 1;
           if (entry.reclaimCount > MAX_RECLAIMS) {
             // 熔断：worker 反复无法恢复（多为状态永久损坏），停止重派避免无限 spawn。
             entry.status = "failed";
@@ -241,7 +243,7 @@ export async function retryQueueJob(runtime: QueueRuntime, workspaceInput: strin
     const created: QueueEntry = { queueId: `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`, jobId, workspace, extra: "请读取已有的 test.log、review.md 和 result.json，修复失败原因后重新执行。", status: "queued", createdAt: now(), priority };
     queue.entries.push(created);
     queue.updatedAt = now();
-    await runtime.saveStateAndQueue(workspace, jobId, { ...current, status: "queued", phase: "queued", error: null, timedOut: false, updatedAt: now() }, queue);
+    await runtime.saveStateAndQueue(workspace, jobId, { ...current, status: "queued", phase: "queued", error: null, timedOut: false, updatedAt: now(), executionUsed: 0, fixUsed: 0 }, queue);
     return created;
   });
   await dispatchQueue(runtime, workspace);
