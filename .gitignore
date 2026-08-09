@@ -15,7 +15,6 @@ __pycache__/
 .omp/
 .kilocode/
 .codegraph/
-.trellis/
 AGENTS.md
 .cbx/
 .cbx-worktrees/
@@ -23,4 +22,3 @@ sbom.cdx.json
 coverage.txt
 test-results.txt
 cbx-debug.mjs
-
