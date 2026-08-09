@@ -54,6 +54,72 @@ node dist\src\cli.js clean JOB_ID
 
 默认任务数据保存在目标仓库的 `.cbx/jobs/<job-id>/`，包括需求、状态、原始事件流、测试日志、diff 和审查报告。
 
+## 架构概览
+
+### 任务状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: cbx run / start
+    queued --> awaiting_approval: approval.beforeRun
+    awaiting_approval --> running: cbx approve
+    queued --> running: dispatch / serve 调度
+    running --> done: 执行成功
+    running --> failed: 执行器崩溃 / 超时
+    running --> needs_fix: 测试失败
+    running --> review_failed: review FAIL
+    needs_fix --> running: cbx continue
+    review_failed --> running: cbx continue
+    failed --> queued: cbx retry
+    running --> cancelled: cbx cancel
+    needs_fix --> cancelled: cbx cancel
+    review_failed --> cancelled: cbx cancel
+    done --> [*]
+    cancelled --> [*]
+```
+
+### 执行流水线
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant C as cbx CLI
+    participant Q as Queue (SQLite)
+    participant W as Worker
+    participant E as Executor
+    participant T as Test
+    participant R as Reviewer
+
+    U->>C: cbx run --task "..."
+    C->>Q: createJob + enqueue
+    Q->>W: dispatch (serve / dispatch)
+    W->>E: spawn executor
+    E-->>W: handback.md
+    W->>T: run testCommand
+    alt test pass && review enabled
+        W->>R: spawn reviewExecutor
+        R-->>W: review.md
+    end
+    W->>Q: finalize state
+    Q-->>U: done / failed / needs_fix / review_failed
+```
+
+### 系统组件
+
+```mermaid
+graph LR
+    CLI[cbx CLI] --> DB[(SQLite .cbx/state.sqlite)]
+    CLI --> Git[Git worktree]
+    CLI --> Web[Web UI Server]
+    Web --> Browser[Browser Dashboard]
+    CLI --> MCP[MCP Server]
+    MCP --> ZCode[ZCode / Claude Code]
+    DB --> Events[events.ndjson]
+    DB --> Telemetry[telemetry.ndjson]
+    DB --> Outbox[delivery outbox]
+```
+
 ## 执行器
 
 `executor` 决定编排器实际调用哪个编码 CLI。内置 4 个适配器，也可指向自定义 ESM 插件。
