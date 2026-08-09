@@ -5,6 +5,11 @@ export type KeyAction = "up" | "down" | "refresh" | "quit" | "unknown";
 export function startKeyboardListener(
   onKey: (action: KeyAction) => void,
 ): () => void {
+  type StdinListener = Parameters<typeof process.stdin.off>[1];
+  const dataListeners = (): StdinListener[] =>
+    process.stdin.listeners("data") as StdinListener[];
+  const existingDataListeners = new Set(dataListeners());
+  const wasFlowing = process.stdin.readableFlowing;
   readline.emitKeypressEvents(process.stdin);
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
@@ -23,8 +28,14 @@ export function startKeyboardListener(
   };
 
   process.stdin.on("keypress", handler);
+  const ownedDataListeners = dataListeners()
+    .filter((listener) => !existingDataListeners.has(listener));
   return () => {
     process.stdin.off("keypress", handler);
+    for (const listener of ownedDataListeners)
+      process.stdin.off("data", listener);
+    if (wasFlowing !== true && process.stdin.listenerCount("data") === 0)
+      process.stdin.pause();
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
   };
 }

@@ -4,7 +4,72 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { jobDir } from "../src/core.js";
+import { handleTuiKey, scheduleTuiPoll, startTui } from "../src/tui/index.js";
 import { buildTimeline, readAgentLogIncremental, readExecutorStatus } from "../src/ui.js";
+
+test("TUI polling honors intervalMs and refresh fetches immediately", () => {
+  let scheduledInterval: number | undefined;
+  let scheduledCallback: (() => void) | undefined;
+  let unrefCalled = false;
+  let refreshes = 0;
+  const fakeTimer = {
+    unref() {
+      unrefCalled = true;
+      return this;
+    },
+  } as unknown as ReturnType<typeof setInterval>;
+
+  const timer = scheduleTuiPoll(
+    () => {
+      refreshes += 1;
+    },
+    2750,
+    (callback, intervalMs) => {
+      scheduledCallback = callback;
+      scheduledInterval = intervalMs;
+      return fakeTimer;
+    },
+  );
+  assert.equal(timer, fakeTimer);
+  assert.equal(scheduledInterval, 2750);
+  assert.equal(unrefCalled, true);
+  scheduledCallback?.();
+  assert.equal(refreshes, 1);
+
+  const state = {
+    jobs: [],
+    selectedIndex: 0,
+    stopped: false,
+    needsRedraw: false,
+  };
+  handleTuiKey("refresh", state, () => {
+    refreshes += 1;
+  });
+  assert.equal(refreshes, 2);
+  assert.equal(state.needsRedraw, true);
+});
+
+test("TUI removes its SIGINT listener after keyboard exit", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-tui-lifecycle-"));
+  const sigintListenerCount = process.listenerCount("SIGINT");
+  const dataListenerCount = process.stdin.listenerCount("data");
+  const originalWrite = process.stdout.write;
+  const originalLog = console.log;
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  console.log = () => {};
+  const quitTimer = setInterval(() => {
+    process.stdin.emit("keypress", "", { name: "q", ctrl: false });
+  }, 25);
+  try {
+    await startTui(workspace, 2750);
+  } finally {
+    clearInterval(quitTimer);
+    process.stdout.write = originalWrite;
+    console.log = originalLog;
+  }
+  assert.equal(process.listenerCount("SIGINT"), sigintListenerCount);
+  assert.equal(process.stdin.listenerCount("data"), dataListenerCount);
+});
 
 test("buildTimeline returns empty stages for a job with no events", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-ui-"));

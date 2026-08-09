@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { Script } from "node:vm";
 import { createJob, executeJob, health, loadState, readArtifact } from "../src/core.js";
 import { createWebUiServer } from "../src/ui.js";
 import { finishSpan, flushDeliveries, publishEvent, startSpan } from "../src/observability.js";
@@ -44,6 +45,78 @@ test("Web UI exposes read-only local routes without wildcard CORS", async () => 
     assert.equal(js.status, 200);
     const jsText = await js.text();
     assert.match(jsText, /job-select/);
+    assert.doesNotThrow(() => new Script(jsText));
+    assert.doesNotMatch(jsText, /<\/script>|<\/body>|<\/html>/i);
+    assert.doesNotMatch(jsText, /\\\\u[0-9a-f]{4}/i);
+    assert.match(jsText, /data-terminal=/);
+    assert.match(jsText, /terminal && j\.totalSeconds != null/);
+    assert.match(
+      jsText,
+      /getAttribute\('data-terminal'\)===['"]true['"]\)return/,
+    );
+    const makeElapsedRow = (terminal: boolean, initial: string) => {
+      const cell = { textContent: initial };
+      return {
+        cell,
+        getAttribute(name: string) {
+          if (name === "data-terminal") return String(terminal);
+          if (name === "data-created") return "2026-08-09T00:00:00.000Z";
+          return null;
+        },
+        querySelector() {
+          return cell;
+        },
+      };
+    };
+    const terminalRow = makeElapsedRow(true, "42s");
+    const runningRow = makeElapsedRow(false, "stale");
+    const browserContext = {
+      window: {},
+      document: {
+        querySelector(selector: string) {
+          if (selector === "#jobs") return { addEventListener() {} };
+          return { appendChild() {}, children: [], scrollHeight: 0, scrollTop: 0 };
+        },
+        querySelectorAll() {
+          return [terminalRow, runningRow];
+        },
+        createElement() {
+          return {};
+        },
+      },
+      fetch() {
+        return new Promise(() => {});
+      },
+      setInterval() {
+        return 1;
+      },
+      EventSource: class {},
+      console: { log() {}, error() {} },
+      URLSearchParams,
+      location: { search: "" },
+      history: { replaceState() {} },
+    };
+    new Script(jsText).runInNewContext(browserContext);
+    const renderedTerminal = (
+      browserContext as unknown as {
+        rowHtml(job: Record<string, unknown>): string;
+      }
+    ).rowHtml({
+      jobId: "done-job",
+      status: "done",
+      phase: "done",
+      attempt: 1,
+      totalSeconds: 42,
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:42.000Z",
+    });
+    assert.match(renderedTerminal, /data-terminal="true"/);
+    assert.match(renderedTerminal, /<td class="elapsed">42s<\/td>/);
+    (
+      browserContext as unknown as { refreshElapsedRows(): void }
+    ).refreshElapsedRows();
+    assert.equal(terminalRow.cell.textContent, "42s");
+    assert.notEqual(runningRow.cell.textContent, "stale");
     const jobs = await fetch(`http://127.0.0.1:${port}/api/jobs`);
     assert.equal(jobs.headers.get("access-control-allow-origin"), null);
     assert.equal((await jobs.json() as Array<{ jobId: string }>)[0].jobId, job.jobId);
@@ -298,11 +371,35 @@ test("runtime and plugin manifests share the package patch version", async () =>
     return marketplace ? String(value.plugins?.[0]?.version) : String(value.version);
   };
   const packageVersion = await readVersion("package.json");
+  assert.equal(packageVersion, "0.11.0");
+  const lock = JSON.parse(
+    await readFile(path.join(root, "package-lock.json"), "utf8"),
+  ) as {
+    version?: string;
+    packages?: Record<
+      string,
+      { version?: string; engines?: { node?: string } }
+    >;
+  };
   assert.equal(APP_VERSION, packageVersion);
+  assert.equal(lock.version, packageVersion);
+  assert.equal(lock.packages?.[""]?.version, packageVersion);
   assert.equal(await readVersion("marketplace.json", true), packageVersion);
   assert.equal(await readVersion(".claude-plugin/plugin.json"), packageVersion);
   assert.equal(await readVersion(".claude-plugin/marketplace.json", true), packageVersion);
   assert.equal(await readVersion(".zcode-plugin/plugin.json"), packageVersion);
+  assert.match(
+    lock.packages?.["node_modules/ansi-escapes"]?.engines?.node ?? "",
+    />=\s*18/,
+  );
+  assert.match(
+    lock.packages?.["node_modules/better-sqlite3"]?.engines?.node ?? "",
+    /20\.x/,
+  );
+  assert.match(
+    lock.packages?.["node_modules/chalk"]?.engines?.node ?? "",
+    />=\s*16/,
+  );
 });
 
 test("process output is fully logged while memory capture keeps only a bounded tail", async () => {
@@ -353,6 +450,12 @@ test("Web UI token auth protects API endpoints while healthz remains open", asyn
     const wrongAuth = await fetch(`http://127.0.0.1:${port}/api/jobs`, { headers: { authorization: "Bearer wrong-token" } });
     assert.equal(wrongAuth.status, 401);
 
+    // Query token 仅对 EventSource 放行，不能用于 API。
+    const apiWithQueryToken = await fetch(
+      `http://127.0.0.1:${port}/api/jobs?token=${encodeURIComponent(token)}`,
+    );
+    assert.equal(apiWithQueryToken.status, 401);
+
     // 正确 token 可以访问
     const withAuth = await fetchWithAuth(`http://127.0.0.1:${port}/api/jobs`, token);
     assert.equal(withAuth.status, 200);
@@ -364,11 +467,33 @@ test("Web UI token auth protects API endpoints while healthz remains open", asyn
     assert.equal(page.status, 200);
     assert.match(await page.text(), /CBX Orchestrator/);
 
+    // UI 外壳资源无需 token，页面才能启动并发送后续带 token 的 API 请求。
+    const css = await fetch(`http://127.0.0.1:${port}/style.css`);
+    assert.equal(css.status, 200);
+    assert.match(css.headers.get("content-type") ?? "", /^text\/css/);
+    const js = await fetch(`http://127.0.0.1:${port}/app.js`);
+    assert.equal(js.status, 200);
+    assert.match(
+      js.headers.get("content-type") ?? "",
+      /^application\/javascript/,
+    );
+
     // SSE 支持 Authorization header
     const sseWithAuth = await fetch(`http://127.0.0.1:${port}/events`, { headers: { authorization: `Bearer ${token}` } });
     assert.equal(sseWithAuth.status, 200);
     assert.equal(sseWithAuth.headers.get("content-type"), "text/event-stream");
     sseWithAuth.body?.cancel();
+
+    // EventSource 无法设 Authorization header，所以 SSE 保留 query token。
+    const sseWithQueryToken = await fetch(
+      `http://127.0.0.1:${port}/events?token=${encodeURIComponent(token)}`,
+    );
+    assert.equal(sseWithQueryToken.status, 200);
+    assert.equal(
+      sseWithQueryToken.headers.get("content-type"),
+      "text/event-stream",
+    );
+    sseWithQueryToken.body?.cancel();
 
     // SSE 无 token 返回 401
     const sseNoToken = await fetch(`http://127.0.0.1:${port}/events`);
@@ -525,4 +650,3 @@ export default {
   assert.equal(cancelled.phase, "cancelled");
   assert.ok(cancelled.cancelledAt);
 });
-

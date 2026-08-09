@@ -23,6 +23,55 @@ interface TuiState {
   needsRedraw: boolean;
 }
 
+interface TuiKeyState {
+  jobs: JobState[];
+  selectedIndex: number;
+  stopped: boolean;
+  needsRedraw: boolean;
+}
+
+type IntervalScheduler = (
+  callback: () => void,
+  intervalMs: number,
+) => ReturnType<typeof setInterval>;
+
+export function handleTuiKey(
+  action: KeyAction,
+  state: TuiKeyState,
+  refresh: () => void | Promise<void>,
+): void {
+  switch (action) {
+    case "quit":
+      state.stopped = true;
+      break;
+    case "up":
+      state.selectedIndex = Math.max(0, state.selectedIndex - 1);
+      state.needsRedraw = true;
+      break;
+    case "down":
+      state.selectedIndex = Math.min(
+        state.jobs.length - 1,
+        state.selectedIndex + 1,
+      );
+      state.needsRedraw = true;
+      break;
+    case "refresh":
+      state.needsRedraw = true;
+      void refresh();
+      break;
+  }
+}
+
+export function scheduleTuiPoll(
+  refresh: () => void | Promise<void>,
+  intervalMs: number,
+  schedule: IntervalScheduler = setInterval,
+): ReturnType<typeof setInterval> {
+  const timer = schedule(() => void refresh(), intervalMs);
+  timer.unref();
+  return timer;
+}
+
 async function fetchData(workspace: string, state: TuiState): Promise<void> {
   try {
     const [jobs, queue] = await Promise.all([
@@ -96,62 +145,51 @@ export async function startTui(
   };
 
   await fetchData(workspace, state);
-  hideCursor();
-
-  const stopKeyboard = startKeyboardListener((action: KeyAction) => {
-    switch (action) {
-      case "quit":
-        state.stopped = true;
-        break;
-      case "up":
-        state.selectedIndex = Math.max(0, state.selectedIndex - 1);
-        state.needsRedraw = true;
-        break;
-      case "down":
-        state.selectedIndex = Math.min(
-          state.jobs.length - 1,
-          state.selectedIndex + 1,
-        );
-        state.needsRedraw = true;
-        break;
-      case "refresh":
-        state.needsRedraw = true;
-        break;
-    }
-  });
-
-  process.once("SIGINT", () => {
+  const onSigint = (): void => {
     state.stopped = true;
-  });
+  };
+  let stopKeyboard: (() => void) | undefined;
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let drawTimer: ReturnType<typeof setInterval> | undefined;
+  let stopCheckTimer: ReturnType<typeof setInterval> | undefined;
 
-  // 3 秒轮询拉数据
-  const pollTimer = setInterval(() => fetchData(workspace, state), 3000);
-  pollTimer.unref();
+  hideCursor();
+  try {
+    stopKeyboard = startKeyboardListener((action: KeyAction) => {
+      handleTuiKey(action, state, () => fetchData(workspace, state));
+    });
+    process.once("SIGINT", onSigint);
 
-  // 每秒刷新显示（更新 elapsed）
-  const drawTimer = setInterval(() => {
-    if (state.needsRedraw) draw(state);
-  }, 1000);
-  drawTimer.unref();
+    // 按调用方配置的间隔轮询拉数据。
+    pollTimer = scheduleTuiPoll(
+      () => fetchData(workspace, state),
+      intervalMs,
+    );
 
-  // 初始绘制
-  draw(state);
+    // 每秒刷新显示（更新 elapsed）
+    drawTimer = setInterval(() => {
+      if (state.needsRedraw) draw(state);
+    }, 1000);
+    drawTimer.unref();
 
-  // 等待停止
-  await new Promise<void>((resolve) => {
-    const check = setInterval(() => {
-      if (state.stopped) {
-        clearInterval(check);
-        clearInterval(pollTimer);
-        clearInterval(drawTimer);
-        resolve();
-      }
-    }, 100);
-  });
+    // 初始绘制
+    draw(state);
 
-  stopKeyboard();
-  showCursor();
-  clearScreen();
-  moveCursor(0, 0);
-  console.log("CBX TUI 已退出。");
+    // 等待停止
+    await new Promise<void>((resolve) => {
+      stopCheckTimer = setInterval(() => {
+        if (state.stopped) resolve();
+      }, 100);
+    });
+  } finally {
+    if (stopCheckTimer) clearInterval(stopCheckTimer);
+    if (pollTimer) clearInterval(pollTimer);
+    if (drawTimer) clearInterval(drawTimer);
+    process.removeListener("SIGINT", onSigint);
+    stopKeyboard?.();
+    showCursor();
+    clearScreen();
+    moveCursor(0, 0);
+    console.log("CBX TUI 已退出。");
+  }
 }

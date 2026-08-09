@@ -117,6 +117,8 @@ const TERMINAL_STATUSES = new Set([
   "cancelled",
 ]);
 
+const PUBLIC_UI_PATHS = new Set(["/", "/style.css", "/app.js", "/healthz"]);
+
 /**
  * 从 events.ndjson 推导阶段时间线。兼容两套事件:
  * - 新格式(0.10.2+):job.state_changed 事件携带 status 维度
@@ -594,11 +596,10 @@ export function createWebUiServer(
       if (req.method !== "GET")
         return json(res, { error: "method not allowed" }, 405);
       const url = new URL(req.url ?? "/", `http://${host}:${port}`);
-      // /healthz 保持开放供健康检查；/ 首页保持开放（UI 外壳，API 调用仍需鉴权）。
+      // UI 外壳与 /healthz 保持开放；API 数据仍需鉴权。
       // /events 允许 query token (EventSource 无法设 Authorization header)。
       if (
-        url.pathname !== "/healthz" &&
-        url.pathname !== "/" &&
+        !PUBLIC_UI_PATHS.has(url.pathname) &&
         !isAuthorized(req, url, token, url.pathname === "/events")
       ) {
         res.writeHead(401, {

@@ -2,7 +2,7 @@ console.log('cbx-ui: script start, page loaded at', new Date().toISOString());
 var allWorkspaces=[];
 var currentWorkspace=null;
 var selected=null;
-function rowAttr(id){return String(id).replace(/[^\w-]/g,function(c){return'\\\\'+c})}
+function rowAttr(id){return String(id).replace(/[^\w-]/g,function(c){return'\\'+c})}
 function totalJobs(w){return Object.values(w.jobsByStatus||{}).reduce(function(a,b){return a+b;},0)}
 function fmt(iso){try{return new Date(iso).toLocaleTimeString()}catch(e){return iso}}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
@@ -95,16 +95,16 @@ function rowHtml(j){
   // 终态显示 totalSeconds,非终态用 createdAt 实时算 elapsed。
   var terminal=['done','failed','review_failed','cancelled','needs_fix'].indexOf(j.status)>=0;
   var elapsed = terminal && j.totalSeconds != null ? (j.totalSeconds < 60 ? j.totalSeconds + 's' : Math.floor(j.totalSeconds/60) + 'm ' + (j.totalSeconds%60) + 's') : fmtElapsed(j.createdAt);
-  return '<tr class="'+cls+'" data-id="'+esc(j.jobId)+'" data-created="'+esc(j.createdAt||'')+'"><td><button type="button" class="job-select">'+esc(j.jobId)+'</button></td><td class="s-'+j.status+'">'+j.status+'</td><td>'+esc(j.phase||'')+'</td><td>'+j.attempt+'</td><td class="v-'+(j.reviewVerdict||'')+'">'+(j.reviewVerdict||'\\u2014')+'</td><td class="elapsed">'+elapsed+'</td><td>'+fmt(j.updatedAt)+'</td></tr>';
+  return '<tr class="'+cls+'" data-id="'+esc(j.jobId)+'" data-created="'+esc(j.createdAt||'')+'" data-terminal="'+terminal+'"><td><button type="button" class="job-select">'+esc(j.jobId)+'</button></td><td class="s-'+j.status+'">'+j.status+'</td><td>'+esc(j.phase||'')+'</td><td>'+j.attempt+'</td><td class="v-'+(j.reviewVerdict||'')+'">'+(j.reviewVerdict||'—')+'</td><td class="elapsed">'+elapsed+'</td><td>'+fmt(j.updatedAt)+'</td></tr>';
 }
 function selectJob(id){
   selected=(selected===id)?null:id;
   refresh();
-  if(selected){loadDetail(selected);}else{document.querySelector('#detail-body').innerHTML='<p class="hint">\\u70b9\\u51fb\\u4e0a\\u65b9\\u4efb\\u52a1\\u884c\\u67e5\\u770b\\u8be6\\u60c5</p>';}
+  if(selected){loadDetail(selected);}else{document.querySelector('#detail-body').innerHTML='<p class="hint">点击上方任务行查看详情</p>';}
 }
 async function loadDetail(id){
   var body=document.querySelector('#detail-body');
-  body.innerHTML='<p>\\u52a0\\u8f7d\\u4e2d\\u2026</p>';
+  body.innerHTML='<p>加载中…</p>';
   // Stage chain (top): 受 result.json.stages 驱动,失败/通过着色
   var result=null;
   try{result=JSON.parse(await cbxFetch('/api/jobs/'+id+'/artifact/result.json').then(function(r){return r.text()}));}catch(e){}
@@ -114,7 +114,7 @@ async function loadDetail(id){
     result.stages.forEach(function(s,i){
       var v=s.reviewVerdict||(s.exitCode===0?(s.testExitCode===0||s.testExitCode===null?'PASS':'FAIL'):'FAIL');
       var cls=v==='PASS'?'st-pass':v==='FAIL'?'st-fail':'st-skip';
-      if(i>0)stageHtml+='<span class="arrow">\\u2192</span>';
+      if(i>0)stageHtml+='<span class="arrow">→</span>';
       stageHtml+='<span class="stage '+cls+'">'+esc(s.name)+' / '+esc(s.executor)+(v?' / '+v:'')+'</span>';
     });
     stageHtml+='</div>';
@@ -122,9 +122,9 @@ async function loadDetail(id){
   body.innerHTML=stageHtml+'<div class="tabs" id="detail-tabs"></div><div class="tab-panels" id="detail-panels"></div>';
   // 动态 tab 列表
   var tabs=[
-    {name:'overview',label:'\\u6982\\u89c8'},
-    {name:'timeline',label:'\\u9636\\u6bb5\\u65f6\\u95f4\\u7ebf'},
-    {name:'executor',label:'\\u6267\\u884c\\u5668'},
+    {name:'overview',label:'概览'},
+    {name:'timeline',label:'阶段时间线'},
+    {name:'executor',label:'执行器'},
     {name:'diff',label:'Diff'},
     {name:'test',label:'Test'},
     {name:'review',label:'Review'},
@@ -132,7 +132,7 @@ async function loadDetail(id){
   var tabsEl=document.querySelector('#detail-tabs');
   var panelsEl=document.querySelector('#detail-panels');
   tabsEl.innerHTML=tabs.map(function(t,i){return '<button type="button" class="tab'+(i===0?' active':'')+'" data-tab="'+t.name+'">'+t.label+'</button>';}).join('');
-  panelsEl.innerHTML=tabs.map(function(t,i){return '<div class="tab-panel'+(i===0?' active':'')+'" data-tab="'+t.name+'">\\u52a0\\u8f7d\\u4e2d\\u2026</div>';}).join('');
+  panelsEl.innerHTML=tabs.map(function(t,i){return '<div class="tab-panel'+(i===0?' active':'')+'" data-tab="'+t.name+'">加载中…</div>';}).join('');
   tabsEl.querySelectorAll('.tab').forEach(function(btn){
     btn.addEventListener('click',function(){
       tabsEl.querySelectorAll('.tab').forEach(function(x){x.classList.remove('active');});
@@ -148,46 +148,46 @@ async function loadDetail(id){
 async function loadTab(id,tab,panelsEl,result){
   var panel=panelsEl.querySelector('.tab-panel[data-tab="'+tab+'"]');
   if(!panel)return;
-  panel.innerHTML='\\u52a0\\u8f7d\\u4e2d\\u2026';
+  panel.innerHTML='加载中…';
   try{
     if(tab==='overview'){
       var html='';
       if(result){
-        html+='<div><b>\\u72b6\\u6001\\uff1a</b>'+esc(result.status||'\\u2014')+'</div>';
+        html+='<div><b>状态：</b>'+esc(result.status||'—')+'</div>';
         if(result.handback)html+='<pre class="art-view" style="display:block;max-height:240px">'+esc(result.handback)+'</pre>';
-        if(result.evidenceArtifacts)html+='<div style="margin-top:6px;color:#888">\\u8bc1\\u636e\\u5237\\u65b0\\u5728 Diff / Test / Review \\u9009\\u9879\\u5361\\u3002</div>';
+        if(result.evidenceArtifacts)html+='<div style="margin-top:6px;color:#888">证据刷新在 Diff / Test / Review 选项卡。</div>';
       } else {
-        html='<p class="hint">\\u4efb\\u52a1\\u5c1a\\u672a\\u751f\\u6210 result.json\\u3002</p>';
+        html='<p class="hint">任务尚未生成 result.json。</p>';
       }
       panel.innerHTML=html;
     }
     else if(tab==='timeline'){
       var tl=await cbxFetch('/api/jobs/'+id+'/timeline').then(function(r){return r.json()});
-      if(!tl.stages||!tl.stages.length){panel.innerHTML='<p class="hint">\\u65e0\\u9636\\u6bb5\\u8f6c\\u6362\\u8bb0\\u5f55\\u3002</p>';return;}
+      if(!tl.stages||!tl.stages.length){panel.innerHTML='<p class="hint">无阶段转换记录。</p>';return;}
       var maxMs=Math.max.apply(null,tl.stages.map(function(s){return s.durationMs||0;}).concat([1000]));
       var rows=tl.stages.map(function(s){
-        var dur=s.durationMs!=null?(s.durationMs<1000?s.durationMs+'ms':(s.durationMs/1000).toFixed(1)+'s'):'\\u8fdb\\u884c\\u4e2d';
+        var dur=s.durationMs!=null?(s.durationMs<1000?s.durationMs+'ms':(s.durationMs/1000).toFixed(1)+'s'):'进行中';
         var w=s.durationMs?Math.max(4,Math.round((s.durationMs/maxMs)*320)):4;
         var color=s.name==='done'?'#70e090':['failed','review_failed','cancelled'].indexOf(s.name)>=0?'#ff8d8d':s.name==='running'?'#ffd166':'#5b8def';
         var label=s.phase?s.name+' / '+s.phase:s.name;
         return '<div class="timeline-row"><div class="timeline-name">'+esc(label)+'</div><div class="timeline-bar" style="width:'+w+'px;background:'+color+'"></div><div class="timeline-dur">'+dur+'</div><div class="timeline-at">'+esc((s.startedAt||'').slice(11,19))+'</div></div>';
       }).join('');
-      panel.innerHTML='<div style="margin-bottom:8px;color:#888">\\u5f53\\u524d\\u9636\\u6bb5\\uff1a<b>'+esc(tl.currentStage||'\\u2014')+'</b> \\u00b7 \\u5df2\\u8dd1 '+tl.elapsedSec+'s</div>'+rows;
+      panel.innerHTML='<div style="margin-bottom:8px;color:#888">当前阶段：<b>'+esc(tl.currentStage||'—')+'</b> · 已跑 '+tl.elapsedSec+'s</div>'+rows;
     }
     else if(tab==='executor'){
       var ex=await cbxFetch('/api/jobs/'+id+'/executor').then(function(r){return r.json()});
       var pulse=ex.alive===true?'pulse-alive':ex.alive===false?'pulse-dead':'pulse-unknown';
       var html='<div class="exec-card">';
-      html+='<div><div class="field-label">PID</div><div class="field-value"><span class="pulse '+pulse+'"></span>'+(ex.pid!=null?ex.pid:'\\u2014')+'</div></div>';
-      html+='<div><div class="field-label">\\u8fdb\\u7a0b\\u72b6\\u6001</div><div class="field-value">'+(ex.alive===true?'\\u6d3b\\u8dc3':ex.alive===false?'\\u5df2\\u9000\\u51fa':'\\u672a\\u77e5')+'</div></div>';
-      html+='<div><div class="field-label">\\u5fc3\\u8df3</div><div class="field-value">'+(ex.heartbeatAt?ex.heartbeatAt.slice(11,19)+' ('+ex.heartbeatStaleSec+'s \\u524d)':ex.heartbeatAt===null?'\\u65e0\\u6587\\u4ef6':'\\u2014')+'</div></div>';
-      html+='<div><div class="field-label">\\u5df2\\u8dd1</div><div class="field-value">'+(ex.elapsedSec!=null?ex.elapsedSec+'s':'\\u2014')+'</div></div>';
+      html+='<div><div class="field-label">PID</div><div class="field-value"><span class="pulse '+pulse+'"></span>'+(ex.pid!=null?ex.pid:'—')+'</div></div>';
+      html+='<div><div class="field-label">进程状态</div><div class="field-value">'+(ex.alive===true?'活跃':ex.alive===false?'已退出':'未知')+'</div></div>';
+      html+='<div><div class="field-label">心跳</div><div class="field-value">'+(ex.heartbeatAt?ex.heartbeatAt.slice(11,19)+' ('+ex.heartbeatStaleSec+'s 前)':ex.heartbeatAt===null?'无文件':'—')+'</div></div>';
+      html+='<div><div class="field-label">已跑</div><div class="field-value">'+(ex.elapsedSec!=null?ex.elapsedSec+'s':'—')+'</div></div>';
       html+='</div>';
       if(ex.command)html+='<div class="cmd">'+esc(ex.command)+'</div>';
       // 增量 agent.log 拉取(默认读尾部 256KB)
       var log=await cbxFetch('/api/jobs/'+id+'/agent.log?since=0').then(function(r){return r.json()});
       if(log.content){
-        html+='<h3 style="margin:14px 0 6px;color:#9ecbff">agent.log \\u5c3e\\u90e8</h3>';
+        html+='<h3 style="margin:14px 0 6px;color:#9ecbff">agent.log 尾部</h3>';
         html+='<pre class="art-view" style="display:block;max-height:240px;white-space:pre-wrap">'+esc(log.content)+'</pre>';
       }
       panel.innerHTML=html;
@@ -198,14 +198,14 @@ async function loadTab(id,tab,panelsEl,result){
     }
     else if(tab==='test'){
       try{var txt=await cbxFetch('/api/jobs/'+id+'/artifact/test.log').then(function(r){return r.text()});panel.innerHTML='<pre class="art-view" style="display:block;max-height:380px;white-space:pre-wrap">'+esc(txt)+'</pre>';}
-      catch(e){panel.innerHTML='<p class="hint">\\u4efb\\u52a1\\u672a\\u8fd0\\u884c\\u6d4b\\u8bd5\\u6216\\u8fd8\\u6ca1\\u6d4b\\u8bd5\\u65e5\\u5fd7\\u3002</p>';}
+      catch(e){panel.innerHTML='<p class="hint">任务未运行测试或还没测试日志。</p>';}
     }
     else if(tab==='review'){
       try{var txt=await cbxFetch('/api/jobs/'+id+'/artifact/review.md').then(function(r){return r.text()});panel.innerHTML='<pre class="art-view" style="display:block;max-height:380px;white-space:pre-wrap">'+esc(txt)+'</pre>';}
-      catch(e){panel.innerHTML='<p class="hint">\\u4efb\\u52a1\\u672a\\u542f\\u7528 review \\u6216\\u5ba1\\u67e5\\u8fd8\\u5728\\u8fdb\\u884c\\u3002</p>';}
+      catch(e){panel.innerHTML='<p class="hint">任务未启用 review 或审查还在进行。</p>';}
     }
   } catch(e){
-    panel.innerHTML='<p class="hint">\\u52a0\\u8f7d\\u5931\\u8d25\\uff1a'+esc(e instanceof Error?e.message:String(e))+'</p>';
+    panel.innerHTML='<p class="hint">加载失败：'+esc(e instanceof Error?e.message:String(e))+'</p>';
   }
 }
 document.querySelector('#jobs').addEventListener('click',function(e){
@@ -214,14 +214,16 @@ document.querySelector('#jobs').addEventListener('click',function(e){
 loadWorkspaces().then(refresh);
 setInterval(refresh,1500);
 // 每秒刷新所有行耗时(不重新拉数据,仅前端算 elapsed)
-setInterval(function(){
+function refreshElapsedRows(){
   document.querySelectorAll('tr.job').forEach(function(row){
+    if(row.getAttribute('data-terminal')==='true')return;
     var created=row.getAttribute('data-created');
     if(!created)return;
     var cell=row.querySelector('.elapsed');if(!cell)return;
     cell.textContent=fmtElapsed(created);
   });
-},1000);
+}
+setInterval(refreshElapsedRows,1000);
 var stream=document.querySelector('#stream');
 	var es=new EventSource('/events?token='+encodeURIComponent(window.CBX_TOKEN||''));
 es.onmessage=function(e){
@@ -233,12 +235,11 @@ es.onmessage=function(e){
   div.className='evt';
   var txt='<span class="t">'+fmt(d.at)+'</span>';
   if(p.jobId)txt+='<span class="s-'+status+'"><b>'+esc(p.jobId)+'</b></span> ';
-  if(p.previousStatus)txt+='<span class="s-'+p.previousStatus+'">'+p.previousStatus+'</span> \\u2192 <span class="s-'+status+'">'+status+'</span>';
+  if(p.previousStatus)txt+='<span class="s-'+p.previousStatus+'">'+p.previousStatus+'</span> → <span class="s-'+status+'">'+status+'</span>';
   else if(status)txt+='<span class="s-'+status+'">'+status+'</span>';
-  if(p.phase)txt+=' \\u00b7 '+esc(p.phase);
+  if(p.phase)txt+=' · '+esc(p.phase);
   div.innerHTML=txt;
   stream.appendChild(div);
   stream.scrollTop=stream.scrollHeight;
   while(stream.children.length>200)stream.removeChild(stream.firstChild);
 };
-</script></body></html>`;
