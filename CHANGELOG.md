@@ -2,6 +2,8 @@
 
 This project follows [Semantic Versioning](https://semver.org/). User-visible behavior changes, security fixes, and migration requirements are recorded here before a release.
 
+## 0.11.0 — 2026-08-09
+
 ## Unreleased
 
 - Feature: SSE 事件 Last-Event-ID 回放。`publishEvent` 为每个事件分配 workspace 内单调递增的 `seq`（持久化于 SQLite `metadata` 表，进程重启后续编）。Web UI `/events` 端点支持标准 `Last-Event-ID` 头与 `?last_event_id=` query 参数：新客户端连接时自动回放 `seq > lastEventId` 的历史事件（上限默认 1000 条，超限发 `replay_truncated` 警告并只补最近 N 条）。EventSource 断线重连自动携带 lastEventId，无需前端改动。无 lastEventId 时行为不变（只推新事件）。旧格式事件（无 seq 字段）被跳过。
