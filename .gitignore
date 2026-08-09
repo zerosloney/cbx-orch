@@ -3,6 +3,17 @@ dist/
 __pycache__/
 *.pyc
 .zcode/
+.agents/
+.agent/
+.opencode/
+.codex/
+.cursor/
+.claude/
+.continue/
+.codebuddy/
+.gemini/
+.omp/
+.kilocode/
 .cbx/
 .cbx-worktrees/
 sbom.cdx.json
