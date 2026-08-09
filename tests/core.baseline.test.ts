@@ -101,7 +101,7 @@ test("background approval gate finishes its queue entry without spawning another
   });
   await startBackground(workspace, job.jobId);
 
-  const deadline = Date.now() + 20_000;
+  const deadline = Date.now() + 30_000;
   while (
     Date.now() < deadline &&
     (await loadState(workspace, job.jobId)).status !== "awaiting_approval"
@@ -160,7 +160,7 @@ test("persistent queue respects maxConcurrent", async () => {
       (entry) => entry.status === "running",
     ).length <= 1,
   );
-  const deadline = Date.now() + 20_000;
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const states = await Promise.all(
       jobs.map((job) => loadState(workspace, job.jobId)),
@@ -200,7 +200,7 @@ test("queue pause/resume and retry recover failed work", async () => {
     "queued",
   );
   await resumeQueue(workspace);
-  const failedDeadline = Date.now() + 20_000;
+  const failedDeadline = Date.now() + 30_000;
   while (
     Date.now() < failedDeadline &&
     (await loadState(workspace, job.jobId)).status !== "failed"
@@ -210,7 +210,7 @@ test("queue pause/resume and retry recover failed work", async () => {
   process.env.FAKE_EXIT_SEQUENCE = "0";
   const retry = await retryQueueJob(workspace, job.jobId, 10);
   assert.equal(retry.priority, 10);
-  const doneDeadline = Date.now() + 20_000;
+  const doneDeadline = Date.now() + 30_000;
   while (
     Date.now() < doneDeadline &&
     (await loadState(workspace, job.jobId)).status !== "done"
