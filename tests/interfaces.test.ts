@@ -31,11 +31,19 @@ test("Web UI exposes read-only local routes without wildcard CORS", async () => 
     assert.equal(page.status, 200);
     const pageHtml = await page.text();
     assert.match(pageHtml, /CBX Orchestrator/);
-    assert.match(pageHtml, /<button type="button" class="job-select">/);
-    // commit 5: detail panel is now tabbed; verify the tab-related CSS ships with the page.
-    assert.match(pageHtml, /\.tabs\{/);
-    assert.match(pageHtml, /\.tab-panel/);
-    assert.match(pageHtml, /timeline-row/);
+    assert.match(pageHtml, /<link rel="stylesheet" href="\/style\.css">/);
+    assert.match(pageHtml, /<script src="\/app\.js">/);
+    // 静态资源可正常访问
+    const css = await fetch(`http://127.0.0.1:${port}/style.css`);
+    assert.equal(css.status, 200);
+    const cssText = await css.text();
+    assert.match(cssText, /\.tabs\{/);
+    assert.match(cssText, /\.tab-panel/);
+    assert.match(cssText, /timeline-row/);
+    const js = await fetch(`http://127.0.0.1:${port}/app.js`);
+    assert.equal(js.status, 200);
+    const jsText = await js.text();
+    assert.match(jsText, /job-select/);
     const jobs = await fetch(`http://127.0.0.1:${port}/api/jobs`);
     assert.equal(jobs.headers.get("access-control-allow-origin"), null);
     assert.equal((await jobs.json() as Array<{ jobId: string }>)[0].jobId, job.jobId);

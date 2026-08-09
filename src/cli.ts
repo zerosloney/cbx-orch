@@ -5,6 +5,7 @@ import { approveJob, cancelJob, cleanupWorktree, dispatchQueue, createJob, execu
 import { runReviewGate, stopReviewGateHook } from "./review-gate.js";
 import { runTui, startWebUi } from "./ui.js";
 import { parseCliArgs, type CliArgs } from "./cli-args.js";
+import { isInteractive, renderHealth, renderJobDetail, renderJobsTable, renderQueueTable } from "./formatting.js";
 
 /** 需要 jobId 的子命令统一从位置参数取，缺失时给出明确用法提示而非 undefined 透传。 */
 function requireJobId(parsed: CliArgs, command: string): string {
@@ -130,17 +131,36 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "mcp") { const { runMcpServer } = await import("./mcp-server.js"); runMcpServer(); return; }
-  if (command === "status") { print(await loadState(workspace, requireJobId(parsed, command))); return; }
-  if (command === "list") { print(await listJobs(workspace)); return; }
+  if (command === "status") {
+    const state = await loadState(workspace, requireJobId(parsed, command));
+    if (isInteractive() && !parsed.has("--json")) console.log(renderJobDetail(state));
+    else print(state);
+    return;
+  }
+  if (command === "list") {
+    const jobs = await listJobs(workspace);
+    if (isInteractive() && !parsed.has("--json")) console.log(renderJobsTable(jobs));
+    else print(jobs);
+    return;
+  }
   if (command === "queue") {
     const action = parsed.positionals[0];
     if (action === "pause") print(await pauseQueue(workspace));
     else if (action === "resume") print(await resumeQueue(workspace));
-    else print(await listQueue(workspace));
+    else {
+      const q = await listQueue(workspace);
+      if (isInteractive() && !parsed.has("--json")) console.log(renderQueueTable(q));
+      else print(q);
+    }
     return;
   }
   if (command === "dispatch") { print(await dispatchQueue(workspace)); return; }
-  if (command === "health" || command === "metrics") { print(await health(workspace)); return; }
+  if (command === "health" || command === "metrics") {
+    const h = await health(workspace);
+    if (isInteractive() && !parsed.has("--json")) console.log(renderHealth(h));
+    else print(h);
+    return;
+  }
   if (command === "serve") {
     const service = await serveQueue(workspace, parsed.intOption("--interval-ms", 30000, { min: 50 })!);
     print({ workspace, status: "serving" });
@@ -163,10 +183,19 @@ async function main(): Promise<void> {
     const jobId = requireJobId(parsed, command);
     const interval = parsed.intOption("--interval-ms", 1000, { min: 1 })!;
     let last = "";
+    const useTable = isInteractive() && !parsed.has("--json");
     while (true) {
       const state = await loadState(workspace, jobId);
       const snapshot = JSON.stringify(state);
-      if (snapshot !== last) { print(state); last = snapshot; }
+      if (snapshot !== last) {
+        if (useTable) {
+          process.stdout.write("\x1b[2J\x1b[H");
+          console.log(renderJobDetail(state));
+        } else {
+          print(state);
+        }
+        last = snapshot;
+      }
       if (["done", "failed", "needs_fix", "review_failed", "cancelled"].includes(state.status)) {
         if (parsed.has("--ci") && state.status !== "done") process.exit(2);
         return;
