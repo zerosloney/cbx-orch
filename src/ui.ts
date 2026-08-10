@@ -628,19 +628,9 @@ export function createWebUiServer(
         const js = await readFile(path.join(resolveUiDir(), "app.js"), "utf8");
         return text(res, js, "application/javascript; charset=utf-8");
       }
+      // /events 鉴权已由上方统一 gate（isAuthorized, allowQueryToken=true）处理；
+      // 此处不再二次校验，避免未配置 token 时把合法的无 token SSE 请求误判为 401。
       if (url.pathname === "/events") {
-        const bearer = req.headers["authorization"];
-        const bearerToken =
-          bearer && bearer.startsWith("Bearer ") ? bearer.slice(7) : undefined;
-        const queryToken = url.searchParams.get("token");
-        const presented = bearerToken || queryToken;
-        if (!presented || (token && !constantTimeEqual(presented, token))) {
-          res.writeHead(401, {
-            "www-authenticate": "Bearer",
-            "content-type": "application/json; charset=utf-8",
-          });
-          return res.end(JSON.stringify({ error: "unauthorized" }));
-        }
         res.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-cache",

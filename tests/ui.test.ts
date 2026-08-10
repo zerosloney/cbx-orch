@@ -3,9 +3,11 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import type { AddressInfo } from "node:net";
 import { jobDir } from "../src/core.js";
 import { handleTuiKey, scheduleTuiPoll, startTui } from "../src/tui/index.js";
-import { buildTimeline, readAgentLogIncremental, readExecutorStatus } from "../src/ui.js";
+import { truncateDisplay } from "../src/tui/components/job-table.js";
+import { buildTimeline, createWebUiServer, readAgentLogIncremental, readExecutorStatus } from "../src/ui.js";
 
 test("TUI polling honors intervalMs and refresh fetches immediately", () => {
   let scheduledInterval: number | undefined;
@@ -47,6 +49,38 @@ test("TUI polling honors intervalMs and refresh fetches immediately", () => {
   });
   assert.equal(refreshes, 2);
   assert.equal(state.needsRedraw, true);
+});
+
+// 回归：空 jobs 下 "down" 不能让 selectedIndex 变为 -1（Math.min(-1,...) 的陷阱）。
+//      fetchData 只重置 >= length，不处理负数，会留下脏索引导致后续高亮错位。
+test("handleTuiKey down on empty jobs keeps selectedIndex >= 0", () => {
+  const state = {
+    jobs: [],
+    selectedIndex: 0,
+    stopped: false,
+    needsRedraw: false,
+  };
+  handleTuiKey("down", state, () => {});
+  assert.equal(state.selectedIndex, 0);
+  assert.equal(state.needsRedraw, true);
+});
+
+// 回归：truncateDisplay 必须正确处理 ANSI 转义——转义序列不计显示宽度但原样保留。
+//      旧实现逐码元 stripAnsi(ch) 对单码元无效，会把 \x1b[31m 的 5 个码元各计 1 宽，
+//      导致带色串提前触发截断 + 省略号位置错位。
+test("truncateDisplay strips ANSI when measuring width but preserves escapes", () => {
+  // 纯文本无需截断（宽度 <= width 原样返回）
+  assert.equal(truncateDisplay("hello", 10), "hello");
+  assert.equal(truncateDisplay("abcdefghij", 10), "abcdefghij"); // 正好填满
+  // 纯文本需截断：width=9 截到 8 文本 + …（共 9 宽）
+  assert.equal(truncateDisplay("abcdefghij", 9), "abcdefgh…");
+  // 带 ANSI：\x1b[31m(5码元,0宽) + abcdefghij(10宽)。width=9 应截到 8 宽文本 + …，ANSI 前缀保留。
+  const colored = "\x1b[31mabcdefghij\x1b[0m";
+  const out = truncateDisplay(colored, 9);
+  assert.equal(out, "\x1b[31mabcdefgh…");
+  // 截断结果显示宽度应 = width（省略号占 1，文本占 width-1）
+  const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+  assert.equal(stripAnsi(out).length, 9);
 });
 
 test("TUI removes its SIGINT listener after keyboard exit", async () => {
@@ -171,4 +205,21 @@ test("readAgentLogIncremental returns empty content for missing log and trims ov
   assert.equal(result.truncated, true);
   assert.equal(result.content.length, 4096);
   assert.equal(result.nextOffset, huge.length);
+});
+
+// 回归：未配置 token 时 /events 必须放行（前端 EventSource 无法带 Authorization header，
+//      只发 ?token=空串）。曾因 /events 内冗余二次鉴权把无 token 请求误判为 401，导致 SSE 断流。
+test("SSE /events allows unauthenticated access when no token is configured", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-ui-noauth-sse-"));
+  const server = createWebUiServer(workspace, "127.0.0.1", 0);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const sse = await fetch(`http://127.0.0.1:${port}/events`);
+    assert.equal(sse.status, 200);
+    assert.equal(sse.headers.get("content-type"), "text/event-stream");
+    sse.body?.cancel();
+  } finally {
+    server.close();
+  }
 });

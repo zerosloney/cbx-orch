@@ -49,9 +49,10 @@ export function handleTuiKey(
       state.needsRedraw = true;
       break;
     case "down":
-      state.selectedIndex = Math.min(
-        state.jobs.length - 1,
-        state.selectedIndex + 1,
+      // 下界 0：空 jobs 时 jobs.length-1=-1，Math.min 会得 -1，需 clamp。
+      state.selectedIndex = Math.max(
+        0,
+        Math.min(state.jobs.length - 1, state.selectedIndex + 1),
       );
       state.needsRedraw = true;
       break;
@@ -101,23 +102,23 @@ async function fetchData(workspace: string, state: TuiState): Promise<void> {
 }
 
 function draw(state: TuiState): void {
-  const { rows } = getSize();
+  const { rows, cols } = getSize();
   clearScreen();
   moveCursor(0, 0);
 
   // 状态栏 1 行
   console.log(renderStatusBar(state.queue, state.gitBranch));
 
-  // 表格：rows - 8（状态栏1 + 表头2 + 详情4 + 提示1）
-  const tableHeight = Math.max(5, rows - 8);
+  // 详情面板：先算行数（无选中1行；选中4行；含error5行），动态决定表格高度避免小屏溢出。
+  const selectedJob = state.jobs[state.selectedIndex];
+  const detail = renderDetailPane(selectedJob);
+  const detailLines = detail.split("\n").length;
+  // 表格总占 = 表头2 + 数据 tableHeight + 溢出标记0/1；其余固定 = 状态栏1 + 空行2 + 详情 + 提示1
+  const tableHeight = Math.max(3, rows - detailLines - 7);
   const rowsData = buildRows(state.jobs);
-  const { cols } = getSize();
   const table = renderJobTable(rowsData, state.selectedIndex, tableHeight, cols);
   console.log(table);
 
-  // 详情面板
-  const selectedJob = state.jobs[state.selectedIndex];
-  const detail = renderDetailPane(selectedJob);
   console.log("\n" + detail);
 
   // 底部提示
@@ -180,6 +181,7 @@ export async function startTui(
       stopCheckTimer = setInterval(() => {
         if (state.stopped) resolve();
       }, 100);
+      stopCheckTimer.unref();
     });
   } finally {
     if (stopCheckTimer) clearInterval(stopCheckTimer);

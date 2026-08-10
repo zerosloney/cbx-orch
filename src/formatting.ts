@@ -36,7 +36,7 @@ function padDisplayEnd(s: string, width: number): string {
   return s + " ".repeat(width - len);
 }
 
-function fmtElapsed(iso: string | undefined | null): string {
+export function fmtElapsed(iso: string | undefined | null): string {
   if (!iso) return "—";
   const ms = Date.now() - Date.parse(iso);
   if (!Number.isFinite(ms) || ms < 0) return "—";
