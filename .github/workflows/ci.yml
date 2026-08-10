@@ -13,7 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22, 24]
+        # Node 20 runner 已被 GitHub Actions 废弃，且其 --experimental-test-coverage
+        # 在嵌套子目录（tui/components/）的报告渲染存在崩溃 bug。保留 22/24 两个 LTS。
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
