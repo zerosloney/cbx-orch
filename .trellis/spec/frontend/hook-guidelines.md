@@ -27,8 +27,11 @@ Queue operations are also keyboard-driven and go through the same `handleTuiKey`
 
 - `p` — pause queue (`pauseQueue`), `u` — resume queue (`resumeQueue`)
 - `x` — cancel the selected job (`cancelJob`); ignored when no job is selected
-- Pause/resume toggle the local `queuePaused` flag synchronously for instant status feedback, then invoke the queue operation and re-fetch on settlement.
-- `handleTuiKey` takes an optional `queueAction` callback so tests can assert the dispatched action and jobId without a real queue.
+- `a` — approve the selected `awaiting_approval` job (`approveJob`, then `startBackground` when status returns `queued`)
+- `y` — retry the selected terminal-failure job (`retryQueueJob`; `failed`/`needs_fix`/`review_failed`/`cancelled`)
+- `n` — continue the selected `needs_fix`/`review_failed` job (`startBackground` with default message)
+
+Each action key filters by the selected job's status before dispatching; a mismatched status or empty selection is a no-op. Pause/resume toggle the local `queuePaused` flag synchronously for instant status feedback, then invoke the queue operation and re-fetch on settlement. `handleTuiKey` takes an optional `queueAction` callback so tests can assert the dispatched action and jobId without a real queue.
 
 ```ts
 // src/tui/index.ts

@@ -6,6 +6,10 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Feature: TUI 控制面补齐。新增 `a` 批准（awaiting_approval 任务，批准后 queued 自动 startBackground）、`y` 重试（失败终态）、`n` 继续（needs_fix/review_failed）；每个键按选中任务状态过滤，不匹配或无选中则忽略。详情面板扩展：选中任务显示 stage 链（name/executor/verdict，PASS/FAIL/skip 着色，来自 result.json.stages）与阶段时间线摘要（当前阶段/已跑秒数，复用 `buildTimeline`），数据为服务端投影。
+- Feature: MCP 新增 `cbx_clean` 工具（清理任务遗留 Git worktree，对应 CLI `cbx clean`）。响应 `{ job_id, cleaned: boolean }`，无 worktree 记录幂等返回 `cleaned:false` 不抛错。
+- Test: `tests/tui.test.ts` 增补 approve/retry/continue 键位状态过滤断言（4 例）+ renderDetailPane 带 timeline/stages 渲染断言（4 例）；`tests/mcp-migration.test.ts` 增补 cbx_clean 幂等行为与工具清单断言。总计 409 个测试全过。
+
 - Feature: Web UI 写操作。新增 POST 端点 `POST /api/jobs/:id/approve|cancel|retry|continue` 与 `POST /api/queue/pause|resume`（与 CLI/MCP 语义一致，continue 支持 `message`/`priority`/`refresh_baseline`/`extra_rounds` 参数，非法 `extra_rounds` 报 400）。任务详情面板按状态显示操作按钮（awaiting_approval→批准；运行/排队→取消；失败终态→重试/继续），队列卡片旁新增暂停/恢复按钮。写操作经 HttpOnly cookie 或 Bearer 鉴权，SameSite=Strict 阻止跨站携带。
 - Feature: Web UI token 鉴权加固。token 从 HTML 内嵌 `window.CBX_TOKEN` + SSE `?token=` 查询串改为 `cbx_token` HttpOnly cookie（SameSite=Strict，同源请求自动携带，JS/XSS 不可读、不出现在 URL）；curl/API 客户端仍支持 Bearer header，SSE 兼容旧客户端保留 query token。
 - Feature: TUI 队列操作。`p` 暂停队列 / `u` 恢复队列 / `x` 取消选中任务（空选中忽略），状态栏与操作提示同步。
