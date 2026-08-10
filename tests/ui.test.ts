@@ -114,6 +114,42 @@ test("TUI removes its SIGINT listener after keyboard exit", async () => {
   assert.equal(process.stdin.listenerCount("data"), dataListenerCount);
 });
 
+test("TUI with seeded job and events exits cleanly (event stream path)", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-tui-events-"));
+  const job = await createJob({
+    workspace,
+    task: "事件流",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "tui-events",
+  });
+  // 种子事件：fetchData 的 readEventsIncremental 会读取并推进游标
+  const dir = jobDir(workspace, job.jobId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, "events.ndjson"),
+    `${JSON.stringify({ event: "job.state_changed", jobId: job.jobId, status: "queued", at: new Date().toISOString() })}\n${JSON.stringify({ event: "job.state_changed", jobId: job.jobId, status: "running", at: new Date().toISOString() })}\n`,
+    "utf8",
+  );
+  const originalWrite = process.stdout.write;
+  const originalLog = console.log;
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  console.log = () => {};
+  const quitTimer = setInterval(() => {
+    process.stdin.emit("keypress", "", { name: "q", ctrl: false });
+  }, 25);
+  try {
+    await startTui(workspace, 100);
+  } finally {
+    clearInterval(quitTimer);
+    process.stdout.write = originalWrite;
+    console.log = originalLog;
+  }
+  // 事件流路径不崩溃、正常退出即可；增量游标逻辑由 readEventsIncremental 单测覆盖。
+});
+
 test("buildTimeline returns empty stages for a job with no events", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-ui-"));
   const jobId = "job-empty";

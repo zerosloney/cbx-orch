@@ -350,3 +350,103 @@ test("identifiers use crypto randomness and token comparison is constant-time", 
   const entry = await enqueueJob(workspace, job.jobId, "", 0);
   assert.match(entry.queueId, /^[0-9a-z]+-[0-9a-f]{6}$/);
 });
+
+// ---- cbx export：任务结果导出（text / markdown / 缺失降级） ----
+
+test("cbx export outputs text and markdown summaries for a finished job", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-export-"));
+  const job = await createJob({
+    workspace,
+    task: "导出测试",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "export-job",
+  });
+  // 写入最小 result.json 模拟已完成任务
+  const dir = path.join(workspace, ".cbx", "jobs", job.jobId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, "result.json"),
+    JSON.stringify({
+      status: "done",
+      phase: "done",
+      stages: [
+        {
+          name: "impl",
+          executor: "codebuddy",
+          exitCode: 0,
+          reviewVerdict: "PASS",
+        },
+      ],
+      acceptanceEvidence: [
+        { criterion: "功能可用", status: "evidence_available" },
+      ],
+      handback: "已完成实现",
+      updatedAt: new Date().toISOString(),
+    }),
+    "utf8",
+  );
+  const cliPath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "src",
+    "cli.js",
+  );
+  const text = spawnSync(
+    process.execPath,
+    [cliPath, "export", job.jobId, "--workspace", workspace],
+    { encoding: "utf8" },
+  );
+  assert.equal(text.status, 0, text.stderr);
+  assert.match(text.stdout, /export-job/);
+  assert.match(text.stdout, /impl \/ codebuddy \/ PASS/);
+  assert.match(text.stdout, /功能可用/);
+  assert.match(text.stdout, /已完成实现/);
+
+  const md = spawnSync(
+    process.execPath,
+    [
+      cliPath,
+      "export",
+      job.jobId,
+      "--workspace",
+      workspace,
+      "--format",
+      "markdown",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(md.status, 0, md.stderr);
+  assert.match(md.stdout, /^# 任务 export-job/m);
+  assert.match(md.stdout, /\| impl \| codebuddy \| PASS \|/);
+  assert.match(md.stdout, /- \[x\] 功能可用/);
+});
+
+test("cbx export falls back to basic state when result.json is missing", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-export-basic-"));
+  const job = await createJob({
+    workspace,
+    task: "无结果",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "export-basic",
+  });
+  const cliPath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "src",
+    "cli.js",
+  );
+  const out = spawnSync(
+    process.execPath,
+    [cliPath, "export", job.jobId, "--workspace", workspace],
+    { encoding: "utf8" },
+  );
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /export-basic/);
+  assert.match(out.stdout, /无 result\.json/);
+});

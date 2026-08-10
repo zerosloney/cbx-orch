@@ -18,6 +18,14 @@ export function now(): string {
   return new Date().toISOString();
 }
 
+export interface TaskTemplate {
+  task: string;
+  test?: string;
+  review?: boolean;
+  executor?: string;
+  isolated?: boolean;
+}
+
 export interface RuntimeConfig {
   testCommand?: string;
   review?: boolean;
@@ -34,6 +42,7 @@ export interface RuntimeConfig {
   ci?: { failOnReview?: boolean };
   executor?: string;
   reviewExecutor?: string;
+  templates?: Record<string, TaskTemplate>;
   execution?: { trustMode?: "trusted" | "untrusted" };
   plugins?: {
     enforce?: boolean;
@@ -148,6 +157,7 @@ export async function loadRuntimeConfig(
     "dependencyGuard",
     "ui",
     "context",
+    "templates",
   ]);
   optionalString(config.testCommand, "testCommand");
   optionalBoolean(config.review, "review");
@@ -299,6 +309,26 @@ export async function loadRuntimeConfig(
       known(budget, "context.tokenBudget", ["manager", "executor", "auditor"]);
       for (const role of ["manager", "executor", "auditor"] as const)
         optionalInteger(budget[role], `context.tokenBudget.${role}`, 100);
+    }
+  }
+  if (config.templates !== undefined) {
+    // 任务模板：task 必填非空字符串；可选字段类型校验；未知模板键拒绝（防拼写错误静默失效）。
+    const templates = object(config.templates, "templates");
+    for (const [name, value] of Object.entries(templates)) {
+      const tpl = object(value, `templates.${name}`);
+      known(tpl, `templates.${name}`, [
+        "task",
+        "test",
+        "review",
+        "executor",
+        "isolated",
+      ]);
+      if (typeof tpl.task !== "string" || !tpl.task.trim())
+        throw new Error(`templates.${name}.task 必须是必填的非空字符串。`);
+      optionalString(tpl.test, `templates.${name}.test`);
+      optionalBoolean(tpl.review, `templates.${name}.review`);
+      optionalString(tpl.executor, `templates.${name}.executor`);
+      optionalBoolean(tpl.isolated, `templates.${name}.isolated`);
     }
   }
   return config as RuntimeConfig;

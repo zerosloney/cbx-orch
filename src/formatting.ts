@@ -53,7 +53,7 @@ export function fmtElapsed(iso: string | undefined | null): string {
   );
 }
 
-function fmtTime(iso: string | undefined | null): string {
+export function fmtTime(iso: string | undefined | null): string {
   if (!iso) return "—";
   try {
     return new Date(iso).toLocaleTimeString();
@@ -207,4 +207,98 @@ export function renderHealth(result: {
     }
   }
   return lines.join("\n");
+}
+
+interface ExportResult {
+  status?: string;
+  phase?: string;
+  stages?: Array<{
+    name: string;
+    executor: string;
+    exitCode: number;
+    reviewVerdict?: string | null;
+  }>;
+  acceptanceEvidence?: Array<{ criterion: string; status: string }>;
+  error?: string | null;
+  handback?: string;
+  updatedAt?: string;
+}
+
+/** 截断长文本到指定行数（保留完整行）。 */
+function truncateLines(text: string | undefined, maxLines: number): string {
+  if (!text) return "";
+  const lines = text.split("\n").filter(Boolean);
+  if (lines.length <= maxLines) return lines.join("\n");
+  return lines.slice(0, maxLines).join("\n") + "\n…（已截断）";
+}
+
+export function renderExport(
+  state: JobState,
+  result: ExportResult | null,
+  format: "text" | "markdown",
+): string {
+  if (format === "text") {
+    const lines: string[] = [renderJobDetail(state)];
+    if (result) {
+      if (result.stages && result.stages.length) {
+        lines.push("");
+        lines.push(chalk.bold("Stages:"));
+        for (const s of result.stages)
+          lines.push(
+            `  ${s.name} / ${s.executor} / ${colorizeReview(String(s.reviewVerdict ?? (s.exitCode === 0 ? "PASS" : "FAIL")))}`,
+          );
+      }
+      if (result.acceptanceEvidence && result.acceptanceEvidence.length) {
+        lines.push("");
+        lines.push(chalk.bold("Acceptance:"));
+        for (const ev of result.acceptanceEvidence)
+          lines.push(
+            `  ${ev.status === "evidence_available" ? chalk.green("✓") : chalk.gray("✗")} ${ev.criterion}`,
+          );
+      }
+      const handback = truncateLines(result.handback, 15);
+      if (handback) {
+        lines.push("");
+        lines.push(chalk.bold("Handback:"));
+        lines.push(handback);
+      }
+    } else {
+      lines.push("");
+      lines.push(chalk.gray("（无 result.json，仅任务状态）"));
+    }
+    return lines.join("\n");
+  }
+  // markdown
+  const md: string[] = [`# 任务 ${state.jobId}`, ""];
+  md.push(`- 状态：\`${state.status}\``);
+  md.push(`- 阶段：\`${state.phase ?? "—"}\``);
+  md.push(`- 尝试次数：${state.attempt}`);
+  if (state.reviewVerdict) md.push(`- 审查：\`${state.reviewVerdict}\``);
+  if (state.error) md.push(`- 错误：\`${state.error}\``);
+  if (result) {
+    if (result.stages && result.stages.length) {
+      md.push("", "## Stages", "");
+      md.push("| Stage | Executor | Verdict |");
+      md.push("|-------|----------|---------|");
+      for (const s of result.stages)
+        md.push(
+          `| ${s.name} | ${s.executor} | ${s.reviewVerdict ?? (s.exitCode === 0 ? "PASS" : "FAIL")} |`,
+        );
+    }
+    if (result.acceptanceEvidence && result.acceptanceEvidence.length) {
+      md.push("", "## Acceptance", "");
+      for (const ev of result.acceptanceEvidence)
+        md.push(
+          `- [${ev.status === "evidence_available" ? "x" : " "}] ${ev.criterion}`,
+        );
+    }
+    const handback = truncateLines(result.handback, 15);
+    if (handback) {
+      md.push("", "## Handback", "");
+      md.push("```", handback, "```");
+    }
+  } else {
+    md.push("", "_（无 result.json，仅任务状态）_");
+  }
+  return md.join("\n");
 }

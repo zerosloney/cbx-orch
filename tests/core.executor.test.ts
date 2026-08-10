@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import {
   fakeAgent,
@@ -208,6 +209,54 @@ test("strict configuration rejects unknown and unsafe nested fields", async () =
   }
 });
 
+test("templates config accepts valid entries and rejects invalid shapes", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-tpl-schema-"));
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({
+      templates: {
+        bugfix: {
+          task: "修复 review.md 中的问题",
+          test: "npm test",
+          review: true,
+        },
+        feature: { task: "实现新功能", executor: "opencode" },
+      },
+    }),
+    "utf8",
+  );
+  const config = await loadConfig(workspace);
+  assert.equal(config.templates?.bugfix.task, "修复 review.md 中的问题");
+  assert.equal(config.templates?.bugfix.test, "npm test");
+  assert.equal(config.templates?.bugfix.review, true);
+  assert.equal(config.templates?.feature.executor, "opencode");
+
+  // 缺 task → 拒绝
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({ templates: { bad: { test: "npm test" } } }),
+    "utf8",
+  );
+  await assert.rejects(() => loadConfig(workspace), /templates\.bad\.task/);
+  // 未知模板键 → 拒绝
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({ templates: { bad: { task: "x", unknown: 1 } } }),
+    "utf8",
+  );
+  await assert.rejects(
+    () => loadConfig(workspace),
+    /templates\.bad 不支持字段/,
+  );
+  // 错类型 → 拒绝
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({ templates: { bad: { task: "x", review: "yes" } } }),
+    "utf8",
+  );
+  await assert.rejects(() => loadConfig(workspace), /templates\.bad\.review/);
+});
+
 test("retention prunes expired delivery failure artifacts and SQLite records together", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-retention-"));
   await mkdir(path.join(workspace, ".cbx"), { recursive: true });
@@ -273,4 +322,68 @@ test("paired state and queue write rolls back both records when queue update fai
   }
   assert.equal((await loadState(workspace, job.jobId)).status, "queued");
   assert.equal((await listQueue(workspace)).paused, true);
+});
+
+test("CLI --template expands task from config and unknown template errors", async () => {
+  const { workspace } = await setupFake();
+  const cliPath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "src",
+    "cli.js",
+  );
+  // 未配置模板 → 报错并提示
+  const missing = spawnSync(
+    process.execPath,
+    [
+      cliPath,
+      "run",
+      "--template",
+      "nope",
+      "--workspace",
+      workspace,
+      "--test",
+      'node -e "process.exit(0)"',
+      "--no-review",
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, CBX_CODEBUDDY: process.env.CBX_CODEBUDDY },
+    },
+  );
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /模板不存在：nope/);
+
+  // 配置模板 → start 用模板 task 创建 job 并返回 jobId
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({
+      templates: { bugfix: { task: "修复 review.md 中的问题" } },
+    }),
+    "utf8",
+  );
+  const ok = spawnSync(
+    process.execPath,
+    [
+      cliPath,
+      "start",
+      "--template",
+      "bugfix",
+      "--workspace",
+      workspace,
+      "--test",
+      'node -e "process.exit(0)"',
+      "--no-review",
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, CBX_CODEBUDDY: process.env.CBX_CODEBUDDY },
+    },
+  );
+  assert.equal(ok.status, 0, ok.stderr);
+  const created = JSON.parse(ok.stdout) as { jobId: string; status: string };
+  assert.equal(created.status, "queued");
+  // request.md 内容来自模板 task
+  const request = await readArtifact(workspace, created.jobId, "request.md");
+  assert.match(request, /修复 review\.md 中的问题/);
 });

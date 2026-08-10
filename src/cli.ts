@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { existsSync } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -27,6 +28,7 @@ import { runTui, startWebUi } from "./ui.js";
 import { parseCliArgs, type CliArgs } from "./cli-args.js";
 import {
   isInteractive,
+  renderExport,
   renderHealth,
   renderJobDetail,
   renderJobsTable,
@@ -93,17 +95,29 @@ async function main(): Promise<void> {
   const parsed = parseCliArgs(rest);
   const workspace = parsed.option("--workspace", ".")!;
   if (["run", "start"].includes(command)) {
-    let task = parsed.option("--task");
+    const fileConfig = await loadConfig(workspace);
+    // 任务模板：--template <name> 从 .cbx.json templates 展开。
+    // 优先级：命令行显式参数 > 模板值 > 配置文件默认值。
+    const templateName = parsed.option("--template");
+    const template = templateName
+      ? fileConfig.templates?.[templateName]
+      : undefined;
+    if (templateName && !template) {
+      const names = Object.keys(fileConfig.templates ?? {});
+      throw new Error(
+        `模板不存在：${templateName}${names.length ? `。可用：${names.join(", ")}` : "（未配置任何模板）"}`,
+      );
+    }
+    let task = parsed.option("--task") ?? template?.task;
     const taskFile = parsed.option("--task-file");
     if (taskFile) task = await readFile(taskFile, "utf8");
-    const fileConfig = await loadConfig(workspace);
     const defaults = mergeConfig(fileConfig, {
-      testCommand: parsed.option("--test"),
+      testCommand: parsed.option("--test") ?? template?.test,
       review: parsed.has("--review")
         ? true
         : parsed.has("--no-review")
           ? false
-          : undefined,
+          : template?.review,
       approvalBeforeComplete: parsed.has("--approval-before-complete")
         ? true
         : parsed.has("--no-approval-before-complete")
@@ -113,7 +127,7 @@ async function main(): Promise<void> {
         ? true
         : parsed.has("--no-isolated")
           ? false
-          : undefined,
+          : template?.isolated,
       timeoutMs: parsed.intOption("--timeout-ms", undefined, { min: 100 }),
       maxRetries: parsed.intOption("--max-retries", undefined, { min: 0 }),
       maxTurns: parsed.intOption("--max-turns", undefined, { min: 1 }),
@@ -125,7 +139,7 @@ async function main(): Promise<void> {
       permissionMode: parsed.has("--dangerously-skip-permissions")
         ? "dontAsk"
         : parsed.option("--permission-mode"),
-      executor: parsed.option("--executor"),
+      executor: parsed.option("--executor") ?? template?.executor,
       reviewExecutor: parsed.option("--review-executor"),
       autoBranch: parsed.has("--auto-branch")
         ? true
@@ -458,6 +472,21 @@ async function main(): Promise<void> {
     print({ jobId, cleaned: await cleanupWorktree(workspace, jobId) });
     return;
   }
+  if (command === "export") {
+    const jobId = requireJobId(parsed, command);
+    const format = (parsed.option("--format") ?? "text") as "text" | "markdown";
+    if (!["text", "markdown"].includes(format))
+      throw new Error("--format 必须是 text 或 markdown。");
+    const state = await loadState(workspace, jobId);
+    let result: Record<string, unknown> | null = null;
+    try {
+      result = JSON.parse(await readArtifact(workspace, jobId, "result.json"));
+    } catch {
+      /* 无 result.json：输出基本状态 */
+    }
+    console.log(renderExport(state, result, format as "text" | "markdown"));
+    return;
+  }
   if (command === "review-gate") {
     const result = await runReviewGate(workspace, {
       executor: parsed.option("--executor"),
@@ -499,7 +528,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    "用法：cbx run|start|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|review|continue|approve|retry|cancel|clean|watch|ui|tui|review-gate|stop-review-gate ...",
+    "用法：cbx run|start|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|watch|ui|tui|review-gate|stop-review-gate ...",
   );
 }
 

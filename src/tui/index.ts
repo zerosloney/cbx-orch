@@ -1,3 +1,4 @@
+import chalk from "chalk";
 import {
   clearScreen,
   getSize,
@@ -9,6 +10,8 @@ import { startKeyboardListener, type KeyAction } from "./keyboard.js";
 import { renderStatusBar } from "./components/status-bar.js";
 import { buildRows, renderJobTable } from "./components/job-table.js";
 import { renderDetailPane } from "./components/detail-pane.js";
+import { colorizeStatus } from "./theme.js";
+import { fmtTime } from "../formatting.js";
 import type { JobState, StageReport } from "../types.js";
 import type { QueueFile } from "../queue.js";
 import { buildTimeline, type JobTimeline } from "../ui.js";
@@ -19,6 +22,7 @@ import {
   listQueue,
   pauseQueue,
   readArtifact,
+  readEventsIncremental,
   resumeQueue,
   retryQueueJob,
   startBackground,
@@ -34,6 +38,7 @@ interface TuiState {
   stopped: boolean;
   needsRedraw: boolean;
   detail: { timeline: JobTimeline | null; stages: StageReport[] | null };
+  eventStream: { lines: string[]; offset: number };
 }
 
 interface TuiKeyState {
@@ -180,8 +185,24 @@ async function fetchData(workspace: string, state: TuiState): Promise<void> {
       } catch {
         /* 详情获取失败保留上一次 */
       }
+      // 事件流：增量游标拉取 events.ndjson，仅追加新事件（上限 5 条），失败静默保留上一次。
+      try {
+        const { events, next_offset } = await readEventsIncremental(
+          workspace,
+          selectedJob.jobId,
+          state.eventStream.offset,
+        );
+        const fresh = [...state.eventStream.lines, ...events];
+        state.eventStream = {
+          lines: fresh.slice(-5),
+          offset: next_offset,
+        };
+      } catch {
+        /* 事件流获取失败保留上一次 */
+      }
     } else {
       state.detail = { timeline: null, stages: null };
+      state.eventStream = { lines: [], offset: 0 };
     }
     state.needsRedraw = true;
   } catch {
@@ -204,8 +225,29 @@ function draw(state: TuiState): void {
     state.detail.timeline,
     state.detail.stages,
   );
-  const detailLines = detail.split("\n").length;
-  // 表格总占 = 表头2 + 数据 tableHeight + 溢出标记0/1；其余固定 = 状态栏1 + 空行2 + 详情 + 提示1
+  // 事件流面板：最多 5 行最近事件（时间 + 类型着色），并入详情行数计算以保持表格防溢出。
+  const eventLines: string[] = [];
+  if (state.eventStream.lines.length) {
+    eventLines.push(chalk.bold("事件:"));
+    for (const line of state.eventStream.lines) {
+      try {
+        const ev = JSON.parse(line) as {
+          at?: string;
+          event?: string;
+          status?: string;
+        };
+        const at = ev.at ? ` ${fmtTime(ev.at)}` : "";
+        const type = String(ev.event ?? "?");
+        const status =
+          typeof ev.status === "string" ? colorizeStatus(ev.status) : type;
+        eventLines.push(`  ${at} ${status}`);
+      } catch {
+        /* 跳过无法解析的事件行 */
+      }
+    }
+  }
+  const detailLines = detail.split("\n").length + eventLines.length;
+  // 表格总占 = 表头2 + 数据 tableHeight + 溢出标记0/1；其余固定 = 状态栏1 + 空行2 + 详情/事件 + 提示1
   const tableHeight = Math.max(3, rows - detailLines - 7);
   const rowsData = buildRows(state.jobs);
   const table = renderJobTable(
@@ -217,6 +259,7 @@ function draw(state: TuiState): void {
   console.log(table);
 
   console.log("\n" + detail);
+  if (eventLines.length) console.log("\n" + eventLines.join("\n"));
 
   // 底部提示
   console.log(
@@ -248,6 +291,7 @@ export async function startTui(
     stopped: false,
     needsRedraw: true,
     detail: { timeline: null, stages: null },
+    eventStream: { lines: [], offset: 0 },
   };
 
   await fetchData(workspace, state);
