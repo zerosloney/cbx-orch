@@ -29,7 +29,10 @@ if (testFiles.length === 0) {
 const result = spawnSync(process.execPath, ["--test", "--experimental-test-coverage", ...testFiles], {
   cwd: root,
   encoding: "utf8",
-  maxBuffer: 64 * 1024 * 1024,
+  // Node 20 的 V8 覆盖率插桩输出比 22/24 冗长（含 spawn 子进程的覆盖率行级数据），
+  // 64MB 在 Node 20 上会被静默截断（不报 ERR_CHILD_PROCESS_STDIO_MAXBUFFER），
+  // 导致 all files 汇总行丢失、脚本误判"未找到汇总行"。提到 256MB 留足余量。
+  maxBuffer: 256 * 1024 * 1024,
 });
 process.stdout.write(result.stdout ?? "");
 process.stderr.write(result.stderr ?? "");
