@@ -6,6 +6,11 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Feature: TUI 事件流面板。选中任务在详情下方显示最近 5 条事件（时间 + 类型着色，`job.state_changed` 显示状态），经 `readEventsIncremental` 增量游标拉取，不重读全量；并入详情行数计算保持小屏防溢出。
+- Feature: 任务模板。`.cbx.json` 新增 `templates`（strict schema：`task` 必填非空，可选 `test`/`review`/`executor`/`isolated`，未知键拒绝）。CLI `cbx run/start --template <name>` 展开模板，优先级：命令行显式参数 > 模板值 > 配置默认值；模板不存在报错并列出可用名。
+- Feature: 任务结果导出。`cbx export <jobId> [--format text|markdown]` 输出任务摘要（状态/阶段/stage 链/验收证据/handback 截断）；无 result.json 时降级输出基本状态。
+- Test: `tests/tui.test.ts`/`tests/ui.test.ts` 增补 TUI 事件流（种子事件端到端）；`tests/core.executor.test.ts` 增补 templates schema（接受/缺 task/未知键/错类型）+ CLI `--template` 展开；`tests/hardening.test.ts` 增补 export text/markdown/降级。总计 414 个测试全过。
+
 - Feature: TUI 控制面补齐。新增 `a` 批准（awaiting_approval 任务，批准后 queued 自动 startBackground）、`y` 重试（失败终态）、`n` 继续（needs_fix/review_failed）；每个键按选中任务状态过滤，不匹配或无选中则忽略。详情面板扩展：选中任务显示 stage 链（name/executor/verdict，PASS/FAIL/skip 着色，来自 result.json.stages）与阶段时间线摘要（当前阶段/已跑秒数，复用 `buildTimeline`），数据为服务端投影。
 - Feature: MCP 新增 `cbx_clean` 工具（清理任务遗留 Git worktree，对应 CLI `cbx clean`）。响应 `{ job_id, cleaned: boolean }`，无 worktree 记录幂等返回 `cleaned:false` 不抛错。
 - Test: `tests/tui.test.ts` 增补 approve/retry/continue 键位状态过滤断言（4 例）+ renderDetailPane 带 timeline/stages 渲染断言（4 例）；`tests/mcp-migration.test.ts` 增补 cbx_clean 幂等行为与工具清单断言。总计 409 个测试全过。

@@ -32,6 +32,7 @@ View-only state is local to its owner:
 
 - `src/tui/index.ts` keeps jobs, queue, branch, selection, stopped, and redraw flags in `TuiState`.
 - `src/tui/index.ts` also caches the selected job's detail projection in `state.detail` — `buildTimeline(workspace, jobId)` (from `src/ui.ts`) plus the `stages` array parsed from `readArtifact(..., "result.json")`. Both are server-side projections; a fetch failure keeps the previous detail.
+- `src/tui/index.ts` keeps a bounded event stream in `state.eventStream = { lines: string[], offset: number }` — `readEventsIncremental` appends only new events (cursor `next_offset` persists in state), capped at 5 lines. All server-side projections; a fetch failure keeps the previous stream.
 - `ui/app.js` keeps `allWorkspaces`, `currentWorkspace`, and `selected` in module scope for the current page.
 - `src/formatting.ts` derives strings from an input `JobState`/`QueueFile` and does not retain state.
 

@@ -62,6 +62,7 @@ Before changing orchestration behavior:
 4. Any new artifact must be added to the whitelist in `artifacts.ts` (`ARTIFACTS` set).
 5. Queue changes: understand `WORKER_HEARTBEAT_GRACE_MS`, `MAX_RECLAIMS`, and `SERVICE_LEASE_TTL_MS`.
 6. Approval/evidence changes: check `evidenceHashes()` artifacts list and `completionEvidenceValid()` gates.
+7. A new `.cbx.json` field must be added to the strict-schema whitelist in `storage.ts:loadRuntimeConfig` (`known(...)` + per-field validators). Unknown keys are rejected — a misspelled config field silently fails validation, which is the intended guardrail. `templates` is the example: each entry requires a non-empty `task`, optional `test`/`review`/`executor`/`isolated`, and unknown template keys are rejected.
 
 ## Quality Check
 

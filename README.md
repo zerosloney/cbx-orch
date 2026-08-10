@@ -164,6 +164,10 @@ graph LR
   },
   "execution": { "trustMode": "trusted" },
   "dependencyGuard": true,
+  "templates": {
+    "bugfix": { "task": "修复 review.md 中的问题", "test": "npm test", "review": true },
+    "feature": { "task": "实现新功能", "executor": "opencode" }
+  },
   "adaptive": {
     "enabled": false,
     "maxRounds": 8,
@@ -204,6 +208,7 @@ node dist/src/cli.js list --workspace .
 node dist/src/cli.js logs JOB_ID --workspace .
 node dist/src/cli.js files JOB_ID --workspace .
 node dist/src/cli.js result JOB_ID --workspace .
+node dist/src/cli.js export JOB_ID [--format text|markdown] --workspace .
 node dist/src/cli.js approve JOB_ID --workspace .
 node dist/src/cli.js queue --workspace .
 node dist/src/cli.js queue pause --workspace .
