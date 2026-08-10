@@ -42,7 +42,9 @@ export function fmtElapsed(iso: string | undefined | null): string {
   if (!Number.isFinite(ms) || ms < 0) return "—";
   if (ms < 60_000) return Math.floor(ms / 1000) + "s";
   if (ms < 3600_000)
-    return Math.floor(ms / 60_000) + "m " + Math.floor((ms % 60_000) / 1000) + "s";
+    return (
+      Math.floor(ms / 60_000) + "m " + Math.floor((ms % 60_000) / 1000) + "s"
+    );
   return (
     Math.floor(ms / 3600_000) +
     "h " +
@@ -69,11 +71,23 @@ function colorizeReview(verdict: string): string {
 export function renderJobsTable(jobs: JobState[]): string {
   if (jobs.length === 0) return chalk.gray("暂无任务");
 
-  const headers = ["Job", "Status", "Phase", "Att", "Review", "Elapsed", "Updated"];
+  const headers = [
+    "Job",
+    "Status",
+    "Phase",
+    "Att",
+    "Review",
+    "Elapsed",
+    "Updated",
+  ];
   const rows = jobs.map((j) => {
-    const terminal = ["done", "failed", "review_failed", "cancelled", "needs_fix"].includes(
-      j.status,
-    );
+    const terminal = [
+      "done",
+      "failed",
+      "review_failed",
+      "cancelled",
+      "needs_fix",
+    ].includes(j.status);
     const totalSeconds = (j as Record<string, unknown>).totalSeconds;
     const elapsed =
       terminal && typeof totalSeconds === "number"
@@ -81,7 +95,7 @@ export function renderJobsTable(jobs: JobState[]): string {
           ? `${totalSeconds}s`
           : `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`
         : fmtElapsed(j.createdAt);
-    const review = String((j as Record<string, unknown>).reviewVerdict ?? "—");
+    const review = String(j.reviewVerdict ?? "—");
     return [
       j.jobId,
       colorizeStatus(j.status),
@@ -146,12 +160,13 @@ export function renderJobDetail(state: JobState): string {
   lines.push(`${chalk.bold("Status:")}   ${colorizeStatus(state.status)}`);
   lines.push(`${chalk.bold("Phase:")}    ${state.phase ?? "—"}`);
   lines.push(`${chalk.bold("Attempt:")}  ${state.attempt ?? 0}`);
-  const review = String((state as Record<string, unknown>).reviewVerdict ?? "—");
+  const review = String(state.reviewVerdict ?? "—");
   lines.push(`${chalk.bold("Review:")}   ${colorizeReview(review)}`);
   lines.push(`${chalk.bold("Created:")}  ${state.createdAt ?? "—"}`);
   lines.push(`${chalk.bold("Updated:")}  ${state.updatedAt ?? "—"}`);
-  const error = (state as Record<string, unknown>).error;
-  if (typeof error === "string") lines.push(`${chalk.bold("Error:")}    ${chalk.red(error)}`);
+  const error = state.error;
+  if (typeof error === "string")
+    lines.push(`${chalk.bold("Error:")}    ${chalk.red(error)}`);
   return lines.join("\n");
 }
 
@@ -186,7 +201,9 @@ export function renderHealth(result: {
     for (const [status, count] of Object.entries(
       m.jobsByStatus as Record<string, number>,
     )) {
-      lines.push(`  ${padDisplayEnd(colorizeStatus(status), 20)} ${chalk.cyan(String(count))}`);
+      lines.push(
+        `  ${padDisplayEnd(colorizeStatus(status), 20)} ${chalk.cyan(String(count))}`,
+      );
     }
   }
   return lines.join("\n");

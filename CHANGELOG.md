@@ -6,6 +6,10 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Refactor: JobState 补齐显式可选字段类型（error/retryReason/testExitCode/reviewVerdict/adaptiveRound/stages 等 30+ 字段），消除 5 处 `as` 强制转换；`evidence.ts` 循环导入修复（`core.js` → `types.js`）；移除 `cli.ts` 4 处死代码 `?? 0`（`intOption` 已带默认值）。
+- Refactor: 保留期清理（`prunePersistedData`）从每次 `writeState` / `saveStateAndQueue` 调用移出，收敛到任务终态路径——`executeJob`（含早退基线漂移/取消分支）、`approveJob` 与 `cancelJob` 各执行一次，消除高频状态写入时的配置重载与 DB 扫描开销。
+- Test: 新增 `tests/mcp-migration.test.ts`（10 例：MCP JSON-RPC initialize/ping/tools-list/cbx_status/cbx_list/cbx_cancel/unknown-method/notification 无响应 + SQLite 未来版本拒绝降级/当前版本正常接受），总计 385 个测试全过。
+
 - Feature: SSE 事件 Last-Event-ID 回放。`publishEvent` 为每个事件分配 workspace 内单调递增的 `seq`（持久化于 SQLite `metadata` 表，进程重启后续编）。Web UI `/events` 端点支持标准 `Last-Event-ID` 头与 `?last_event_id=` query 参数：新客户端连接时自动回放 `seq > lastEventId` 的历史事件（上限默认 1000 条，超限发 `replay_truncated` 警告并只补最近 N 条）。EventSource 断线重连自动携带 lastEventId，无需前端改动。无 lastEventId 时行为不变（只推新事件）。旧格式事件（无 seq 字段）被跳过。
 - Feature: 上下文包 token 计量与 per-role 预算裁剪。`context-pack.ts` 新增 `estimateTokens`（启发式：ASCII ≈ chars/4，CJK ≈ chars/1.5，零依赖）与 `ContextBudget`（默认 manager 6000 / executor 8000 / auditor 8000 tokens）。超预算时按优先级裁剪 taskContract 低优先字段（assumptions/rejectedOptions/decisions → constraints/relevantFiles → nonGoals；goal + acceptanceCriteria + stages 永不裁剪），再裁 recentFailure.retryReason，再收缩 userInstructions。触发裁剪时 pack 标记 `truncated: true` 并记录 `estimatedTokens`。`.cbx.json` 可经 `context.tokenBudget.{manager,executor,auditor}` 覆盖默认值（最小 100）。既有 24K char 硬上限仍生效。
 - Feature: stage 依赖声明（dependsOn）与失败传播。`taskContract.stages[].dependsOn` 接受前置 stage name 数组；`normalizeTaskContract` 校验悬空依赖（引用不存在的 name）与循环依赖（DFS 三色标记）。执行时前置 stage 进入失败终态（FAIL / 非零退出）后，后继 stage 标记 skipped 而非执行，并记 `stage_skipped` 事件。handback 注入改为聚合所有 dependsOn stage 的交接文档（依赖模式）或沿用上一阶段 handback（线性模式）。`groupStagesByDependency` 导出为工具函数供未来并行执行使用；当前层内仍串行（单 worktree 安全）。Adaptive 模式 Manager 返回的 stage 同样支持 dependsOn。

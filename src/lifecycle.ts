@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadConfig, loadState, writeState, jobDir, logJobEvent } from "./state.js";
-import { redactText, saveJson, now } from "./storage.js";
+import { redactText, saveJson, now, prunePersistedData } from "./storage.js";
 import { refreshBaseline } from "./baseline.js";
 import { prepareContinuation } from "./execution.js";
 import { enqueueJob, listQueue, cancelQueueEntries } from "./queue-api.js";
@@ -45,6 +45,8 @@ export async function cancelJob(workspaceInput: string, jobId: string): Promise<
       if (Number.isSafeInteger(entry.pid) && Number(entry.pid) > 0) processIds.add(Number(entry.pid));
     }
   } catch (error) { logJobEvent(workspace, jobId, "queue_snapshot_failed", { error: error instanceof Error ? error.message : String(error) }); }
+  // 取一次保留期配置，终态写后统一 prune（cancelJob 不经过 executeJob，需自行触发清理）。
+  const retentionDays = (await loadConfig(workspace)).governance?.retentionDays;
   await writeFile(path.join(directory, "cancel.requested"), now(), "utf8");
   try { await cancelQueueEntries(workspace, jobId); } catch (error) { logJobEvent(workspace, jobId, "queue_cancel_failed", { error: error instanceof Error ? error.message : String(error) }); }
   const survivors: number[] = [];
@@ -53,8 +55,12 @@ export async function cancelJob(workspaceInput: string, jobId: string): Promise<
   }
   if (survivors.length > 0) {
     logJobEvent(workspace, jobId, "cancel_process_survived", { pids: survivors });
-    return writeState(workspace, jobId, { status: "needs_fix", phase: "cancel_failed", error: `无法确认进程树已退出：${survivors.join(", ")}` });
+    const state = await writeState(workspace, jobId, { status: "needs_fix", phase: "cancel_failed", error: `无法确认进程树已退出：${survivors.join(", ")}` });
+    await prunePersistedData(workspace, retentionDays);
+    return state;
   }
   try { await cleanupWorktree(workspace, jobId); } catch (error) { logJobEvent(workspace, jobId, "cleanup_failed", { phase: "cancel", error: error instanceof Error ? error.message : String(error) }); }
-  return writeState(workspace, jobId, { status: "cancelled", phase: "cancelled", cancelledAt: now() });
+  const state = await writeState(workspace, jobId, { status: "cancelled", phase: "cancelled", cancelledAt: now() });
+  await prunePersistedData(workspace, retentionDays);
+  return state;
 }

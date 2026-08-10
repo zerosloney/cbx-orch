@@ -112,7 +112,7 @@ export async function performContextHandshake(
     audit: currentState.audit,
     recentFailure: {
       phase: currentState.phase,
-      error: currentState.error as string | undefined,
+      error: currentState.error,
       retryReason: currentState.retryReason as string | undefined,
     },
     userInstructions: extra,

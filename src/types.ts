@@ -67,6 +67,43 @@ export interface JobState {
   createdAt: string;
   updatedAt: string;
   attempt: number;
+  // --- typed optional fields (reduces `as` casts) ---
+  error?: string;
+  retryReason?: string | null;
+  approved?: boolean;
+  approvalRequired?: boolean;
+  humanGate?: unknown;
+  pendingCompletion?: unknown;
+  completionApproved?: boolean;
+  approvedAt?: string;
+  cancelledAt?: string;
+  gitCommit?: string | null;
+  baselineDrift?: boolean;
+  dirtyBaselineDrift?: boolean;
+  currentCommit?: string | null;
+  workdir?: string;
+  worktreeCleaned?: boolean;
+  cleanupError?: string;
+  adaptiveRound?: number;
+  adaptiveRounds?: Json[];
+  stages?: StageReport[];
+  managerDoneStreak?: number;
+  stageRetries?: Record<string, { execution: number; fix: number }>;
+  stage?: string;
+  executorExitCode?: number;
+  testExitCode?: number;
+  reviewVerdict?: string | null;
+  timedOut?: boolean;
+  audit?: unknown;
+  verifiedProgress?: unknown;
+  auditError?: string | null;
+  blockingQuestions?: string[];
+  continuationInstructions?: string | null;
+  failureTracker?: unknown;
+  stageDeps?: Record<string, string[]>;
+  referenceHashes?: Record<string, string>;
+  depHashes?: Record<string, string>;
+  submittedAt?: string;
   [key: string]: unknown;
 }
 
