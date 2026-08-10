@@ -123,6 +123,7 @@ test("MCP: tools/list returns all tool definitions", async () => {
     "cbx_queue_pause",
     "cbx_queue_resume",
     "cbx_review_gate",
+    "cbx_clean",
   ];
   for (const name of expected)
     assert.ok(names.includes(name), `缺少工具：${name}`);
@@ -332,6 +333,39 @@ test("MCP: cbx_review on missing review.md returns JSON-RPC error", async () => 
   assert.equal(responses.length, 1);
   // 缺 review.md 时错误传播（与 cbx_artifact/cbx_result 一致），不再吞异常返回占位文案
   assert.ok((responses[0] as Record<string, unknown>).error !== undefined);
+});
+
+test("MCP: cbx_clean returns cleaned:false idempotently for job without worktree", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-clean-"));
+  const job = await createJob({
+    workspace,
+    task: "MCP 清理测试",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "mcp-clean",
+  });
+  const responses = await mcpCall(
+    {
+      jsonrpc: "2.0",
+      id: 12,
+      method: "tools/call",
+      params: { name: "cbx_clean", arguments: { job_id: job.jobId } },
+    },
+    { workspace },
+  );
+  assert.equal(responses.length, 1);
+  const result = (responses[0] as Record<string, unknown>).result as {
+    content: Array<{ text: string }>;
+  };
+  const parsed = JSON.parse(result.content[0].text) as {
+    job_id: string;
+    cleaned: boolean;
+  };
+  assert.equal(parsed.job_id, job.jobId);
+  // 无 worktree.json 记录 → 幂等返回 cleaned:false（与 CLI cbx clean 一致），不抛错
+  assert.equal(parsed.cleaned, false);
 });
 
 test("MCP: notification without id does not receive a response", () => {

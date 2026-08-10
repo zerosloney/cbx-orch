@@ -115,14 +115,14 @@ async function summarizeWorkspace(
   };
 }
 
-interface TimelineStage {
+export interface TimelineStage {
   name: string;
   phase?: string;
   startedAt: string;
   endedAt: string | null;
   durationMs: number | null;
 }
-interface JobTimeline {
+export interface JobTimeline {
   stages: TimelineStage[];
   currentStage: string | null;
   startedAt: string | null;

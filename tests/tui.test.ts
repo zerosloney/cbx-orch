@@ -133,6 +133,74 @@ test("renderDetailPane: 缺 phase/attempt 时兜底", () => {
   assert.match(plain, /Attempt:\s*0/); // attempt 兜底 0
 });
 
+test("renderDetailPane: stage 链按 verdict 着色并内联", () => {
+  const job = makeJob({ status: "done" });
+  const stages = [
+    {
+      name: "api",
+      executor: "codebuddy",
+      exitCode: 0,
+      testExitCode: 0,
+      reviewVerdict: "PASS",
+      attempts: 1,
+    },
+    {
+      name: "ui",
+      executor: "opencode",
+      exitCode: 1,
+      testExitCode: 1,
+      reviewVerdict: "FAIL",
+      attempts: 2,
+    },
+  ];
+  const out = renderDetailPane(job, null, stages);
+  assert.match(out, /Stages:/);
+  assert.match(out, /api \/ codebuddy/);
+  assert.match(out, /ui \/ opencode/);
+  assert.ok(out.includes("\x1b[32m"), "PASS 应含绿色 ANSI");
+  assert.ok(out.includes("\x1b[31m"), "FAIL 应含红色 ANSI");
+});
+
+test("renderDetailPane: timeline 显示当前阶段与已跑秒数", () => {
+  const job = makeJob({ status: "running" });
+  const timeline = {
+    stages: [
+      {
+        name: "running",
+        startedAt: "2026-08-10T00:00:00Z",
+        endedAt: null,
+        durationMs: null,
+      },
+    ],
+    currentStage: "running",
+    startedAt: "2026-08-10T00:00:00Z",
+    finishedAt: null,
+    elapsedSec: 42,
+  };
+  const out = renderDetailPane(job, timeline, null);
+  assert.match(out, /Current:/);
+  assert.match(out, /running/);
+  assert.match(out, /42s/);
+});
+
+test("renderDetailPane: 空 timeline / stages 不输出额外行", () => {
+  const job = makeJob({ status: "queued" });
+  const out = renderDetailPane(
+    job,
+    {
+      stages: [],
+      currentStage: null,
+      startedAt: null,
+      finishedAt: null,
+      elapsedSec: 0,
+    },
+    [],
+  );
+  const plain = stripAnsi(out);
+  assert.ok(!plain.includes("Stages:"));
+  assert.ok(!plain.includes("Current:"));
+});
+
 // ---------- job-table.ts: buildRows ----------
 test("buildRows: terminal 状态带 totalSeconds<60 显示秒", () => {
   const rows = buildRows([makeJob({ status: "done", totalSeconds: 42 })]);
@@ -343,6 +411,126 @@ test("handleTuiKey: cancel 携带选中任务 jobId，未选中时忽略", () =>
   handleTuiKey(
     "cancel",
     empty as never,
+    () => {},
+    (action, jobId) => {
+      noActions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(noActions, []);
+});
+
+test("handleTuiKey: approve 仅对 awaiting_approval 任务触发", () => {
+  const job = makeJob({ jobId: "approve-me", status: "awaiting_approval" });
+  const state = {
+    jobs: [job],
+    selectedIndex: 0,
+    queuePaused: false,
+    stopped: false,
+    needsRedraw: false,
+  };
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "approve",
+    state,
+    () => {},
+    (action, jobId) => {
+      actions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(actions, [{ action: "approve", jobId: "approve-me" }]);
+
+  // 非 awaiting_approval（running）→ 不触发
+  const running = {
+    jobs: [makeJob({ status: "running" })],
+    selectedIndex: 0,
+    queuePaused: false,
+    stopped: false,
+    needsRedraw: false,
+  };
+  const noActions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "approve",
+    running,
+    () => {},
+    (action, jobId) => {
+      noActions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(noActions, []);
+});
+
+test("handleTuiKey: retry 仅对失败终态任务触发", () => {
+  const job = makeJob({ jobId: "retry-me", status: "failed" });
+  const state = {
+    jobs: [job],
+    selectedIndex: 0,
+    queuePaused: false,
+    stopped: false,
+    needsRedraw: false,
+  };
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "retry",
+    state,
+    () => {},
+    (action, jobId) => {
+      actions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(actions, [{ action: "retry", jobId: "retry-me" }]);
+
+  // 运行中不可重试
+  const running = {
+    jobs: [makeJob({ status: "running" })],
+    selectedIndex: 0,
+    queuePaused: false,
+    stopped: false,
+    needsRedraw: false,
+  };
+  const noActions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "retry",
+    running,
+    () => {},
+    (action, jobId) => {
+      noActions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(noActions, []);
+});
+
+test("handleTuiKey: continue 仅对 needs_fix / review_failed 任务触发", () => {
+  const needsFix = makeJob({ jobId: "continue-me", status: "needs_fix" });
+  const state = {
+    jobs: [needsFix],
+    selectedIndex: 0,
+    queuePaused: false,
+    stopped: false,
+    needsRedraw: false,
+  };
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "continue",
+    state,
+    () => {},
+    (action, jobId) => {
+      actions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(actions, [{ action: "continue", jobId: "continue-me" }]);
+
+  // done 不可继续
+  const done = {
+    jobs: [makeJob({ status: "done" })],
+    selectedIndex: 0,
+    queuePaused: false,
+    stopped: false,
+    needsRedraw: false,
+  };
+  const noActions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "continue",
+    done,
     () => {},
     (action, jobId) => {
       noActions.push({ action, jobId });

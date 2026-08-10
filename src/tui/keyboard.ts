@@ -7,6 +7,9 @@ export type KeyAction =
   | "pause"
   | "resume"
   | "cancel"
+  | "approve"
+  | "retry"
+  | "continue"
   | "quit"
   | "unknown";
 
@@ -36,6 +39,12 @@ export function startKeyboardListener(
       onKey("resume");
     } else if (key.name === "x") {
       onKey("cancel");
+    } else if (key.name === "a") {
+      onKey("approve");
+    } else if (key.name === "y") {
+      onKey("retry");
+    } else if (key.name === "n") {
+      onKey("continue");
     } else {
       onKey("unknown");
     }

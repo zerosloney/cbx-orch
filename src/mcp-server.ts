@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import {
   approveJob,
   cancelJob,
+  cleanupWorktree,
   createJob,
   listArtifacts,
   listJobs,
@@ -324,6 +325,19 @@ const tools = [
       },
     },
   },
+  {
+    name: "cbx_clean",
+    description:
+      "清理任务遗留的 Git worktree（--keep-worktree 任务的清理入口）",
+    inputSchema: {
+      type: "object",
+      required: ["job_id"],
+      properties: {
+        job_id: { type: "string" },
+        workspace: { type: "string" },
+      },
+    },
+  },
 ];
 
 async function callTool(
@@ -507,6 +521,10 @@ async function callTool(
       reason: result.reason,
       verdict: result.verdict,
     };
+  }
+  if (name === "cbx_clean") {
+    // 幂等清理：无 worktree 记录返回 cleaned:false，与 CLI `cbx clean` 一致，不抛错。
+    return { job_id: id, cleaned: await cleanupWorktree(root, id) };
   }
   if (name === "cbx_result")
     return JSON.parse(await readArtifact(root, id, "result.json"));

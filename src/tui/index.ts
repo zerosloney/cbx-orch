@@ -9,14 +9,19 @@ import { startKeyboardListener, type KeyAction } from "./keyboard.js";
 import { renderStatusBar } from "./components/status-bar.js";
 import { buildRows, renderJobTable } from "./components/job-table.js";
 import { renderDetailPane } from "./components/detail-pane.js";
-import type { JobState } from "../types.js";
+import type { JobState, StageReport } from "../types.js";
 import type { QueueFile } from "../queue.js";
+import { buildTimeline, type JobTimeline } from "../ui.js";
 import {
+  approveJob,
   cancelJob,
   listJobs,
   listQueue,
   pauseQueue,
+  readArtifact,
   resumeQueue,
+  retryQueueJob,
+  startBackground,
 } from "../core.js";
 import { captureAsync } from "../process-runner.js";
 
@@ -28,6 +33,7 @@ interface TuiState {
   queuePaused: boolean;
   stopped: boolean;
   needsRedraw: boolean;
+  detail: { timeline: JobTimeline | null; stages: StageReport[] | null };
 }
 
 interface TuiKeyState {
@@ -48,7 +54,7 @@ export function handleTuiKey(
   state: TuiKeyState,
   refresh: () => void | Promise<void>,
   queueAction?: (
-    action: "pause" | "resume" | "cancel",
+    action: "pause" | "resume" | "cancel" | "approve" | "retry" | "continue",
     jobId?: string,
   ) => void | Promise<void>,
 ): void {
@@ -84,6 +90,36 @@ export function handleTuiKey(
       if (!jobId) return; // 未选中任务时忽略
       state.needsRedraw = true;
       void queueAction?.("cancel", jobId);
+      break;
+    }
+    case "approve": {
+      // 仅批准 awaiting_approval 任务（before_run / before_complete 两阶段都停在此状态）。
+      const job = state.jobs[state.selectedIndex];
+      if (!job || job.status !== "awaiting_approval") return;
+      state.needsRedraw = true;
+      void queueAction?.("approve", job.jobId);
+      break;
+    }
+    case "retry": {
+      // 仅失败终态可重试；running/queued/awaiting_approval 不可。
+      const job = state.jobs[state.selectedIndex];
+      if (
+        !job ||
+        !["failed", "needs_fix", "review_failed", "cancelled"].includes(
+          job.status,
+        )
+      )
+        return;
+      state.needsRedraw = true;
+      void queueAction?.("retry", job.jobId);
+      break;
+    }
+    case "continue": {
+      // 仅 needs_fix / review_failed 可续跑（gate 等待类）。
+      const job = state.jobs[state.selectedIndex];
+      if (!job || !["needs_fix", "review_failed"].includes(job.status)) return;
+      state.needsRedraw = true;
+      void queueAction?.("continue", job.jobId);
       break;
     }
   }
@@ -122,6 +158,31 @@ async function fetchData(workspace: string, state: TuiState): Promise<void> {
     if (state.selectedIndex >= jobs.length) {
       state.selectedIndex = Math.max(0, jobs.length - 1);
     }
+    // 详情投影：选中任务并行拉 timeline（ui.ts buildTimeline）+ stage 链（result.json.stages）。
+    // 服务端投影原则——不直接读 SQLite，失败静默保留上一次详情。
+    const selectedJob = jobs[state.selectedIndex];
+    if (selectedJob) {
+      try {
+        const [timeline, resultText] = await Promise.all([
+          buildTimeline(workspace, selectedJob.jobId),
+          readArtifact(workspace, selectedJob.jobId, "result.json").catch(
+            () => "{}",
+          ),
+        ]);
+        let stages: StageReport[] | null = null;
+        try {
+          const parsed = JSON.parse(resultText) as { stages?: StageReport[] };
+          stages = Array.isArray(parsed.stages) ? parsed.stages : null;
+        } catch {
+          stages = null;
+        }
+        state.detail = { timeline, stages };
+      } catch {
+        /* 详情获取失败保留上一次 */
+      }
+    } else {
+      state.detail = { timeline: null, stages: null };
+    }
     state.needsRedraw = true;
   } catch {
     /* 静默失败，下次轮询再试 */
@@ -136,9 +197,13 @@ function draw(state: TuiState): void {
   // 状态栏 1 行
   console.log(renderStatusBar(state.queue, state.gitBranch));
 
-  // 详情面板：先算行数（无选中1行；选中4行；含error5行），动态决定表格高度避免小屏溢出。
+  // 详情面板：先算行数（无选中1行；选中4行；含error/stage链/时间线更多），动态决定表格高度避免小屏溢出。
   const selectedJob = state.jobs[state.selectedIndex];
-  const detail = renderDetailPane(selectedJob);
+  const detail = renderDetailPane(
+    selectedJob,
+    state.detail.timeline,
+    state.detail.stages,
+  );
   const detailLines = detail.split("\n").length;
   // 表格总占 = 表头2 + 数据 tableHeight + 溢出标记0/1；其余固定 = 状态栏1 + 空行2 + 详情 + 提示1
   const tableHeight = Math.max(3, rows - detailLines - 7);
@@ -156,7 +221,7 @@ function draw(state: TuiState): void {
   // 底部提示
   console.log(
     "\n" +
-      "按 ↑/↓ 选择 · r 刷新 · p 暂停队列 · u 恢复队列 · x 取消选中 · q 退出".replace(
+      "按 ↑/↓ 选择 · r 刷新 · p 暂停 · u 恢复 · x 取消 · a 批准 · y 重试 · n 继续 · q 退出".replace(
         /./g,
         (c) => "\x1b[90m" + c + "\x1b[0m",
       ),
@@ -182,6 +247,7 @@ export async function startTui(
     queuePaused: false,
     stopped: false,
     needsRedraw: true,
+    detail: { timeline: null, stages: null },
   };
 
   await fetchData(workspace, state);
@@ -189,17 +255,32 @@ export async function startTui(
     state.stopped = true;
   };
   const queueAction = (
-    action: "pause" | "resume" | "cancel",
+    action: "pause" | "resume" | "cancel" | "approve" | "retry" | "continue",
     jobId?: string,
   ): void => {
+    // approve 需复刻 CLI/MCP 语义：before_run 批准后状态回 queued，需显式 startBackground。
+    const approveAndStart = async (id: string): Promise<void> => {
+      const state = await approveJob(workspace, id);
+      if (state.status === "queued") await startBackground(workspace, id);
+    };
     const operation =
       action === "pause"
         ? pauseQueue(workspace)
         : action === "resume"
           ? resumeQueue(workspace)
-          : jobId
-            ? cancelJob(workspace, jobId)
-            : Promise.resolve();
+          : action === "approve" && jobId
+            ? approveAndStart(jobId)
+            : action === "retry" && jobId
+              ? retryQueueJob(workspace, jobId)
+              : action === "continue" && jobId
+                ? startBackground(
+                    workspace,
+                    jobId,
+                    "请根据 review.md 修复问题。",
+                  )
+                : action === "cancel" && jobId
+                  ? cancelJob(workspace, jobId)
+                  : Promise.resolve();
     void operation
       .catch((error) =>
         console.error(
