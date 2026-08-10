@@ -11,14 +11,21 @@ import { buildRows, renderJobTable } from "./components/job-table.js";
 import { renderDetailPane } from "./components/detail-pane.js";
 import type { JobState } from "../types.js";
 import type { QueueFile } from "../queue.js";
-import { listJobs, listQueue } from "../core.js";
-import { capture } from "../process-runner.js";
+import {
+  cancelJob,
+  listJobs,
+  listQueue,
+  pauseQueue,
+  resumeQueue,
+} from "../core.js";
+import { captureAsync } from "../process-runner.js";
 
 interface TuiState {
   jobs: JobState[];
   queue: QueueFile;
   gitBranch: string | null;
   selectedIndex: number;
+  queuePaused: boolean;
   stopped: boolean;
   needsRedraw: boolean;
 }
@@ -26,6 +33,7 @@ interface TuiState {
 interface TuiKeyState {
   jobs: JobState[];
   selectedIndex: number;
+  queuePaused: boolean;
   stopped: boolean;
   needsRedraw: boolean;
 }
@@ -39,6 +47,10 @@ export function handleTuiKey(
   action: KeyAction,
   state: TuiKeyState,
   refresh: () => void | Promise<void>,
+  queueAction?: (
+    action: "pause" | "resume" | "cancel",
+    jobId?: string,
+  ) => void | Promise<void>,
 ): void {
   switch (action) {
     case "quit":
@@ -60,6 +72,20 @@ export function handleTuiKey(
       state.needsRedraw = true;
       void refresh();
       break;
+    case "pause":
+    case "resume":
+      // 队列暂停/恢复：同步切换本地状态，随后调用队列操作并触发刷新。
+      state.queuePaused = action === "pause";
+      state.needsRedraw = true;
+      void queueAction?.(action);
+      break;
+    case "cancel": {
+      const jobId = state.jobs[state.selectedIndex]?.jobId;
+      if (!jobId) return; // 未选中任务时忽略
+      state.needsRedraw = true;
+      void queueAction?.("cancel", jobId);
+      break;
+    }
   }
 }
 
@@ -81,9 +107,10 @@ async function fetchData(workspace: string, state: TuiState): Promise<void> {
     ]);
     state.jobs = jobs;
     state.queue = queue;
-    // git branch
+    state.queuePaused = queue.paused;
+    // git branch（异步：TUI 主循环每秒轮询，同步 git 会卡住键盘响应）
     try {
-      const result = capture(
+      const result = await captureAsync(
         ["git", "branch", "--show-current"],
         workspace,
       );
@@ -116,13 +143,24 @@ function draw(state: TuiState): void {
   // 表格总占 = 表头2 + 数据 tableHeight + 溢出标记0/1；其余固定 = 状态栏1 + 空行2 + 详情 + 提示1
   const tableHeight = Math.max(3, rows - detailLines - 7);
   const rowsData = buildRows(state.jobs);
-  const table = renderJobTable(rowsData, state.selectedIndex, tableHeight, cols);
+  const table = renderJobTable(
+    rowsData,
+    state.selectedIndex,
+    tableHeight,
+    cols,
+  );
   console.log(table);
 
   console.log("\n" + detail);
 
   // 底部提示
-  console.log("\n" + "按 ↑/↓ 选择 · r 刷新 · q 退出".replace(/./g, (c) => "\x1b[90m" + c + "\x1b[0m"));
+  console.log(
+    "\n" +
+      "按 ↑/↓ 选择 · r 刷新 · p 暂停队列 · u 恢复队列 · x 取消选中 · q 退出".replace(
+        /./g,
+        (c) => "\x1b[90m" + c + "\x1b[0m",
+      ),
+  );
 
   state.needsRedraw = false;
 }
@@ -141,6 +179,7 @@ export async function startTui(
     },
     gitBranch: null,
     selectedIndex: 0,
+    queuePaused: false,
     stopped: false,
     needsRedraw: true,
   };
@@ -148,6 +187,26 @@ export async function startTui(
   await fetchData(workspace, state);
   const onSigint = (): void => {
     state.stopped = true;
+  };
+  const queueAction = (
+    action: "pause" | "resume" | "cancel",
+    jobId?: string,
+  ): void => {
+    const operation =
+      action === "pause"
+        ? pauseQueue(workspace)
+        : action === "resume"
+          ? resumeQueue(workspace)
+          : jobId
+            ? cancelJob(workspace, jobId)
+            : Promise.resolve();
+    void operation
+      .catch((error) =>
+        console.error(
+          `cbx: TUI ${action} 失败：${error instanceof Error ? error.message : String(error)}`,
+        ),
+      )
+      .then(() => fetchData(workspace, state));
   };
   let stopKeyboard: (() => void) | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
@@ -157,15 +216,17 @@ export async function startTui(
   hideCursor();
   try {
     stopKeyboard = startKeyboardListener((action: KeyAction) => {
-      handleTuiKey(action, state, () => fetchData(workspace, state));
+      handleTuiKey(
+        action,
+        state,
+        () => fetchData(workspace, state),
+        queueAction,
+      );
     });
     process.once("SIGINT", onSigint);
 
     // 按调用方配置的间隔轮询拉数据。
-    pollTimer = scheduleTuiPoll(
-      () => fetchData(workspace, state),
-      intervalMs,
-    );
+    pollTimer = scheduleTuiPoll(() => fetchData(workspace, state), intervalMs);
 
     // 每秒刷新显示（更新 elapsed）
     drawTimer = setInterval(() => {

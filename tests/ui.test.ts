@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { AddressInfo } from "node:net";
-import { jobDir } from "../src/core.js";
+import { createJob, jobDir } from "../src/core.js";
 import { handleTuiKey, scheduleTuiPoll, startTui } from "../src/tui/index.js";
 import { truncateDisplay } from "../src/tui/components/job-table.js";
 import {
@@ -48,6 +48,7 @@ test("TUI polling honors intervalMs and refresh fetches immediately", () => {
   const state = {
     jobs: [],
     selectedIndex: 0,
+    queuePaused: false,
     stopped: false,
     needsRedraw: false,
   };
@@ -64,6 +65,7 @@ test("handleTuiKey down on empty jobs keeps selectedIndex >= 0", () => {
   const state = {
     jobs: [],
     selectedIndex: 0,
+    queuePaused: false,
     stopped: false,
     needsRedraw: false,
   };
@@ -499,6 +501,134 @@ test("HTTP: 配置 token 后缺凭证返回 401 + Bearer challenge", async () =>
   });
 });
 
+// ---------- 写操作（POST）端到端 ----------
+// 覆盖 approve/cancel/retry/continue 与 queue pause/resume 的 HTTP 路由；
+// 无 token 时直接可用（loopback 绑定 + SameSite cookie 为浏览器侧防线），有 token 时需凭证。
+
+test("HTTP: POST 写操作无 token 时可取消任务并更新状态", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-write-"));
+  const job = await createJob({
+    workspace,
+    task: "写操作",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "http-write",
+  });
+  await withServer(workspace, undefined, async (port) => {
+    const res = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/cancel`,
+      { method: "POST" },
+    );
+    assert.equal(res.status, 200);
+    const state = (await res.json()) as { status: string };
+    assert.equal(state.status, "cancelled");
+    // 取消后从队列移除 → retry 可重新入队
+    const retryRes = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/retry`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+    );
+    assert.equal(retryRes.status, 200);
+    const retried = (await retryRes.json()) as {
+      status: string;
+      jobId: string;
+    };
+    assert.equal(retried.status, "queued");
+  });
+});
+
+test("HTTP: POST 队列暂停/恢复切换 paused 状态", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-qwrite-"));
+  await withServer(workspace, undefined, async (port) => {
+    const pause = await fetch(`http://127.0.0.1:${port}/api/queue/pause`, {
+      method: "POST",
+    });
+    assert.equal(pause.status, 200);
+    assert.equal(((await pause.json()) as { paused: boolean }).paused, true);
+    const resume = await fetch(`http://127.0.0.1:${port}/api/queue/resume`, {
+      method: "POST",
+    });
+    assert.equal(resume.status, 200);
+    assert.equal(((await resume.json()) as { paused: boolean }).paused, false);
+  });
+});
+
+test("HTTP: POST 写操作需要 token 凭证（配置后无凭证 401）", async () => {
+  const workspace = await mkdtemp(
+    path.join(os.tmpdir(), "cbx-http-writeauth-"),
+  );
+  const job = await createJob({
+    workspace,
+    task: "写操作鉴权",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "http-writeauth",
+  });
+  await withServer(workspace, "secret", async (port) => {
+    const res = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/cancel`,
+      { method: "POST" },
+    );
+    assert.equal(res.status, 401);
+    // 带 Bearer 凭证则放行
+    const ok = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/cancel`,
+      { method: "POST", headers: { authorization: "Bearer secret" } },
+    );
+    assert.equal(ok.status, 200);
+  });
+});
+
+test("HTTP: POST continue 携带 message 且非法 extra_rounds 报 400", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-continue-"));
+  const job = await createJob({
+    workspace,
+    task: "继续",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "http-continue",
+  });
+  await withServer(workspace, undefined, async (port) => {
+    // 先取消使任务离开队列（queued 状态 continue 会因重复入队失败）
+    const cancelRes = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/cancel`,
+      { method: "POST" },
+    );
+    assert.equal(cancelRes.status, 200);
+    // continue 重新入队（无 extra_rounds：任务没有 max_rounds gate）
+    const res = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/continue`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "继续执行" }),
+      },
+    );
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { status: string };
+    assert.equal(body.status, "queued");
+    // 非法 extra_rounds → 400
+    const bad = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/continue`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ extra_rounds: -1 }),
+      },
+    );
+    assert.equal(bad.status, 400);
+  });
+});
+
 test("HTTP: 配置 token 后正确 Bearer 凭证放行 API", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-authok-"));
   await withServer(workspace, "secret", async (port) => {
@@ -519,6 +649,30 @@ test("HTTP: 配置 token 后错误 Bearer 凭证拒绝", async () => {
   });
 });
 
+// 回归：token 改经 HttpOnly cookie 下发（不再内嵌 HTML window.CBX_TOKEN）。
+// 首页返回 Set-Cookie，同源请求带 cookie 即放行；cookie 不得暴露在页面源码或 URL 查询串。
+test("HTTP: 首页下发 HttpOnly cookie 且 cookie 可访问 API", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-cookie-"));
+  await withServer(workspace, "secret", async (port) => {
+    const page = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(page.status, 200);
+    const setCookie = page.headers.get("set-cookie") ?? "";
+    assert.match(setCookie, /^cbx_token=secret/);
+    assert.match(setCookie, /HttpOnly/);
+    assert.match(setCookie, /SameSite=Strict/);
+    // token 不得再内嵌进 HTML
+    const html = await page.text();
+    assert.ok(!html.includes("CBX_TOKEN"), "页面源码不得包含 token");
+    assert.ok(!html.includes("secret"), "页面源码不得包含 token 明文");
+    // 携带 cookie 的请求放行
+    const cookie = setCookie.split(";")[0];
+    const api = await fetch(`http://127.0.0.1:${port}/api/jobs`, {
+      headers: { cookie },
+    });
+    assert.equal(api.status, 200);
+  });
+});
+
 test("HTTP: PUBLIC_UI_PATHS（/ /style.css /app.js /healthz）免鉴权", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-public-"));
   await withServer(workspace, "secret", async (port) => {
@@ -532,11 +686,11 @@ test("HTTP: PUBLIC_UI_PATHS（/ /style.css /app.js /healthz）免鉴权", async 
   });
 });
 
-test("HTTP: 非 GET 方法返回 405", async () => {
+test("HTTP: 非 GET/POST 方法返回 405", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-method-"));
   await withServer(workspace, undefined, async (port) => {
     const res = await fetch(`http://127.0.0.1:${port}/api/jobs`, {
-      method: "POST",
+      method: "PUT",
     });
     assert.equal(res.status, 405);
     assert.match(JSON.stringify(await res.json()), /method not allowed/);

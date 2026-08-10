@@ -238,6 +238,14 @@ curl http://127.0.0.1:4173/api/queue                            # 队列状态
 curl http://127.0.0.1:4173/healthz                              # 健康检查
 curl http://127.0.0.1:4173/api/metrics                          # 运行指标
 
+# Web UI 写操作（POST，需鉴权；浏览器自动携带 HttpOnly cookie，curl 需 Authorization: Bearer <token>）
+curl -X POST http://127.0.0.1:4173/api/jobs/<id>/cancel         # 取消任务
+curl -X POST http://127.0.0.1:4173/api/jobs/<id>/retry          # 重试失败任务
+curl -X POST http://127.0.0.1:4173/api/jobs/<id>/approve        # 批准等待中的任务（before_run 批准后自动启动）
+curl -X POST http://127.0.0.1:4173/api/jobs/<id>/continue       # 续跑（body: {message, priority, refresh_baseline, extra_rounds}）
+curl -X POST http://127.0.0.1:4173/api/queue/pause              # 暂停队列
+curl -X POST http://127.0.0.1:4173/api/queue/resume             # 恢复队列
+
 # CI 模式：任务失败时返回非 0 退出码
 node dist/src/cli.js run --ci --workspace . --task "实现某功能" --test "npm test"
 
@@ -251,7 +259,7 @@ node dist/src/cli.js serve --workspace . --interval-ms 30000
 node dist/src/cli.js health --workspace .
 ```
 
-`ui` 命令支持 token 鉴权：通过 `--ui-token <token>` 或 `.cbx.json` 的 `ui.token` 配置。启用后 API 端点需要 `Authorization: Bearer <token>` 请求头；SSE（EventSource）不支持自定义请求头，可通过 `?token=<token>` 查询参数传递。`/healthz` 健康检查和 `/` 首页无需 token。
+`ui` 命令支持 token 鉴权：通过 `--ui-token <token>` 或 `.cbx.json` 的 `ui.token` 配置。启用后浏览器首次加载首页会收到 `cbx_token` HttpOnly cookie（`SameSite=Strict`），同源 API/SSE 请求自动携带——token 不进入页面 JS 作用域、不出现在 URL 查询串，降低 XSS 与浏览器历史泄露面。curl/API 客户端仍可用 `Authorization: Bearer <token>` 请求头；SSE 兼容旧客户端可传 `?token=<token>` 查询参数。`/healthz` 健康检查和 `/` 首页无需 token。
 
 ### SSE 事件回放
 
@@ -424,7 +432,7 @@ claude plugin install cbx-orch@cbx-orch-marketplace
 
 - 默认权限模式 `auto`。可通过 `--permission-mode` 或配置覆盖；`dontAsk` 需显式 `--dangerously-skip-permissions`。
 - 测试命令由用户提供，会在目标工作区执行。cbx 只做有限黑名单过滤（正则可被变体绕过），**不保证命令安全**。建议始终用 `--isolated` 让测试在 worktree 内跑；非隔离时 cbx 会输出告警。
-- Web UI / TUI 仅绑定本机回环（127.0.0.1/::1）。可通过 `--ui-token` 或配置 `ui.token` 启用 Bearer token 鉴权（API 端点和 SSE 需要有效 token，`/healthz` 和首页保持开放）。未配置 token 时不做鉴权。远程共享必须放在带认证的反向代理之后。
+- Web UI / TUI 仅绑定本机回环（127.0.0.1/::1）。可通过 `--ui-token` 或配置 `ui.token` 启用 token 鉴权：浏览器走 HttpOnly cookie，curl/API 客户端走 Bearer header，`/healthz` 和首页保持开放。未配置 token 时不做鉴权。远程共享必须放在带认证的反向代理之后。
 - `--isolated` 会创建 Git worktree，避免直接污染主工作区；**它不是 OS 安全沙箱**，不会隔离网络、凭据、宿主机文件或进程。
 - 默认 `execution.trustMode` 是 `trusted`。`untrusted` 任务需要 OS 容器沙箱；当前 cbx 没有内置容器 runner，因此会明确拒绝启动该模式。可通过 `--trust-mode trusted|untrusted` 覆盖配置。
 - `.cbx.json` 是严格 schema：未知字段、错误类型和越界值会拒绝加载，避免策略拼写错误静默失效。`governance.redactFields` 会递归脱敏事件、webhook 和死信中的同名字段；`governance.retentionDays` 会在状态更新和健康检查时原子压缩 `.cbx/delivery-failures.ndjson`，并同步清理过期 SQLite 死信记录。

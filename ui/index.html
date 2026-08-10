@@ -12,12 +12,11 @@
   <div class="card"><div class="card-label">最后活动</div><div class="card-value" id="c-last">—</div></div>
   <div class="card"><div class="card-label">健康</div><div class="card-value" id="c-health">—</div></div>
 </div>
-<div class="bar" id="bar" hidden></div>
+<div class="bar" id="bar"><button type="button" id="btn-pause" class="job-action">暂停队列</button><button type="button" id="btn-resume" class="job-action">恢复队列</button></div>
 <table><thead><tr><th>Job</th><th>Status</th><th>Phase</th><th>Attempt</th><th>Review</th><th>Elapsed</th><th>Updated</th></tr></thead>
 <tbody id="jobs"></tbody></table>
 <div id="detail-panel"><h2 style="margin-top:0">任务详情</h2><div id="detail-body"><p class="hint">点击上方任务行查看详情</p></div></div>
 <h2>事件流</h2>
 <div id="stream"></div>
-<script>window.CBX_TOKEN=__CBX_TOKEN__;</script>
 <script src="/app.js"></script>
 </body></html>

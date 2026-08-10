@@ -19,9 +19,13 @@ tr.job.selected{background:#1c2840;border-left:3px solid #9ecbff}
 .st-skip{background:#2a2a2a;color:#888}
 .arrow{color:#555;font-size:11px}
 .arts{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
-.art{padding:3px 10px;border-radius:3px;background:#171c26;cursor:pointer;font:inherit;font-size:12px;border:1px solid #2a3140;color:#9ecbff}
+.art{display:inline-block;padding:3px 10px;border-radius:3px;background:#171c26;cursor:pointer;font:inherit;font-size:12px;border:1px solid #2a3140;color:#9ecbff}
 .art:hover{background:#1c2430}
 .art.active{border-color:#9ecbff;background:#1c2840}
+.job-actions{display:flex;gap:6px;margin-bottom:10px}
+.job-action{padding:4px 12px;border-radius:4px;background:#1c2840;border:1px solid #9ecbff;color:#9ecbff;cursor:pointer;font:inherit;font-size:12px}
+.job-action:hover{background:#243a5c}
+.job-action:disabled{opacity:.5;cursor:default}
 pre.art-view{white-space:pre-wrap;background:#080b11;padding:10px;border-radius:6px;max-height:350px;overflow:auto;font-size:12px;border:1px solid #2a3140;margin:0;font-family:ui-monospace,monospace}
 #stream{white-space:pre-wrap;background:#0d1117;padding:10px;border-radius:6px;max-height:260px;overflow:auto;font-size:12px;margin-top:8px;border:1px solid #2a3140;font-family:ui-monospace,monospace}
 .evt{padding:2px 0}.evt .t{color:#555;margin-right:8px}

@@ -1,6 +1,14 @@
 import readline from "node:readline";
 
-export type KeyAction = "up" | "down" | "refresh" | "quit" | "unknown";
+export type KeyAction =
+  | "up"
+  | "down"
+  | "refresh"
+  | "pause"
+  | "resume"
+  | "cancel"
+  | "quit"
+  | "unknown";
 
 export function startKeyboardListener(
   onKey: (action: KeyAction) => void,
@@ -22,14 +30,21 @@ export function startKeyboardListener(
       onKey("down");
     } else if (key.name === "r") {
       onKey("refresh");
+    } else if (key.name === "p") {
+      onKey("pause");
+    } else if (key.name === "u") {
+      onKey("resume");
+    } else if (key.name === "x") {
+      onKey("cancel");
     } else {
       onKey("unknown");
     }
   };
 
   process.stdin.on("keypress", handler);
-  const ownedDataListeners = dataListeners()
-    .filter((listener) => !existingDataListeners.has(listener));
+  const ownedDataListeners = dataListeners().filter(
+    (listener) => !existingDataListeners.has(listener),
+  );
   return () => {
     process.stdin.off("keypress", handler);
     for (const listener of ownedDataListeners)

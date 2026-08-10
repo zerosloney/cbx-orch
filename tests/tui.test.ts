@@ -213,6 +213,7 @@ test("handleTuiKey: up 上移并 clamp 到 0", () => {
   const state = {
     jobs: [makeJob(), makeJob()],
     selectedIndex: 1,
+    queuePaused: false,
     stopped: false,
     needsRedraw: false,
   };
@@ -228,6 +229,7 @@ test("handleTuiKey: down 下移并 clamp 到末尾", () => {
   const state = {
     jobs: [makeJob(), makeJob()],
     selectedIndex: 0,
+    queuePaused: false,
     stopped: false,
     needsRedraw: false,
   };
@@ -242,6 +244,7 @@ test("handleTuiKey: quit 置 stopped=true，不重绘", () => {
   const state = {
     jobs: [],
     selectedIndex: 0,
+    queuePaused: false,
     stopped: false,
     needsRedraw: false,
   };
@@ -254,6 +257,7 @@ test("handleTuiKey: unknown 动作无副作用", () => {
   const state = {
     jobs: [makeJob()],
     selectedIndex: 0,
+    queuePaused: false,
     stopped: false,
     needsRedraw: false,
   };
@@ -261,4 +265,88 @@ test("handleTuiKey: unknown 动作无副作用", () => {
   assert.equal(state.selectedIndex, 0);
   assert.equal(state.stopped, false);
   assert.equal(state.needsRedraw, false);
+});
+
+test("handleTuiKey: pause 同步切换本地状态并触发队列动作", () => {
+  const state = {
+    jobs: [],
+    selectedIndex: 0,
+    queuePaused: false,
+    stopped: false,
+    needsRedraw: false,
+  };
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "pause",
+    state,
+    () => {},
+    (action, jobId) => {
+      actions.push({ action, jobId });
+    },
+  );
+  assert.equal(state.queuePaused, true);
+  assert.equal(state.needsRedraw, true);
+  assert.deepEqual(actions, [{ action: "pause", jobId: undefined }]);
+});
+
+test("handleTuiKey: resume 同步切换本地状态并触发队列动作", () => {
+  const state = {
+    jobs: [],
+    selectedIndex: 0,
+    queuePaused: true,
+    stopped: false,
+    needsRedraw: false,
+  };
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "resume",
+    state,
+    () => {},
+    (action, jobId) => {
+      actions.push({ action, jobId });
+    },
+  );
+  assert.equal(state.queuePaused, false);
+  assert.equal(state.needsRedraw, true);
+  assert.deepEqual(actions, [{ action: "resume", jobId: undefined }]);
+});
+
+test("handleTuiKey: cancel 携带选中任务 jobId，未选中时忽略", () => {
+  const job = makeJob();
+  const state = {
+    jobs: [job],
+    selectedIndex: 0,
+    queuePaused: false,
+    stopped: false,
+    needsRedraw: false,
+  };
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "cancel",
+    state,
+    () => {},
+    (action, jobId) => {
+      actions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(actions, [{ action: "cancel", jobId: job.jobId }]);
+
+  // 空 jobs（无选中）→ 不触发队列动作
+  const empty = {
+    jobs: [] as unknown[],
+    selectedIndex: 0,
+    queuePaused: false,
+    stopped: false,
+    needsRedraw: false,
+  };
+  const noActions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "cancel",
+    empty as never,
+    () => {},
+    (action, jobId) => {
+      noActions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(noActions, []);
 });

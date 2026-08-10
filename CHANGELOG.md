@@ -6,6 +6,14 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Feature: Web UI 写操作。新增 POST 端点 `POST /api/jobs/:id/approve|cancel|retry|continue` 与 `POST /api/queue/pause|resume`（与 CLI/MCP 语义一致，continue 支持 `message`/`priority`/`refresh_baseline`/`extra_rounds` 参数，非法 `extra_rounds` 报 400）。任务详情面板按状态显示操作按钮（awaiting_approval→批准；运行/排队→取消；失败终态→重试/继续），队列卡片旁新增暂停/恢复按钮。写操作经 HttpOnly cookie 或 Bearer 鉴权，SameSite=Strict 阻止跨站携带。
+- Feature: Web UI token 鉴权加固。token 从 HTML 内嵌 `window.CBX_TOKEN` + SSE `?token=` 查询串改为 `cbx_token` HttpOnly cookie（SameSite=Strict，同源请求自动携带，JS/XSS 不可读、不出现在 URL）；curl/API 客户端仍支持 Bearer header，SSE 兼容旧客户端保留 query token。
+- Feature: TUI 队列操作。`p` 暂停队列 / `u` 恢复队列 / `x` 取消选中任务（空选中忽略），状态栏与操作提示同步。
+- Refactor: 新增 `captureAsync`（异步进程捕获）。Web UI `summarizeWorkspace` 与 TUI 轮询的 git 调用改异步，不再阻塞 SSE 心跳与键盘响应；worker 进程内 git-ops 保持同步（单用途进程，阻塞无副作用）。
+- Test: 新增 `tests/ui-frontend.test.ts`（6 例：app.js 的 esc/fmtElapsed/totalJobs/rowAttr/rowHtml/updateCards，node:vm 沙箱注入 DOM 桩）；`tests/ui.test.ts` 增补 POST 写操作端到端（cancel/retry/pause/resume/continue/鉴权）；`tests/hardening.test.ts` 增补 `captureAsync` 覆盖（成功/非零退出/stderr/命令缺失）。
+- Refactor: MCP 响应形状统一。`cbx_logs` 恒返回 `{job_id, events, next_offset}`（不再因 `since` 分叉为 `{logs}` 与 `{events}`）；`cbx_review` 缺文件改走 JSON-RPC error（与 `cbx_artifact`/`cbx_result` 一致，不吞异常）。
+- Fix: approval 隔离任务 worktree 守卫显式化。`snapshotDiff` 经 `workdir !== undefined && existsSync(workdir)` 窄化消除 `!` 断言；`commitWorktree` 前增加显式不变量守卫。
+
 - Refactor: JobState 补齐显式可选字段类型（error/retryReason/testExitCode/reviewVerdict/adaptiveRound/stages 等 30+ 字段），消除 5 处 `as` 强制转换；`evidence.ts` 循环导入修复（`core.js` → `types.js`）；移除 `cli.ts` 4 处死代码 `?? 0`（`intOption` 已带默认值）。
 - Refactor: 保留期清理（`prunePersistedData`）从每次 `writeState` / `saveStateAndQueue` 调用移出，收敛到任务终态路径——`executeJob`（含早退基线漂移/取消分支）、`approveJob` 与 `cancelJob` 各执行一次，消除高频状态写入时的配置重载与 DB 扫描开销。
 - Test: 新增 `tests/mcp-migration.test.ts`（10 例：MCP JSON-RPC initialize/ping/tools-list/cbx_status/cbx_list/cbx_cancel/unknown-method/notification 无响应 + SQLite 未来版本拒绝降级/当前版本正常接受），总计 385 个测试全过。

@@ -80,9 +80,13 @@ async function approveJobLocked(
   const hashes = await evidenceHashes(directory);
   const evidenceMatches =
     JSON.stringify(hashes) === JSON.stringify(pending.evidenceHashes);
+  // workdir !== undefined && existsSync(workdir) 同时充当窄化守卫：第三操作数里 TS 已知 workdir 为非空 string，
+  // 不再需要 `workdir!`。隔离任务缺 worktree（recorded 缺失）或 worktree 目录被删 → snapshotMatches=false，
+  // 走下方 completion_evidence_stale 拒绝路径，与"证据变化"同等处理。
   const snapshotMatches =
-    Boolean(workdir && existsSync(workdir)) &&
-    worktreeSha256(await snapshotDiff(workdir!)) === pending.worktreeSha256;
+    workdir !== undefined &&
+    existsSync(workdir) &&
+    worktreeSha256(await snapshotDiff(workdir)) === pending.worktreeSha256;
   if (
     !evidenceMatches ||
     !snapshotMatches ||
@@ -121,9 +125,14 @@ async function approveJobLocked(
     error: null,
   };
   if (context.autoCommit) {
+    // 到达此处必然已通过证据门（snapshotMatches 为 true ⇒ workdir 存在）。
+    // 显式守卫代替 `workdir!`：若未来门管线改动破坏了这一不变量，这里给出可诊断的错误而非静默的 undefined 传参。
+    if (!workdir) {
+      throw new Error(`隔离任务缺少 worktree 路径，无法提交：${jobId}`);
+    }
     try {
       updates.gitCommit =
-        commitWorktree(workdir!, context.commitMessage) ?? null;
+        commitWorktree(workdir, context.commitMessage) ?? null;
     } catch (error) {
       const failed = await writeApprovalState(
         workspace,

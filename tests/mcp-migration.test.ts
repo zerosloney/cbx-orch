@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -224,6 +224,113 @@ test("MCP: unknown method returns error", async () => {
     method: "unknown_method",
   });
   assert.equal(responses.length, 1);
+  assert.ok((responses[0] as Record<string, unknown>).error !== undefined);
+});
+
+test("MCP: cbx_logs returns unified {job_id, events, next_offset} shape", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-logs-"));
+  const job = await createJob({
+    workspace,
+    task: "MCP 日志测试",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "mcp-logs",
+  });
+  // createJob 不写 events.ndjson；先造两条事件再查
+  const dir = path.join(workspace, ".cbx", "jobs", job.jobId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, "events.ndjson"),
+    `${JSON.stringify({ event: "created", jobId: job.jobId, at: new Date().toISOString() })}\n${JSON.stringify({ event: "queued", jobId: job.jobId, at: new Date().toISOString() })}\n`,
+    "utf8",
+  );
+  // 无 since（全量）
+  const full = (
+    await mcpCall(
+      {
+        jsonrpc: "2.0",
+        id: 8,
+        method: "tools/call",
+        params: { name: "cbx_logs", arguments: { job_id: job.jobId } },
+      },
+      { workspace },
+    )
+  )[0] as Record<string, unknown>;
+  const fullResult = full.result as { content: Array<{ text: string }> };
+  const fullParsed = JSON.parse(fullResult.content[0].text) as {
+    job_id: string;
+    events: string[];
+    next_offset: number;
+  };
+  assert.equal(fullParsed.job_id, job.jobId);
+  assert.equal(fullParsed.events.length, 2);
+  assert.equal(fullParsed.next_offset, fullParsed.events.length);
+  // 有 since（增量）——同一形状
+  const since = (
+    await mcpCall(
+      {
+        jsonrpc: "2.0",
+        id: 9,
+        method: "tools/call",
+        params: {
+          name: "cbx_logs",
+          arguments: { job_id: job.jobId, since: fullParsed.next_offset },
+        },
+      },
+      { workspace },
+    )
+  )[0] as Record<string, unknown>;
+  const sinceResult = since.result as { content: Array<{ text: string }> };
+  const sinceParsed = JSON.parse(sinceResult.content[0].text) as {
+    job_id: string;
+    events: string[];
+    next_offset: number;
+  };
+  assert.equal(sinceParsed.job_id, job.jobId);
+  assert.equal(sinceParsed.events.length, 0);
+  assert.equal(sinceParsed.next_offset, fullParsed.next_offset);
+  // 非法 since 报错
+  const bad = (
+    await mcpCall(
+      {
+        jsonrpc: "2.0",
+        id: 10,
+        method: "tools/call",
+        params: {
+          name: "cbx_logs",
+          arguments: { job_id: job.jobId, since: -1 },
+        },
+      },
+      { workspace },
+    )
+  )[0] as Record<string, unknown>;
+  assert.ok(bad.error !== undefined);
+});
+
+test("MCP: cbx_review on missing review.md returns JSON-RPC error", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-review-"));
+  const job = await createJob({
+    workspace,
+    task: "MCP 审查测试",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "mcp-review",
+  });
+  const responses = await mcpCall(
+    {
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/call",
+      params: { name: "cbx_review", arguments: { job_id: job.jobId } },
+    },
+    { workspace },
+  );
+  assert.equal(responses.length, 1);
+  // 缺 review.md 时错误传播（与 cbx_artifact/cbx_result 一致），不再吞异常返回占位文案
   assert.ok((responses[0] as Record<string, unknown>).error !== undefined);
 });
 

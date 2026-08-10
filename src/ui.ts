@@ -8,20 +8,28 @@ import { open, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  approveJob,
+  cancelJob,
   health,
   jobDir,
   listArtifacts,
   listJobs,
   listQueue,
   loadState,
+  pauseQueue,
   readArtifact,
+  resumeQueue,
+  retryQueueJob,
+  startBackground,
 } from "./core.js";
-import { capture } from "./process-runner.js";
+import { captureAsync } from "./process-runner.js";
 import { constantTimeEqual, processAlive } from "./storage.js";
 import { isCbxError } from "./errors.js";
 
 /** 校验 token; 未配置 token 时始终放行。常量时间比较避免时序侧信道。
- *  query token 仅对 `/events` 放行 (EventSource 无法设 header), 其余 API 强制 Bearer header。 */
+ *  支持两种凭证：Authorization Bearer header（curl/API 客户端），
+ *  或 `cbx_token` HttpOnly cookie（浏览器自动携带，JS 不可读，避免 token 暴露在页面源码/URL 查询串）。
+ *  query token 仅对 `/events` 放行 (兼容无法设 header 的旧 EventSource 客户端)。 */
 function isAuthorized(
   req: IncomingMessage,
   url: URL,
@@ -32,6 +40,15 @@ function isAuthorized(
   const auth = req.headers["authorization"];
   if (auth && auth.startsWith("Bearer "))
     return constantTimeEqual(auth.slice(7), expectedToken);
+  // HttpOnly cookie：浏览器同源请求自动携带；值即 token 本身（loopback 场景下与 HTML 内嵌等价，但 JS/XSS 不可读）。
+  const cookie = req.headers.cookie;
+  if (cookie) {
+    for (const part of cookie.split(";")) {
+      const [name, value] = part.trim().split("=");
+      if (name === "cbx_token" && value)
+        return constantTimeEqual(decodeURIComponent(value), expectedToken);
+    }
+  }
   if (allowQueryToken) {
     const q = url.searchParams.get("token");
     if (q) return constantTimeEqual(q, expectedToken);
@@ -75,9 +92,12 @@ async function summarizeWorkspace(
   let gitBranch: string | null = null;
   let gitDirty: boolean | null = null;
   try {
-    const branch = capture(["git", "branch", "--show-current"], workspace);
+    // 异步 git：Web UI 服务进程内跑，避免 git status 阻塞 SSE 心跳与其他客户端（git-ops 的同步版保留给 worker 进程）。
+    const [branch, statusResult] = await Promise.all([
+      captureAsync(["git", "branch", "--show-current"], workspace),
+      captureAsync(["git", "status", "--porcelain"], workspace),
+    ]);
     if (branch.code === 0) gitBranch = branch.stdout.trim() || null;
-    const statusResult = capture(["git", "status", "--porcelain"], workspace);
     if (statusResult.code === 0) gitDirty = Boolean(statusResult.stdout.trim());
   } catch {
     /* not a git repo, leave null */
@@ -402,6 +422,25 @@ function text(
   res.end(value);
 }
 
+/** 读取 POST 请求体并解析为 JSON 对象；空 body 返回 {}。用于写操作（approve/continue 等携带参数）。 */
+async function readJsonBody(
+  req: IncomingMessage,
+): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  const raw = Buffer.concat(chunks).toString("utf8");
+  if (!raw.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("请求体必须是合法 JSON。");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error("请求体必须是 JSON 对象。");
+  return parsed as Record<string, unknown>;
+}
+
 /** SSE 客户端：res + 回放期间缓冲。replaying=true 时 broadcast 写入 pending，回放完成后 flush，消除丢事件窗口。 */
 interface SseClient {
   res: ServerResponse;
@@ -593,7 +632,7 @@ export function createWebUiServer(
   };
   const server = createServer(async (req, res) => {
     try {
-      if (req.method !== "GET")
+      if (req.method !== "GET" && req.method !== "POST")
         return json(res, { error: "method not allowed" }, 405);
       const url = new URL(req.url ?? "/", `http://${host}:${port}`);
       // UI 外壳与 /healthz 保持开放；API 数据仍需鉴权。
@@ -611,17 +650,21 @@ export function createWebUiServer(
       if (url.pathname === "/") {
         const uiDir = resolveUiDir();
         const html = await readFile(path.join(uiDir, "index.html"), "utf8");
-        return text(
-          res,
-          html.replace(
-            /__CBX_TOKEN__/g,
-            token ? JSON.stringify(token) : "undefined",
-          ),
-          "text/html; charset=utf-8",
-        );
+        // token 经 HttpOnly cookie 下发：浏览器同源请求自动携带，页面 JS/XSS 不可读，也不出现在 URL 查询串。
+        // 首页本身保持开放（PUBLIC_UI_PATHS），cookie 仅作后续 API 的凭证。
+        if (token) {
+          res.setHeader(
+            "set-cookie",
+            `cbx_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/`,
+          );
+        }
+        return text(res, html, "text/html; charset=utf-8");
       }
       if (url.pathname === "/style.css") {
-        const css = await readFile(path.join(resolveUiDir(), "style.css"), "utf8");
+        const css = await readFile(
+          path.join(resolveUiDir(), "style.css"),
+          "utf8",
+        );
         return text(res, css, "text/css; charset=utf-8");
       }
       if (url.pathname === "/app.js") {
@@ -716,6 +759,67 @@ export function createWebUiServer(
           JSON.stringify(await readAgentLogIncremental(ws, agentLog[1], since)),
           "application/json; charset=utf-8",
         );
+      }
+      // ---- 写操作（POST，需鉴权；SameSite=Strict cookie 阻止跨站携带，loopback 绑定 + HttpOnly 即够）----
+      if (req.method === "POST") {
+        if (url.pathname === "/api/queue/pause")
+          return json(res, await pauseQueue(ws));
+        if (url.pathname === "/api/queue/resume")
+          return json(res, await resumeQueue(ws));
+        const jobAction =
+          /^\/api\/jobs\/([^/]+)\/(approve|cancel|retry|continue)$/.exec(
+            url.pathname,
+          );
+        if (jobAction) {
+          const jobId = jobAction[1];
+          const action = jobAction[2];
+          if (action === "approve") {
+            const state = await approveJob(ws, jobId);
+            // 与 MCP cbx_approve 一致：批准 before_run 后状态回 queued，需显式启动。
+            if (state.status === "queued") await startBackground(ws, jobId);
+            return json(res, state);
+          }
+          if (action === "cancel") return json(res, await cancelJob(ws, jobId));
+          if (action === "retry") {
+            const body = await readJsonBody(req);
+            const priority =
+              body.priority === undefined ? 0 : Number(body.priority);
+            return json(res, await retryQueueJob(ws, jobId, priority));
+          }
+          // continue
+          const body = await readJsonBody(req);
+          const extraRounds =
+            body.extra_rounds === undefined ? 0 : Number(body.extra_rounds);
+          if (
+            body.extra_rounds !== undefined &&
+            (!Number.isInteger(extraRounds) ||
+              extraRounds < 1 ||
+              extraRounds > 100)
+          )
+            return json(
+              res,
+              { error: "extra_rounds 必须是 1 到 100 的整数。" },
+              400,
+            );
+          const priority =
+            body.priority === undefined ? 0 : Number(body.priority);
+          if (body.priority !== undefined && !Number.isFinite(priority))
+            return json(res, { error: "priority 必须是数字。" }, 400);
+          await startBackground(
+            ws,
+            jobId,
+            body.message === undefined ? "" : String(body.message),
+            priority,
+            body.context_snapshot === undefined
+              ? undefined
+              : String(body.context_snapshot),
+            body.refresh_baseline === undefined
+              ? false
+              : Boolean(body.refresh_baseline),
+            extraRounds,
+          );
+          return json(res, { jobId, status: "queued" });
+        }
       }
       return json(res, { error: "not found" }, 404);
     } catch (error) {

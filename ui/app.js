@@ -9,8 +9,13 @@ function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 function cbxFetch(url,opts){
   opts=opts||{};
   opts.headers=Object.assign({},opts.headers||{});
-  if(window.CBX_TOKEN)opts.headers['Authorization']='Bearer '+window.CBX_TOKEN;
+  // token 走 HttpOnly cookie（同源请求自动携带），JS 不可读、不落 URL。
+  opts.credentials='same-origin';
   return fetch(url,opts);
+}
+function cbxPost(url,body){
+  body=body||{};
+  return cbxFetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
 }
 async function refresh(){
   var ws=encodeURIComponent(currentWorkspace||'');
@@ -32,6 +37,11 @@ function updateCards(jobs,q){
   var cFail=document.querySelector('#c-failed');cFail.textContent=failed;cFail.className='card-value'+(failed>0?' s-failed':'');
   var cQ=document.querySelector('#c-queue');cQ.textContent=depth+(q.paused?' (\u6682\u505c)':'');cQ.className='card-value'+(q.paused?' s-running':'');
   document.querySelector('#c-last').textContent=last?fmt(last):'\u2014';
+  // 队列控制按钮：暂停时显示「恢复队列」，反之显示「暂停队列」。
+  var pauseBtn=document.querySelector('#btn-pause');
+  var resumeBtn=document.querySelector('#btn-resume');
+  if(pauseBtn)pauseBtn.hidden=q.paused;
+  if(resumeBtn)resumeBtn.hidden=!q.paused;
   var health=document.querySelector('#c-health');
   health.textContent=(q.paused?'\u6682\u505c':failed>0?failed+'\u4e2a\u5931\u8d25':active>0?'\u8fd0\u884c\u4e2d':'\u7a7a\u95f2');
   health.className='card-value'+(q.paused?' s-running':failed>0?' s-failed':active>0?' s-running':' s-done');
@@ -120,6 +130,38 @@ async function loadDetail(id){
     stageHtml+='</div>';
   }
   body.innerHTML=stageHtml+'<div class="tabs" id="detail-tabs"></div><div class="tab-panels" id="detail-panels"></div>';
+  // 写操作按钮：按任务状态决定可用动作（awaiting_approval→批准；运行/排队→取消；失败终态→重试/继续）。
+  // 与 CLI/MCP 语义一致；POST 经 HttpOnly cookie 鉴权（SameSite=Strict 阻止跨站携带）。
+  (function renderActions(){
+    var status=result&&result.status||'';
+    var actions=[];
+    if(status==='awaiting_approval')actions.push({name:'approve',label:'批准'});
+    if(['queued','running'].indexOf(status)>=0)actions.push({name:'cancel',label:'取消'});
+    if(['failed','needs_fix','review_failed','cancelled'].indexOf(status)>=0)actions.push({name:'retry',label:'重试'});
+    if(['needs_fix','review_failed'].indexOf(status)>=0)actions.push({name:'continue',label:'继续'});
+    if(!actions.length)return;
+    var bar=document.querySelector('#detail-body .job-actions');
+    if(!bar){bar=document.createElement('div');bar.className='job-actions';body.insertBefore(bar,body.firstChild);}
+    bar.innerHTML=actions.map(function(a){
+      return '<button type="button" class="job-action" data-action="'+a.name+'">'+a.label+'</button>';
+    }).join('');
+    bar.querySelectorAll('.job-action').forEach(function(btn){
+      btn.addEventListener('click',async function(){
+        btn.disabled=true;
+        var orig=btn.textContent;
+        btn.textContent='处理中…';
+        try{
+          var action=btn.dataset.action;
+          var res=await cbxPost('/api/jobs/'+encodeURIComponent(id)+'/'+action,action==='continue'?{message:'请根据 review.md 修复问题。'}:{});
+          if(!res.ok){var err=await res.json();throw new Error(err.error||('HTTP '+res.status));}
+          loadDetail(id);refresh();
+        }catch(e){
+          btn.disabled=false;btn.textContent=orig;
+          alert('操作失败：'+(e instanceof Error?e.message:String(e)));
+        }
+      });
+    });
+  })();
   // 动态 tab 列表
   var tabs=[
     {name:'overview',label:'概览'},
@@ -211,6 +253,18 @@ async function loadTab(id,tab,panelsEl,result){
 document.querySelector('#jobs').addEventListener('click',function(e){
   var row=e.target.closest('tr.job');if(row)selectJob(row.dataset.id);
 });
+document.querySelector('#btn-pause').addEventListener('click',async function(){
+  var btn=this;btn.disabled=true;
+  try{var res=await cbxPost('/api/queue/pause');if(!res.ok){var err=await res.json();throw new Error(err.error||('HTTP '+res.status));}refresh();}
+  catch(e){alert('暂停失败：'+(e instanceof Error?e.message:String(e)));}
+  finally{btn.disabled=false;}
+});
+document.querySelector('#btn-resume').addEventListener('click',async function(){
+  var btn=this;btn.disabled=true;
+  try{var res=await cbxPost('/api/queue/resume');if(!res.ok){var err=await res.json();throw new Error(err.error||('HTTP '+res.status));}refresh();}
+  catch(e){alert('恢复失败：'+(e instanceof Error?e.message:String(e)));}
+  finally{btn.disabled=false;}
+});
 loadWorkspaces().then(refresh);
 setInterval(refresh,1500);
 // 每秒刷新所有行耗时(不重新拉数据,仅前端算 elapsed)
@@ -225,7 +279,7 @@ function refreshElapsedRows(){
 }
 setInterval(refreshElapsedRows,1000);
 var stream=document.querySelector('#stream');
-	var es=new EventSource('/events?token='+encodeURIComponent(window.CBX_TOKEN||''));
+	var es=new EventSource('/events',{withCredentials:true});
 es.onmessage=function(e){
   var d=JSON.parse(e.data);
   if(d.type==='heartbeat'||d.type==='connected')return;
