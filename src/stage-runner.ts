@@ -248,22 +248,36 @@ export async function runStage(params: {
     }
   }
 
+  // intentional-simple: 闭包内构造辅助。report.name/executor/attempts 与 attempt/attemptExtra 在所有 16 个返回点取值相同，
+  // 仅 terminal/state/exitCode/testExitCode/reviewVerdict 因分支而异；闭包按引用读取重试预算变量，useXxxRetry 后自动累加。
+  const outcome = (
+    terminal: boolean,
+    state: JobState,
+    exitCode: number,
+    testExitCode: number | null,
+    reviewVerdict: string | null,
+  ): StageOutcome => ({
+    terminal,
+    state,
+    report: {
+      name: stage.name,
+      executor: stage.executor,
+      exitCode,
+      testExitCode,
+      reviewVerdict,
+      attempts: executionUsed + fixUsed,
+    },
+    attempt,
+    attemptExtra,
+  });
+  const cancelOutcome = async (
+    exitCode: number,
+    testExitCode: number | null,
+  ): Promise<StageOutcome> =>
+    outcome(true, await finishCancelled(), exitCode, testExitCode, null);
+
   for (;;) {
-    if (existsSync(cancelMarker))
-      return {
-        terminal: true,
-        state: await finishCancelled(),
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: -1,
-          testExitCode: null,
-          reviewVerdict: null,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+    if (existsSync(cancelMarker)) return await cancelOutcome(-1, null);
     attempt += 1;
     await writeState(workspace, jobId, {
       status: "running",
@@ -336,36 +350,10 @@ export async function runStage(params: {
         stage: stage.name,
         error: lastError,
       });
-      return {
-        terminal: true,
-        state,
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: -1,
-          testExitCode: null,
-          reviewVerdict: null,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return outcome(true, state, -1, null, null);
     }
     if (existsSync(cancelMarker))
-      return {
-        terminal: true,
-        state: await finishCancelled(),
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: agent.code,
-          testExitCode: null,
-          reviewVerdict: null,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return await cancelOutcome(agent.code, null);
     await collectDiff(directory, workdir);
     if (context.dependencyGuard) {
       let depChanged = false;
@@ -400,20 +388,7 @@ export async function runStage(params: {
           stage: stage.name,
           error: lastError,
         });
-        return {
-          terminal: true,
-          state,
-          report: {
-            name: stage.name,
-            executor: stage.executor,
-            exitCode: 0,
-            testExitCode: null,
-            reviewVerdict: null,
-            attempts: executionUsed + fixUsed,
-          },
-          attempt,
-          attemptExtra,
-        };
+        return outcome(true, state, 0, null, null);
       }
     }
     if (agent.code !== 0 || agent.timedOut) {
@@ -439,20 +414,7 @@ export async function runStage(params: {
         timedOut: agent.timedOut,
         error: lastError,
       });
-      return {
-        terminal: true,
-        state,
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: agent.code,
-          testExitCode: null,
-          reviewVerdict: null,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return outcome(true, state, agent.code, null, null);
     }
     executorExitCode = 0;
     await writeState(workspace, jobId, {
@@ -467,20 +429,7 @@ export async function runStage(params: {
       context.timeoutMs,
     );
     if (existsSync(cancelMarker))
-      return {
-        terminal: true,
-        state: await finishCancelled(),
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: 0,
-          testExitCode: test.code,
-          reviewVerdict: null,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return await cancelOutcome(0, test.code);
     const reviewedSnapshot = await collectDiff(directory, workdir);
     if (test.code !== 0 || test.timedOut) {
       lastError = test.timedOut
@@ -506,38 +455,18 @@ export async function runStage(params: {
         timedOut: test.timedOut,
         error: lastError,
       });
-      return {
-        terminal: true,
-        state,
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: 0,
-          testExitCode: test.code,
-          reviewVerdict: null,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return outcome(true, state, 0, test.code, null);
     }
     testExitCode = 0;
     if (stage.skipReview || !context.reviewRequested) {
       reviewVerdict = stage.skipReview ? "skipped" : null;
-      return {
-        terminal: false,
-        state: await loadState(workspace, jobId),
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: 0,
-          testExitCode: 0,
-          reviewVerdict,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return outcome(
+        false,
+        await loadState(workspace, jobId),
+        0,
+        0,
+        reviewVerdict,
+      );
     }
     await writeState(workspace, jobId, {
       status: "running",
@@ -626,36 +555,9 @@ export async function runStage(params: {
         stage: stage.name,
         error: lastError,
       });
-      return {
-        terminal: true,
-        state,
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: 0,
-          testExitCode: 0,
-          reviewVerdict: null,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return outcome(true, state, 0, 0, null);
     }
-    if (existsSync(cancelMarker))
-      return {
-        terminal: true,
-        state: await finishCancelled(),
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: 0,
-          testExitCode: 0,
-          reviewVerdict: null,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+    if (existsSync(cancelMarker)) return await cancelOutcome(0, 0);
     const afterReview = await snapshotDiff(workdir);
     if (JSON.stringify(afterReview) !== JSON.stringify(reviewedSnapshot)) {
       await collectDiff(directory, workdir);
@@ -668,20 +570,7 @@ export async function runStage(params: {
         reviewerModifiedWorktree: true,
         error: lastError,
       });
-      return {
-        terminal: true,
-        state,
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: 0,
-          testExitCode: 0,
-          reviewVerdict: "FAIL",
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return outcome(true, state, 0, 0, "FAIL");
     }
     if (reviewAgent.code !== 0 || reviewAgent.timedOut) {
       lastError = reviewAgent.timedOut
@@ -704,20 +593,7 @@ export async function runStage(params: {
         timedOut: reviewAgent.timedOut,
         error: lastError,
       });
-      return {
-        terminal: true,
-        state,
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: 0,
-          testExitCode: 0,
-          reviewVerdict: null,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return outcome(true, state, 0, 0, null);
     }
     if (structuredAuditRequested(context)) {
       try {
@@ -762,20 +638,7 @@ export async function runStage(params: {
           auditError: lastError,
           error: lastError,
         });
-        return {
-          terminal: true,
-          state,
-          report: {
-            name: stage.name,
-            executor: stage.executor,
-            exitCode: 0,
-            testExitCode: 0,
-            reviewVerdict: "FAIL",
-            attempts: executionUsed + fixUsed,
-          },
-          attempt,
-          attemptExtra,
-        };
+        return outcome(true, state, 0, 0, "FAIL");
       }
     }
     const review = existsSync(path.join(directory, "review.md"))
@@ -788,20 +651,7 @@ export async function runStage(params: {
     const pass = /^VERDICT\s*:\s*PASS$/i.test(firstLine);
     if (pass) {
       reviewVerdict = "PASS";
-      return {
-        terminal: false,
-        state: await loadState(workspace, jobId),
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: 0,
-          testExitCode: 0,
-          reviewVerdict,
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return outcome(false, await loadState(workspace, jobId), 0, 0, "PASS");
     }
     lastError = "审查发现问题";
     attemptExtra = `请读取 ${path.join(directory, "review.md")}，修复其中的问题后重新执行。`;
@@ -818,20 +668,7 @@ export async function runStage(params: {
         humanGate: createHumanGate("semantic_conflict", { detail }),
         error: detail,
       });
-      return {
-        terminal: true,
-        state,
-        report: {
-          name: stage.name,
-          executor: stage.executor,
-          exitCode: 0,
-          testExitCode: 0,
-          reviewVerdict: "FAIL",
-          attempts: executionUsed + fixUsed,
-        },
-        attempt,
-        attemptExtra,
-      };
+      return outcome(true, state, 0, 0, "FAIL");
     }
     reviewVerdict = "FAIL";
     if (fixUsed < fixRetries) {
@@ -851,19 +688,6 @@ export async function runStage(params: {
       reviewExitCode: 0,
       error: lastError,
     });
-    return {
-      terminal: true,
-      state,
-      report: {
-        name: stage.name,
-        executor: stage.executor,
-        exitCode: 0,
-        testExitCode: 0,
-        reviewVerdict: "FAIL",
-        attempts: executionUsed + fixUsed,
-      },
-      attempt,
-      attemptExtra,
-    };
+    return outcome(true, state, 0, 0, "FAIL");
   }
 }
