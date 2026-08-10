@@ -172,6 +172,15 @@ approveJob(workspace, jobId)
 
 `approveJob()` acquires a `run.lock` file lock before modifying state. This prevents concurrent approval attempts. `retries: 0` means it fails immediately if the lock is busy — the job is still running.
 
+### Workdir Invariant (no `!` assertions)
+
+In `approveJobLocked`, `workdir = context.isolated ? recorded?.path : workspace` where `recorded` comes from `worktree.json`. The path must exist for snapshot verification and `commitWorktree`:
+
+- `snapshotMatches` narrows the type explicitly — `workdir !== undefined && existsSync(workdir) && worktreeSha256(await snapshotDiff(workdir))` — so TypeScript knows `workdir` is a non-empty string inside the expression without a `!` assertion.
+- Reaching `commitWorktree(workdir, ...)` implies the evidence gate passed, which required `snapshotMatches === true` (hence `workdir` existed). That invariant is still guarded explicitly with `if (!workdir) throw ...` instead of `workdir!` — if a future gate change breaks the invariant, the error is diagnosable rather than a silent `undefined` argument.
+
+> **Warning**: Do not reintroduce non-null assertions (`workdir!`) for paths that the evidence gate transitively guarantees. The explicit guard is what makes the "approval only after snapshot verification" contract auditable.
+
 ---
 
 ## 6. Human Gate

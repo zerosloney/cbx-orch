@@ -327,3 +327,13 @@ Every job directory (`.cbx/jobs/<jobId>/`) contains:
 **Choice**: Each role pack has a `tokenBudget`. `trimContract()` budgets from lowest priority up: `assumptions/rejectedOptions/decisions` → `constraints/relevantFiles` → `nonGoals`. `goal`, `acceptanceCriteria`, and `stages` are **never trimmed**.
 
 **Why**: Core task semantics must survive budget pressure. Only auxiliary metadata gets truncated.
+
+### Decision: Typed JobState Optional Fields
+
+**Context**: `JobState` carried an open index signature `[key: string]: unknown`, forcing `as` casts at every read site (`state.reviewVerdict as ...`, `state.stages as ...`).
+
+**Choice**: Declare the known optional fields (`error`, `retryReason`, `testExitCode`, `reviewVerdict`, `executorExitCode`, `adaptiveRound`, `adaptiveRounds`, `stages`, `stageRetries`, `humanGate`, `pendingCompletion`, `gitCommit`, baseline/cleanup flags, …) as typed optional properties, keeping `[key: string]: unknown` as a forward-compat fallback.
+
+**Why**: Declared fields narrow on read (`Array.isArray(initial.stages)` narrows to `StageReport[]`), eliminating redundant casts while unknown future fields still compile. The index signature remains for forward compatibility with older persisted jobs.
+
+**Extensibility**: When adding a new persisted field to `JobState`, declare it in `types.ts` rather than reading it through the index signature. Casts remain only for dynamically-typed payloads (`adaptiveRounds as Json[]`, `decision.stage as TaskStage`).

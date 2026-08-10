@@ -17,6 +17,15 @@ The authoritative job and queue state is persisted through `src/storage.ts` in `
 
 Use `listJobs`, `loadState`, `listQueue`, and the HTTP read routes as projections of durable state. Do not update SQLite from a browser or TUI component.
 
+## Write Operations Go Through The Server
+
+UI write operations (`POST /api/jobs/:id/approve|cancel|retry|continue`, `POST /api/queue/pause|resume`) call the same orchestrator functions the CLI/MCP use (`approveJob`, `cancelJob`, `retryQueueJob`, `startBackground`, `pauseQueue`, `resumeQueue`). The browser never touches SQLite or state files directly — it sends a POST and the server performs the atomic state/queue transition under the queue lock.
+
+- The browser button surface is driven by job status: `awaiting_approval` → approve; `queued`/`running` → cancel; terminal failures → retry/continue.
+- `approve` on a `before_run` gate returns `queued` and the server must explicitly `startBackground` (mirror CLI/MCP behavior).
+- POST validation errors (e.g. `extra_rounds` not in 1..100) return HTTP 400, not 500.
+- A write button disables itself while the request is in flight to prevent duplicate submits; a failed write surfaces via alert and the row/queue re-fetches.
+
 ## View State
 
 View-only state is local to its owner:

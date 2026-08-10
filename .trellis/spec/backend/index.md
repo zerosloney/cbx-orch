@@ -50,6 +50,7 @@ The backend is a **durable task orchestration engine** for coding-agent CLIs. It
 | [Context Pack](./context-pack.md) | Role projections, token budgets, artifact references |
 | [Queue & Scheduler](./queue-scheduler.md) | Worker dispatch, heartbeat, reclaim, circuit-breaking |
 | [Evidence & Approval](./evidence-approval.md) | Evidence hashes, approval gates, structured audit |
+| [MCP Server](./mcp-server.md) | JSON-RPC tool contracts, response shape convention, validation |
 
 ## Pre-Development Checklist
 
