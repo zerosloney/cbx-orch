@@ -76,7 +76,7 @@
     ".trellis/scripts/common/types.py": "9962081cc2608fb9d1deb32c6880e336f62cdca6b338e7ae813304701e155ee9",
     ".trellis/scripts/common/workflow_phase.py": "79ee522de20246acf1e2c222e8ad180ad25aaec7fec98214a93d9e81b350d9a8",
     ".trellis/scripts/common/__init__.py": "3d5e9347141f0296319a5beb29d69ae714c5a474b9078caeb3edd7c5f6562e22",
-    ".trellis/scripts/common/__pycache__/active_task.cpython-312.pyc": "f2f082eb6abbc377f171443c74a60ab71aa70597dcee6d51b8055b2f7b890859",
+    ".trellis/scripts/common/__pycache__/active_task.cpython-312.pyc": "a771efe1316fc4e38b02f49a6744a1c61db0ddab58a1550631c4b270d12f45e6",
     ".trellis/scripts/common/__pycache__/config.cpython-312.pyc": "86eb6dfd8f5d798161986c5351faa75c8dd38ceb403a597eb5a9c9c44953c1be",
     ".trellis/scripts/common/__pycache__/developer.cpython-312.pyc": "c3cc1cc748af28a837d7141b3cbac63e655e1ddf718d96325780406f33d7ae55",
     ".trellis/scripts/common/__pycache__/git.cpython-312.pyc": "f5f977a6f81c660e2c1a9814d3691c77a5306a65000b3f5ed982cd5ece6f3dda",
