@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import type { JobState } from "../../types.js";
 import { colorizeStatus } from "../theme.js";
+import { fmtElapsed } from "../../formatting.js";
 
 function stripAnsi(s: string): string {
   return s.replace(/\u001b\[[0-9;]*m/g, "");
@@ -16,35 +17,30 @@ function padDisplayEnd(s: string, width: number): string {
   return s + " ".repeat(width - len);
 }
 
-function truncateDisplay(s: string, width: number): string {
+// 按显示宽度截断，正确处理 ANSI 转义：转义序列不计宽度但原样保留。
+// 算法：用正则把串切成 [ansi, text, ansi, text, ...]，遍历累加 text 的显示宽度，
+// 到达 width-1（留 1 给省略号）后停止，已累积的 ansi+text 原样输出 + "…"。
+// 旧实现逐码元 stripAnsi(ch) 对单码元无效，会把 \x1b[31m 的 5 个码元各计 1 宽，导致带色串截断错位。
+// 导出仅供测试覆盖（@internal）。
+export function truncateDisplay(s: string, width: number): string {
   if (displayWidth(s) <= width) return s;
+  const limit = Math.max(0, width - 1); // 留 1 给省略号
+  // intentional-simple: 正则切分 ANSI(组1) 与 非ANSI 文本(组2)，按显示顺序交替。
+  const tokens = s.match(/\x1b\[[0-9;]*m|[^]/g) ?? [];
   let result = "";
   let w = 0;
-  for (const ch of s) {
-    const cw = stripAnsi(ch).length || 1;
-    if (w + cw > width - 1) {
-      result += "…";
-      break;
+  for (const tok of tokens) {
+    if (tok === "") continue;
+    // ANSI 转义序列不计宽度，原样保留。
+    if (tok.charCodeAt(0) === 0x1b) {
+      result += tok;
+      continue;
     }
-    result += ch;
-    w += cw;
+    if (w >= limit) break;
+    result += tok;
+    w += tok.length;
   }
-  return result;
-}
-
-function fmtElapsed(iso: string | undefined | null): string {
-  if (!iso) return "—";
-  const ms = Date.now() - Date.parse(iso);
-  if (!Number.isFinite(ms) || ms < 0) return "—";
-  if (ms < 60_000) return Math.floor(ms / 1000) + "s";
-  if (ms < 3600_000)
-    return Math.floor(ms / 60_000) + "m " + Math.floor((ms % 60_000) / 1000) + "s";
-  return (
-    Math.floor(ms / 3600_000) +
-    "h " +
-    Math.floor((ms % 3600_000) / 60_000) +
-    "m"
-  );
+  return result + "…";
 }
 
 export interface TableRow {

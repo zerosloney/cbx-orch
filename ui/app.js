@@ -2,7 +2,7 @@ console.log('cbx-ui: script start, page loaded at', new Date().toISOString());
 var allWorkspaces=[];
 var currentWorkspace=null;
 var selected=null;
-function rowAttr(id){return String(id).replace(/[^\w-]/g,function(c){return'\\'+c})}
+function rowAttr(id){return window.CSS&&CSS.escape?CSS.escape(String(id)):String(id).replace(/[^\w-]/g,function(c){return'\\'+c})}
 function totalJobs(w){return Object.values(w.jobsByStatus||{}).reduce(function(a,b){return a+b;},0)}
 function fmt(iso){try{return new Date(iso).toLocaleTimeString()}catch(e){return iso}}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
