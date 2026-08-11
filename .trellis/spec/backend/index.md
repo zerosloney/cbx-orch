@@ -84,3 +84,12 @@ git diff --check
 - AND semantics: all configured dimensions must match; unconfigured dimensions do not restrict.
 - Payload fields are read as strings; a missing `jobId`/`status` makes that dimension non-matching when its filter is configured (never a false positive delivery).
 - The predicate is the exported pure function `matchesWebhookFilters(event, filters)` — keep it side-effect free and unit-tested. Do not move filtering into the outbox drain (dead-letter/retry would then carry events that should never have been enqueued).
+
+## Batch Run Contract
+
+`cbx batch` (`src/batch.ts`) creates independent jobs in waves. It is a CLI-layer convenience over `createJob` + `startBackground` — it never touches the queue's `maxConcurrent` or the scheduler.
+
+- `chunkBatch(tasks, maxBatch)` splits into waves; `maxBatch <= 0` or `>= total` means one full wave. Waves wait for the previous wave's terminal states before enqueueing the next (batch-local concurrency control).
+- Job IDs are `batch-<ts>-<seq>`; batch jobs are structurally identical to single jobs (same queue, same config, independently `retry`/`continue`-able).
+- `--wait` polls every job to a terminal state (`BATCH_TERMINAL_STATUSES`); timeout returns unfinished IDs and a non-zero exit. The terminal set must stay in sync with `JobStatus` additions.
+- Keep batch orchestration pure/testable: chunking and summarization are exported pure functions; only `runBatch` touches the queue.

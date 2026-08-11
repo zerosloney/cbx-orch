@@ -210,6 +210,8 @@ graph LR
 
 ```powershell
 node dist/src/cli.js list --workspace .
+node dist/src/cli.js batch --task "任务A" --task "任务B" --workspace .       # 批量创建任务
+node dist/src/cli.js batch --task "A" --max-batch 2 --wait --workspace .    # 波次并发 + 等待终态汇总
 node dist/src/cli.js logs JOB_ID --workspace .
 node dist/src/cli.js files JOB_ID --workspace .
 node dist/src/cli.js result JOB_ID --workspace .
@@ -222,6 +224,9 @@ node dist/src/cli.js retry JOB_ID --priority 10 --workspace .
 node dist/src/cli.js watch JOB_ID --ci --workspace .
 node dist/src/cli.js review-gate --workspace .          # 对工作区未提交改动跑独立审查（非零退出 = 有发现）
 node dist/src/cli.js stop-review-gate                   # Stop hook 入口（stdin 读 cwd，fail-open 契约）
+```
+
+`cbx batch` 批量创建独立任务：`--task`/`--task-file` 可重复（可混用）；run 选项（`--executor`/`--review`/`--isolated` 等）透传到每个任务。`--max-batch N` 将批任务按 N 个一波分片入队（波间等上一波终态，不改变全局 `maxConcurrent`）；默认 0 = 一次全量入队。`--wait` 等待全部终态并输出成功/失败计数，超时（`--wait-timeout-ms`）返回未完成列表并以非零退出；批任务 job 与普通任务同构，可独立 `retry`/`continue`。
 
 # 本地 Web UI / TUI
 node dist/src/cli.js ui --workspace . --port 4173

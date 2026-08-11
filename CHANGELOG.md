@@ -6,6 +6,9 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Feature: 任务批处理 `cbx batch`。`--task`/`--task-file` 可重复（可混用）批量创建独立任务；run 选项（executor/review/isolated 等）透传。`--max-batch N` 波次分片入队（波间等上一波终态，不改变全局 maxConcurrent），默认 0 一次全量。`--wait` 等待全部终态输出成功/失败计数，超时（`--wait-timeout-ms`）返回未完成列表并以非零退出；批任务 job 与普通任务同构（可独立 retry/continue）。jobId 前缀 `batch-<ts>-<seq>`。
+- Test: `tests/batch.test.ts`（chunkBatch 分片边界 3 例 + summarizeBatch 聚合 3 例 + CLI 端到端 4 例：多任务创建/无任务报错/--max-batch 1 波次 --wait 汇总/runBatch 直接调用）。总计 424 个测试全过。
+
 - Feature: webhook 事件订阅细分。`.cbx.json` `notifications.filters`（可选 `events`/`jobIds`/`statuses` 字符串数组）按 AND 语义过滤 webhook 投递：`events` 匹配事件 type、`jobIds` 匹配 payload.jobId、`statuses` 匹配 payload.status，未配置维度不限制；payload 字段缺失视为不匹配。不匹配事件不入 outbox（本地 events.ndjson 仍全量）；无 filters 时行为不变。strict schema：未知 filters 键/空数组/错类型拒绝。
 - Test: `matchesWebhookFilters` 单测 6 例（无 filters 全量/各维度匹配与缺失/AND 语义）+ `publishEvent` 过滤集成（不匹配无 pending delivery、本地 events 全量）+ config schema 4 例。总计 421 个测试全过。
 
