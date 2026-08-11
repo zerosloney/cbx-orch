@@ -8,13 +8,13 @@ import {
   now,
   updateJobContext,
   withFileLock,
-  prunePersistedData,
 } from "./storage.js";
 import { finishSpan, startSpan } from "./observability.js";
 import {
   loadState,
   writeState,
   loadConfig,
+  pruneAfterTerminal,
   jobDir,
   logJobEvent,
 } from "./state.js";
@@ -932,14 +932,12 @@ export async function executeJob(
         // 排队中/前台被取消的任务不得启动：保留取消标记并返回终态。
         // 重新执行必须走 continue/retry（入队时清除取消标记）。
         const marker = path.join(jobDir(workspace, jobId), "cancel.requested");
-        // 取一次保留期配置，终态路径统一 prune，避免每个分支重复 loadConfig。
-        const retentionDays = (await loadConfig(workspace)).governance?.retentionDays;
         if (existsSync(marker)) {
           const current = await loadState(workspace, jobId);
           if (current.status === "cancelled") {
             if (queueEntryId) await finishQueueEntry(workspace, queueEntryId);
             await writeResult(workspace, jobId, current);
-            await prunePersistedData(workspace, retentionDays);
+            await pruneAfterTerminal(workspace);
             return current;
           }
         }
@@ -951,7 +949,7 @@ export async function executeJob(
         );
         if (queueEntryId) await dispatchQueue(workspace);
         // 保留期清理收敛到任务终态（含 early-return 的基线漂移/取消路径），避免每次 writeState 都触发。
-        await prunePersistedData(workspace, retentionDays);
+        await pruneAfterTerminal(workspace);
         return result;
       } finally {
         try {

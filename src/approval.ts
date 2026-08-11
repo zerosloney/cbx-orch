@@ -5,11 +5,11 @@ import {
   loadJobContext,
   now,
   withFileLock,
-  prunePersistedData,
 } from "./storage.js";
 import {
   loadState,
   loadConfig,
+  pruneAfterTerminal,
   writeState,
   writeApprovalState,
   jobDir,
@@ -52,7 +52,6 @@ async function approveJobLocked(
     throw new Error("Human Gate 已解决，不能重复批准。");
   const config = await loadConfig(workspace);
   const redact = contextRedactor(config.governance);
-  const retentionDays = config.governance?.retentionDays;
   if (state.phase === "before_run" && gate.reason === "before_run") {
     return writeApprovalState(
       workspace,
@@ -111,7 +110,7 @@ async function approveJobLocked(
       "failed",
     );
     await writeResult(workspace, jobId, stale);
-    await prunePersistedData(workspace, retentionDays);
+    await pruneAfterTerminal(workspace);
     return stale;
   }
   const updates: Json = {
@@ -153,7 +152,7 @@ async function approveJobLocked(
         "failed",
       );
       await writeResult(workspace, jobId, failed);
-      await prunePersistedData(workspace, retentionDays);
+      await pruneAfterTerminal(workspace);
       return failed;
     }
   }
@@ -168,7 +167,7 @@ async function approveJobLocked(
   }
   const completed = await loadState(workspace, jobId);
   await writeResult(workspace, jobId, completed);
-  await prunePersistedData(workspace, retentionDays);
+  await pruneAfterTerminal(workspace);
   return completed;
 }
 

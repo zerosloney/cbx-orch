@@ -4,6 +4,7 @@ import { publishEvent } from "./observability.js";
 import {
   loadRuntimeConfig,
   loadPersistedState,
+  prunePersistedData,
   savePersistedState,
   savePersistedStateAndFinishQueue,
   savePersistedStateAndResolveApprovalQueue,
@@ -52,6 +53,23 @@ export async function loadState(
 
 export async function loadConfig(workspaceInput: string): Promise<CbxConfig> {
   return loadRuntimeConfig(workspaceInput);
+}
+
+/**
+ * 任务进入终态后的保留期清理入口：加载 governance.retentionDays 并调用 prunePersistedData。
+ *
+ * 这是终态路径（approve / cancel / executeJob 早返回与终态分支）的唯一保留期清理入口。
+ * 之前 13bf85f 重构把 prunePersistedData 从 state.ts / queue-api.ts 移走，散到 4 个文件
+ * 6 个调用点、每点都各自 loadConfig 一次；现在收成单 helper，retentionDays 解析与
+ * prune 调用是同一个原子单元——未来加 retentionHours / 多段保留 / 中间态清理，
+ * 改这一处即可。
+ *
+ * 周期性清理（health check）走 `prunePersistedData(workspace, config.governance?.retentionDays)`
+ * 直接调，那是另一个关注点，不在终态触发范围内。
+ */
+export async function pruneAfterTerminal(workspace: string): Promise<number> {
+  const retentionDays = (await loadConfig(workspace)).governance?.retentionDays;
+  return prunePersistedData(workspace, retentionDays);
 }
 
 export function mergeConfig(
