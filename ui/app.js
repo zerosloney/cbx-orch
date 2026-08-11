@@ -139,22 +139,37 @@ async function loadDetail(id){
     if(['queued','running'].indexOf(status)>=0)actions.push({name:'cancel',label:'取消'});
     if(['failed','needs_fix','review_failed','cancelled'].indexOf(status)>=0)actions.push({name:'retry',label:'重试'});
     if(['needs_fix','review_failed'].indexOf(status)>=0)actions.push({name:'continue',label:'继续'});
+    // forget / purge 不可逆——浏览器 confirm() 是天然的安全 UX，二次确认后才能 POST。
+    // 状态守卫：与后端原语保持一致，禁止对 running/queued/awaiting_approval 操作；
+    // 已在终态或 cancelled 的任务可被 forget / purge。
+    if(status && ['done','failed','review_failed','needs_fix','cancelled'].indexOf(status)>=0){
+      actions.push({name:'forget',label:'Forget（保留 worktree）',confirm:'确定要 forget '+id+' 吗？state.json / events.ndjson / 全部工件会被删除，worktree 保留。此操作不可撤销。'});
+      actions.push({name:'purge',label:'Purge（连 worktree 一起删）',confirm:'确定要 purge '+id+' 吗？worktree + state + 全部工件都会删除。此操作不可撤销。'});
+    }
     if(!actions.length)return;
     var bar=document.querySelector('#detail-body .job-actions');
     if(!bar){bar=document.createElement('div');bar.className='job-actions';body.insertBefore(bar,body.firstChild);}
     bar.innerHTML=actions.map(function(a){
-      return '<button type="button" class="job-action" data-action="'+a.name+'">'+a.label+'</button>';
+      var confirmAttr = a.confirm ? ' data-confirm="'+esc(a.confirm)+'"' : '';
+      return '<button type="button" class="job-action" data-action="'+a.name+'"'+confirmAttr+'>'+a.label+'</button>';
     }).join('');
     bar.querySelectorAll('.job-action').forEach(function(btn){
       btn.addEventListener('click',async function(){
+        // forget / purge 走浏览器 confirm() 二次确认——这是 Web UI 路径下能给不可逆操作
+        // 的最干净 UX（cancel/retry/approve/continue 都是可恢复或低风险的，不弹 confirm）。
+        var action=btn.dataset.action;
+        var confirmMsg=btn.dataset.confirm;
+        if(confirmMsg && !window.confirm(confirmMsg))return;
         btn.disabled=true;
         var orig=btn.textContent;
         btn.textContent='处理中…';
         try{
-          var action=btn.dataset.action;
           var res=await cbxPost('/api/jobs/'+encodeURIComponent(id)+'/'+action,action==='continue'?{message:'请根据 review.md 修复问题。'}:{});
           if(!res.ok){var err=await res.json();throw new Error(err.error||('HTTP '+res.status));}
-          loadDetail(id);refresh();
+          // forget / purge 后该 job 在 /api/jobs 里也消失；详情面板没意义，关闭它。
+          if(action==='forget'||action==='purge'){selectJob(null);}
+          else{loadDetail(id);}
+          refresh();
         }catch(e){
           btn.disabled=false;btn.textContent=orig;
           alert('操作失败：'+(e instanceof Error?e.message:String(e)));

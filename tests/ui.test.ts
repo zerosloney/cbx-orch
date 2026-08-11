@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { AddressInfo } from "node:net";
-import { createJob, jobDir } from "../src/core.js";
+import { createJob, cancelJob, jobDir, loadState } from "../src/core.js";
+import { savePersistedState } from "../src/storage.js";
 import { handleTuiKey, scheduleTuiPoll, startTui } from "../src/tui/index.js";
 import { truncateDisplay } from "../src/tui/components/job-table.js";
 import {
@@ -905,5 +906,109 @@ test("HTTP: 多 workspace 时 /api/workspaces 逐个汇总", async () => {
     };
     assert.equal(body.workspaces.length, 2);
     assert.equal(body.default, ws1);
+  });
+});
+
+test("HTTP: POST forget 删 state.json/events.ndjson/artifacts 但保留 worktree", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-forget-"));
+  const job = await createJob({
+    workspace,
+    task: "forget http test",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "http-forget",
+  });
+  // job 处于 queued/running 之外，先 cancel 让它进 cancelled（与 CLI/MCP 状态守卫一致）。
+  const cancelled = await cancelJob(workspace, job.jobId);
+  assert.equal(cancelled.status, "cancelled");
+  await withServer(workspace, undefined, async (port) => {
+    const res = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/forget`,
+      { method: "POST" },
+    );
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      job_id: string;
+      status: string;
+      deleted_directory: boolean;
+      worktree_cleaned: boolean;
+      remaining_queue_entries: number;
+    };
+    assert.equal(body.job_id, "http-forget");
+    assert.equal(body.status, "cancelled");
+    assert.equal(body.deleted_directory, true);
+    // forget 不删 worktree
+    assert.equal(body.worktree_cleaned, false);
+  });
+  // 再次 loadState 应当失败——目录已经被 rm
+  let loadErr: Error | undefined;
+  try {
+    await loadState(workspace, job.jobId);
+  } catch (error) {
+    loadErr = error as Error;
+  }
+  assert.ok(loadErr, "forget 后 loadState 必须抛错");
+  assert.match(loadErr!.message, /任务不存在或状态文件损坏/);
+});
+
+test("HTTP: POST purge 连 worktree 一起删，worktree_cleaned=true", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-purge-"));
+  const job = await createJob({
+    workspace,
+    task: "purge http test",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "http-purge",
+    keepWorktree: true,
+  });
+  const cancelled = await cancelJob(workspace, job.jobId);
+  assert.equal(cancelled.status, "cancelled");
+  await withServer(workspace, undefined, async (port) => {
+    const res = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/purge`,
+      { method: "POST" },
+    );
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      job_id: string;
+      deleted_directory: boolean;
+      worktree_cleaned: boolean;
+    };
+    assert.equal(body.job_id, "http-purge");
+    assert.equal(body.deleted_directory, true);
+    // purge 在已 cancel 任务上，worktree 已被 cancelJob 先清过一次，cleanupWorktree 二次
+    // 调用幂等返回 false，但语义上"worktree 不在"等价于"被清"
+    assert.equal(body.worktree_cleaned, false);
+  });
+});
+
+test("HTTP: POST forget 拒绝 running 任务（500 抛错）", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-forget-busy-"));
+  const job = await createJob({
+    workspace,
+    task: "forget busy test",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "http-forget-busy",
+  });
+  // 强制把状态写到 running 来模拟——后端状态守卫会拒绝。
+  const state = await loadState(workspace, job.jobId);
+  state.status = "running";
+  await savePersistedState(workspace, job.jobId, state);
+  await withServer(workspace, undefined, async (port) => {
+    const res = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/forget`,
+      { method: "POST" },
+    );
+    // 后端抛错 → HTTP 500（与 /api/jobs/:id 不存在时的映射一致）
+    assert.equal(res.status, 500);
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /当前状态为 running/);
   });
 });

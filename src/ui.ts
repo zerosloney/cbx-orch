@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import {
   approveJob,
   cancelJob,
+  forgetJobKeepWorktree,
   health,
   jobDir,
   listArtifacts,
@@ -17,6 +18,7 @@ import {
   listQueue,
   loadState,
   pauseQueue,
+  purgeJob,
   readArtifact,
   resumeQueue,
   retryQueueJob,
@@ -769,7 +771,7 @@ export function createWebUiServer(
         if (url.pathname === "/api/queue/resume")
           return json(res, await resumeQueue(ws));
         const jobAction =
-          /^\/api\/jobs\/([^/]+)\/(approve|cancel|retry|continue)$/.exec(
+          /^\/api\/jobs\/([^/]+)\/(approve|cancel|retry|continue|forget|purge)$/.exec(
             url.pathname,
           );
         if (jobAction) {
@@ -787,6 +789,28 @@ export function createWebUiServer(
             const priority =
               body.priority === undefined ? 0 : Number(body.priority);
             return json(res, await retryQueueJob(ws, jobId, priority));
+          }
+          if (action === "forget" || action === "purge") {
+            // Web UI 路径：reason 来自 body 字段（前端在 confirm 后把 reason 透传），
+            // 缺失时给默认的 source 标记，与 MCP 入口的审计约定保持一致。
+            // body 解析失败按空对象处理：忘删本就该能用一个空 POST 完成。
+            const body: Record<string, unknown> = await readJsonBody(req)
+              .catch(() => ({}) as Record<string, unknown>);
+            const reason =
+              typeof body.reason === "string" && body.reason.trim()
+                ? `web:${action} ${body.reason}`
+                : `web:${action}`;
+            const result = await (action === "forget"
+              ? forgetJobKeepWorktree(ws, jobId, reason)
+              : purgeJob(ws, jobId, reason));
+            return json(res, {
+              job_id: result.jobId,
+              status: result.status,
+              deleted_directory: result.deletedDirectory,
+              worktree_cleaned: result.worktreeCleaned,
+              remaining_queue_entries: result.remainingQueueEntries,
+              tombstoned_at: result.tombstonedAt,
+            });
           }
           // continue
           const body = await readJsonBody(req);
