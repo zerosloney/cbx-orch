@@ -24,7 +24,7 @@ import {
   startBackground,
 } from "./core.js";
 import { runReviewGate, stopReviewGateHook } from "./review-gate.js";
-import { runTui, startWebUi } from "./ui.js";
+import { runTui, startWebUi, summarizeWorkspace } from "./ui.js";
 import { parseCliArgs, type CliArgs } from "./cli-args.js";
 import { runBatch } from "./batch.js";
 import {
@@ -34,6 +34,7 @@ import {
   renderJobDetail,
   renderJobsTable,
   renderQueueTable,
+  renderWorkspacesTable,
 } from "./formatting.js";
 
 /** 需要 jobId 的子命令统一从位置参数取，缺失时给出明确用法提示而非 undefined 透传。 */
@@ -86,6 +87,15 @@ function dedupWorkspaces(paths: string[]): string[] {
     out.push(resolved);
   }
   return out;
+}
+
+/** 解析跨 workspace 查询的 workspace 集合：显式 --workspace（可重复）> --workspaces-dir 扫描 > 默认 "."。 */
+async function resolveWorkspaces(parsed: CliArgs): Promise<string[]> {
+  const explicit = parsed.all("--workspace");
+  const scanRoot = parsed.option("--workspaces-dir");
+  const scanned = scanRoot ? await discoverWorkspaces(scanRoot) : [];
+  const all = explicit.length ? explicit : scanned.length ? scanned : ["."];
+  return dedupWorkspaces(all);
 }
 function print(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
@@ -266,6 +276,26 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "list") {
+    if (parsed.has("--all")) {
+      // 跨 workspace 列出任务，每行带 workspace 前缀。
+      const workspaces = await resolveWorkspaces(parsed);
+      const all = await Promise.all(
+        workspaces.map(async (ws) => ({
+          ws,
+          jobs: await listJobs(ws).catch(() => []),
+        })),
+      );
+      const combined = all.flatMap(({ ws, jobs }) =>
+        jobs.map((j) => ({
+          ...j,
+          jobId: `[${path.basename(ws) || ws}] ${j.jobId}`,
+        })),
+      );
+      if (isInteractive() && !parsed.has("--json"))
+        console.log(renderJobsTable(combined));
+      else print(combined);
+      return;
+    }
     const jobs = await listJobs(workspace);
     if (isInteractive() && !parsed.has("--json"))
       console.log(renderJobsTable(jobs));
@@ -289,6 +319,21 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "health" || command === "metrics") {
+    if (parsed.has("--all")) {
+      const workspaces = await resolveWorkspaces(parsed);
+      const results = await Promise.all(
+        workspaces.map(async (ws) => ({
+          workspace: ws,
+          ...(await health(ws).catch((error) => ({
+            status: "error",
+            metrics: {},
+            error: error instanceof Error ? error.message : String(error),
+          }))),
+        })),
+      );
+      print({ workspaces: results });
+      return;
+    }
     const h = await health(workspace);
     if (isInteractive() && !parsed.has("--json")) console.log(renderHealth(h));
     else print(h);
@@ -488,6 +533,29 @@ async function main(): Promise<void> {
     console.log(renderExport(state, result, format as "text" | "markdown"));
     return;
   }
+  if (command === "ws") {
+    const workspaces = await resolveWorkspaces(parsed);
+    const summaries = await Promise.all(
+      workspaces.map((ws) =>
+        summarizeWorkspace(ws).catch((error) => ({
+          path: ws,
+          name: path.basename(ws) || ws,
+          jobsByStatus: {},
+          queueDepth: 0,
+          paused: false,
+          activeExecutors: 0,
+          lastActivityAt: null,
+          gitBranch: null,
+          gitDirty: null,
+          error: error instanceof Error ? error.message : String(error),
+        })),
+      ),
+    );
+    const payload = { workspaces: summaries, default: workspaces[0] ?? "." };
+    if (!isInteractive() || parsed.has("--json")) return print(payload);
+    console.log(renderWorkspacesTable(summaries));
+    return;
+  }
   if (command === "batch") {
     if (parsed.option("--job-id"))
       throw new Error("batch 不支持 --job-id（每个任务独立生成 jobId）。");
@@ -625,7 +693,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    "用法：cbx run|start|batch|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|watch|ui|tui|review-gate|stop-review-gate ...",
+    "用法：cbx run|start|batch|ws|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|watch|ui|tui|review-gate|stop-review-gate ...",
   );
 }
 

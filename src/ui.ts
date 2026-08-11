@@ -56,7 +56,7 @@ function isAuthorized(
   return false;
 }
 
-interface WorkspaceSummary {
+export interface WorkspaceSummary {
   path: string;
   name: string;
   jobsByStatus: Record<string, number>;
@@ -66,9 +66,11 @@ interface WorkspaceSummary {
   lastActivityAt: string | null;
   gitBranch: string | null;
   gitDirty: boolean | null;
+  /** 汇总失败时由调用方填充（单 ws 失败不拖垮整体跨 ws 汇总）。 */
+  error?: string;
 }
 
-async function summarizeWorkspace(
+export async function summarizeWorkspace(
   workspace: string,
 ): Promise<WorkspaceSummary> {
   const [jobs, queue] = await Promise.all([

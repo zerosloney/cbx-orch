@@ -302,3 +302,44 @@ export function renderExport(
   }
   return md.join("\n");
 }
+
+export function renderWorkspacesTable(
+  workspaces: Array<{
+    path: string;
+    name: string;
+    jobsByStatus: Record<string, number>;
+    queueDepth: number;
+    paused: boolean;
+    activeExecutors: number;
+    gitBranch: string | null;
+    error?: string;
+  }>,
+): string {
+  if (workspaces.length === 0) return chalk.gray("无 workspace");
+  const total = (w: { jobsByStatus: Record<string, number> }): number =>
+    Object.values(w.jobsByStatus).reduce((a, b) => a + b, 0);
+  const headers = ["Workspace", "Jobs", "Active", "Queue", "Paused", "Branch"];
+  const rows = workspaces.map((w) => [
+    w.name,
+    String(total(w)),
+    String(w.activeExecutors),
+    String(w.queueDepth),
+    w.paused ? chalk.yellow("paused") : "—",
+    w.gitBranch ?? (w.error ? chalk.red("error") : "—"),
+  ]);
+  const widths = headers.map((h, i) =>
+    Math.max(h.length, ...rows.map((r) => displayWidth(String(r[i])))),
+  );
+  const line = (cells: string[]): string =>
+    "  " +
+    cells
+      .map((c, i) => padDisplayEnd(c, widths[i]))
+      .join("  ")
+      .trimEnd();
+  const out = [
+    line(headers),
+    "  " + widths.map((w) => "-".repeat(w)).join("  "),
+  ];
+  for (const row of rows) out.push(line(row));
+  return out.join("\n");
+}
