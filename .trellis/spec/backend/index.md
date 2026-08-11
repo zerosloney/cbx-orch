@@ -72,3 +72,15 @@ npm run format:check
 npm test
 git diff --check
 ```
+
+## Observability Contract: Webhook Filters
+
+`src/observability.ts:publishEvent` enqueues webhook deliveries; `notifications.filters` (`.cbx.json`) narrows which events are enqueued. Filtering happens **before** `enqueueDelivery` — a non-matching event never enters the durable outbox or dead-letter path, but always lands in the local `events.ndjson`.
+
+```json
+{ "notifications": { "webhook": "https://x", "filters": { "events": ["job.state_changed"], "jobIds": ["job-1"], "statuses": ["done"] } } }
+```
+
+- AND semantics: all configured dimensions must match; unconfigured dimensions do not restrict.
+- Payload fields are read as strings; a missing `jobId`/`status` makes that dimension non-matching when its filter is configured (never a false positive delivery).
+- The predicate is the exported pure function `matchesWebhookFilters(event, filters)` — keep it side-effect free and unit-tested. Do not move filtering into the outbox drain (dead-letter/retry would then carry events that should never have been enqueued).

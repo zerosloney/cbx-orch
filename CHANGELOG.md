@@ -6,6 +6,9 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Feature: webhook 事件订阅细分。`.cbx.json` `notifications.filters`（可选 `events`/`jobIds`/`statuses` 字符串数组）按 AND 语义过滤 webhook 投递：`events` 匹配事件 type、`jobIds` 匹配 payload.jobId、`statuses` 匹配 payload.status，未配置维度不限制；payload 字段缺失视为不匹配。不匹配事件不入 outbox（本地 events.ndjson 仍全量）；无 filters 时行为不变。strict schema：未知 filters 键/空数组/错类型拒绝。
+- Test: `matchesWebhookFilters` 单测 6 例（无 filters 全量/各维度匹配与缺失/AND 语义）+ `publishEvent` 过滤集成（不匹配无 pending delivery、本地 events 全量）+ config schema 4 例。总计 421 个测试全过。
+
 - Feature: TUI 事件流面板。选中任务在详情下方显示最近 5 条事件（时间 + 类型着色，`job.state_changed` 显示状态），经 `readEventsIncremental` 增量游标拉取，不重读全量；并入详情行数计算保持小屏防溢出。
 - Feature: 任务模板。`.cbx.json` 新增 `templates`（strict schema：`task` 必填非空，可选 `test`/`review`/`executor`/`isolated`，未知键拒绝）。CLI `cbx run/start --template <name>` 展开模板，优先级：命令行显式参数 > 模板值 > 配置默认值；模板不存在报错并列出可用名。
 - Feature: 任务结果导出。`cbx export <jobId> [--format text|markdown]` 输出任务摘要（状态/阶段/stage 链/验收证据/handback 截断）；无 result.json 时降级输出基本状态。
