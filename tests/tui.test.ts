@@ -284,6 +284,9 @@ test("handleTuiKey: up 上移并 clamp 到 0", () => {
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   handleTuiKey("up", state, () => {});
   assert.equal(state.selectedIndex, 0);
@@ -300,6 +303,9 @@ test("handleTuiKey: down 下移并 clamp 到末尾", () => {
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   handleTuiKey("down", state, () => {});
   assert.equal(state.selectedIndex, 1);
@@ -315,6 +321,9 @@ test("handleTuiKey: quit 置 stopped=true，不重绘", () => {
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   handleTuiKey("quit", state, () => {});
   assert.equal(state.stopped, true);
@@ -328,6 +337,9 @@ test("handleTuiKey: unknown 动作无副作用", () => {
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   handleTuiKey("unknown", state, () => {});
   assert.equal(state.selectedIndex, 0);
@@ -342,6 +354,9 @@ test("handleTuiKey: pause 同步切换本地状态并触发队列动作", () => 
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   const actions: Array<{ action: string; jobId?: string }> = [];
   handleTuiKey(
@@ -364,6 +379,9 @@ test("handleTuiKey: resume 同步切换本地状态并触发队列动作", () =>
     queuePaused: true,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   const actions: Array<{ action: string; jobId?: string }> = [];
   handleTuiKey(
@@ -387,6 +405,9 @@ test("handleTuiKey: cancel 携带选中任务 jobId，未选中时忽略", () =>
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   const actions: Array<{ action: string; jobId?: string }> = [];
   handleTuiKey(
@@ -406,6 +427,9 @@ test("handleTuiKey: cancel 携带选中任务 jobId，未选中时忽略", () =>
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   const noActions: Array<{ action: string; jobId?: string }> = [];
   handleTuiKey(
@@ -427,6 +451,9 @@ test("handleTuiKey: approve 仅对 awaiting_approval 任务触发", () => {
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   const actions: Array<{ action: string; jobId?: string }> = [];
   handleTuiKey(
@@ -446,6 +473,9 @@ test("handleTuiKey: approve 仅对 awaiting_approval 任务触发", () => {
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   const noActions: Array<{ action: string; jobId?: string }> = [];
   handleTuiKey(
@@ -467,6 +497,9 @@ test("handleTuiKey: retry 仅对失败终态任务触发", () => {
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   const actions: Array<{ action: string; jobId?: string }> = [];
   handleTuiKey(
@@ -486,6 +519,9 @@ test("handleTuiKey: retry 仅对失败终态任务触发", () => {
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   const noActions: Array<{ action: string; jobId?: string }> = [];
   handleTuiKey(
@@ -499,6 +535,168 @@ test("handleTuiKey: retry 仅对失败终态任务触发", () => {
   assert.deepEqual(noActions, []);
 });
 
+// ---------- forget / purge (TUI armed 二次确认) ----------
+
+function makeForgetKeyState(
+  job: JobState,
+  overrides: Partial<{
+    selectedIndex: number;
+    armedAction: "forget" | "purge" | null;
+    armedAtMs: number;
+    armedJobId: string | null;
+  }> = {},
+): {
+  jobs: JobState[];
+  selectedIndex: number;
+  queuePaused: boolean;
+  stopped: boolean;
+  needsRedraw: boolean;
+  armedAction: "forget" | "purge" | null;
+  armedAtMs: number;
+  armedJobId: string | null;
+} {
+  return {
+    jobs: [job],
+    selectedIndex: 0,
+    queuePaused: false,
+    stopped: false,
+    needsRedraw: false,
+    armedAction: overrides.armedAction ?? null,
+    armedAtMs: overrides.armedAtMs ?? 0,
+    armedJobId: overrides.armedJobId ?? null,
+  };
+}
+
+test("handleTuiKey: forget 第一次 d 进入 armed，不调 queueAction", () => {
+  const state = makeForgetKeyState(makeJob({ jobId: "f1", status: "done" }));
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "forget",
+    state,
+    () => {},
+    (action, jobId) => {
+      actions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(actions, []);
+  assert.equal(state.armedAction, "forget");
+  assert.equal(state.armedJobId, "f1");
+  assert.equal(state.needsRedraw, true);
+});
+
+test("handleTuiKey: forget 第二次 d（同 jobId + 未超时）才调 queueAction", () => {
+  const now = Date.now();
+  const state = makeForgetKeyState(
+    makeJob({ jobId: "f1", status: "cancelled" }),
+    { armedAction: "forget", armedAtMs: now, armedJobId: "f1" },
+  );
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "forget",
+    state,
+    () => {},
+    (action, jobId) => {
+      actions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(actions, [{ action: "forget", jobId: "f1" }]);
+  assert.equal(state.armedAction, null);
+  assert.equal(state.armedJobId, null);
+});
+
+test("handleTuiKey: forget 第二次按其他键（up）取消 armed", () => {
+  const now = Date.now();
+  const state = makeForgetKeyState(
+    makeJob({ jobId: "f1", status: "done" }),
+    { armedAction: "forget", armedAtMs: now, armedJobId: "f1" },
+  );
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "up",
+    state,
+    () => {},
+    (action, jobId) => {
+      actions.push({ action, jobId });
+    },
+  );
+  assert.deepEqual(actions, []);
+  assert.equal(state.armedAction, null);
+  assert.equal(state.armedJobId, null);
+  assert.equal(state.needsRedraw, true);
+});
+
+test("handleTuiKey: forget 第二次同动作但超时（>3s）失效", () => {
+  const now = Date.now();
+  const state = makeForgetKeyState(
+    makeJob({ jobId: "f1", status: "done" }),
+    {
+      armedAction: "forget",
+      armedAtMs: now - 4000,
+      armedJobId: "f1",
+    },
+  );
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  handleTuiKey(
+    "forget",
+    state,
+    () => {},
+    (action, jobId) => {
+      actions.push({ action, jobId });
+    },
+  );
+  // 超时 disarm 后本次按键变成"新一次 armed"，所以 queueAction 仍不调
+  assert.deepEqual(actions, []);
+  // 第一次按键的 armed 也被超时清掉了，但本次又重新进入 armed
+  assert.equal(state.armedAction, "forget");
+  assert.equal(state.armedJobId, "f1");
+});
+
+test("handleTuiKey: forget 拒绝 running/queued/awaiting_approval（连 armed 都不进）", () => {
+  const forbidden: Array<"running" | "queued" | "awaiting_approval"> = [
+    "running",
+    "queued",
+    "awaiting_approval",
+  ];
+  for (const status of forbidden) {
+    const state = makeForgetKeyState(
+      makeJob({ jobId: "active", status }),
+    );
+    const actions: Array<{ action: string; jobId?: string }> = [];
+    handleTuiKey(
+      "forget",
+      state,
+      () => {},
+      (action, jobId) => {
+        actions.push({ action, jobId });
+      },
+    );
+    assert.deepEqual(
+      actions,
+      [],
+      `status=${status} 应被拒（连 armed 都不进）`,
+    );
+    assert.equal(
+      state.armedAction,
+      null,
+      `status=${status} 不应进入 armed`,
+    );
+  }
+});
+
+test("handleTuiKey: purge 走 shift+d，第一次也进 armed", () => {
+  const state = makeForgetKeyState(makeJob({ jobId: "p1", status: "done" }));
+  const actions: Array<{ action: string; jobId?: string }> = [];
+  const record: (action: string, jobId?: string) => void = (action, jobId) => {
+    actions.push({ action, jobId });
+  };
+  handleTuiKey("purge", state, () => {}, record);
+  assert.deepEqual(actions, []);
+  assert.equal(state.armedAction, "purge");
+  // 第二次再调 purge 才执行
+  handleTuiKey("purge", state, () => {}, record);
+  assert.deepEqual(actions, [{ action: "purge", jobId: "p1" }]);
+});
+
 test("handleTuiKey: continue 仅对 needs_fix / review_failed 任务触发", () => {
   const needsFix = makeJob({ jobId: "continue-me", status: "needs_fix" });
   const state = {
@@ -507,6 +705,9 @@ test("handleTuiKey: continue 仅对 needs_fix / review_failed 任务触发", () 
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   const actions: Array<{ action: string; jobId?: string }> = [];
   handleTuiKey(
@@ -526,6 +727,9 @@ test("handleTuiKey: continue 仅对 needs_fix / review_failed 任务触发", () 
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   const noActions: Array<{ action: string; jobId?: string }> = [];
   handleTuiKey(

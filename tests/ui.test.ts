@@ -51,6 +51,9 @@ test("TUI polling honors intervalMs and refresh fetches immediately", () => {
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   handleTuiKey("refresh", state, () => {
     refreshes += 1;
@@ -68,6 +71,9 @@ test("handleTuiKey down on empty jobs keeps selectedIndex >= 0", () => {
     queuePaused: false,
     stopped: false,
     needsRedraw: false,
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
   handleTuiKey("down", state, () => {});
   assert.equal(state.selectedIndex, 0);

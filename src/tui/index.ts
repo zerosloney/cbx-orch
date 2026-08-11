@@ -18,9 +18,11 @@ import { buildTimeline, type JobTimeline } from "../ui.js";
 import {
   approveJob,
   cancelJob,
+  forgetJobKeepWorktree,
   listJobs,
   listQueue,
   pauseQueue,
+  purgeJob,
   readArtifact,
   readEventsIncremental,
   resumeQueue,
@@ -39,7 +41,17 @@ interface TuiState {
   needsRedraw: boolean;
   detail: { timeline: JobTimeline | null; stages: StageReport[] | null };
   eventStream: { lines: string[]; offset: number };
+  /**
+   * forget/purge 的"armed 状态"：按下 d 第一次进入 armed（armedAction 记录意图，
+   * armedAtMs 记录时间），armedTimeoutMs 内再按一次同键才真正执行；超时未确认自动 disarm。
+   * 这是 TUI 唯一能给不可逆操作加的二次确认机制（readline 单键无 confirm dialog 通道）。
+   */
+  armedAction: "forget" | "purge" | null;
+  armedAtMs: number;
+  armedJobId: string | null;
 }
+
+const ARMED_TIMEOUT_MS = 3000;
 
 interface TuiKeyState {
   jobs: JobState[];
@@ -47,6 +59,9 @@ interface TuiKeyState {
   queuePaused: boolean;
   stopped: boolean;
   needsRedraw: boolean;
+  armedAction: "forget" | "purge" | null;
+  armedAtMs: number;
+  armedJobId: string | null;
 }
 
 type IntervalScheduler = (
@@ -59,10 +74,62 @@ export function handleTuiKey(
   state: TuiKeyState,
   refresh: () => void | Promise<void>,
   queueAction?: (
-    action: "pause" | "resume" | "cancel" | "approve" | "retry" | "continue",
+    action:
+      | "pause"
+      | "resume"
+      | "cancel"
+      | "approve"
+      | "retry"
+      | "continue"
+      | "forget"
+      | "purge",
     jobId?: string,
   ) => void | Promise<void>,
 ): void {
+  // forget / purge 是不可逆操作，要求二次确认：第一次按键进入 armed 状态，
+  // ARMED_TIMEOUT_MS 内再按一次同键才真正执行；任何其他按键（或超时）自动 disarm。
+  // 这是 readline 单键交互下能给的唯一安全 UX；其他键（up/down/refresh）也 disarm
+  // 是因为它们把"待确认意图"清掉以免用户手抖。
+  const nowMs = Date.now();
+  // 超时 disarm（每次按键时检查一次）
+  if (state.armedAction && nowMs - state.armedAtMs > ARMED_TIMEOUT_MS) {
+    state.armedAction = null;
+    state.armedJobId = null;
+  }
+  if (action === "forget" || action === "purge") {
+    const job = state.jobs[state.selectedIndex];
+    if (!job) return;
+    // 状态守卫：与后端原语保持一致——禁止对 running/queued/awaiting_approval 操作，
+    // 给出与 CLI 一致的提示文字。
+    if (["running", "queued", "awaiting_approval"].includes(job.status)) {
+      // 不进入 armed，直接忽略；UI 重绘由下一次 fetchData 触发。
+      return;
+    }
+    if (
+      state.armedAction === action &&
+      state.armedJobId === job.jobId &&
+      nowMs - state.armedAtMs <= ARMED_TIMEOUT_MS
+    ) {
+      // 二次确认：armed 状态 + 同 jobId + 同 action + 未超时 → 真正执行
+      state.armedAction = null;
+      state.armedJobId = null;
+      state.needsRedraw = true;
+      void queueAction?.(action, job.jobId);
+      return;
+    }
+    // 第一次按键：进入 armed
+    state.armedAction = action;
+    state.armedJobId = job.jobId;
+    state.armedAtMs = nowMs;
+    state.needsRedraw = true;
+    return;
+  }
+  // 任何非 forget/purge 按键都清空 armed 状态——避免 armed 残留误导后续按键。
+  if (state.armedAction) {
+    state.armedAction = null;
+    state.armedJobId = null;
+    state.needsRedraw = true;
+  }
   switch (action) {
     case "quit":
       state.stopped = true;
@@ -292,6 +359,9 @@ export async function startTui(
     needsRedraw: true,
     detail: { timeline: null, stages: null },
     eventStream: { lines: [], offset: 0 },
+    armedAction: null,
+    armedAtMs: 0,
+    armedJobId: null,
   };
 
   await fetchData(workspace, state);
@@ -299,7 +369,15 @@ export async function startTui(
     state.stopped = true;
   };
   const queueAction = (
-    action: "pause" | "resume" | "cancel" | "approve" | "retry" | "continue",
+    action:
+      | "pause"
+      | "resume"
+      | "cancel"
+      | "approve"
+      | "retry"
+      | "continue"
+      | "forget"
+      | "purge",
     jobId?: string,
   ): void => {
     // approve 需复刻 CLI/MCP 语义：before_run 批准后状态回 queued，需显式 startBackground。
@@ -324,7 +402,11 @@ export async function startTui(
                   )
                 : action === "cancel" && jobId
                   ? cancelJob(workspace, jobId)
-                  : Promise.resolve();
+                  : action === "forget" && jobId
+                    ? forgetJobKeepWorktree(workspace, jobId, "tui:d")
+                    : action === "purge" && jobId
+                      ? purgeJob(workspace, jobId, "tui:D")
+                      : Promise.resolve();
     void operation
       .catch((error) =>
         console.error(

@@ -10,6 +10,8 @@ export type KeyAction =
   | "approve"
   | "retry"
   | "continue"
+  | "forget"
+  | "purge"
   | "quit"
   | "unknown";
 
@@ -45,6 +47,10 @@ export function startKeyboardListener(
       onKey("retry");
     } else if (key.name === "n") {
       onKey("continue");
+    } else if (key.name === "d") {
+      // `d` = forget（保留 worktree）；`D` (Shift) = purge（连 worktree 一起删）。
+      // forget/purge 是不可逆操作，上层实现"armed 状态 + 3s 内再按一次"双击确认。
+      onKey(key.shift ? "purge" : "forget");
     } else {
       onKey("unknown");
     }
