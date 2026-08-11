@@ -93,3 +93,12 @@ git diff --check
 - Job IDs are `batch-<ts>-<seq>`; batch jobs are structurally identical to single jobs (same queue, same config, independently `retry`/`continue`-able).
 - `--wait` polls every job to a terminal state (`BATCH_TERMINAL_STATUSES`); timeout returns unfinished IDs and a non-zero exit. The terminal set must stay in sync with `JobStatus` additions.
 - Keep batch orchestration pure/testable: chunking and summarization are exported pure functions; only `runBatch` touches the queue.
+
+## Multi-Workspace Query Contract
+
+`cbx ws` / `cbx list --all` / `cbx health --all` are **read-only** cross-workspace views. They never schedule, pause, or mutate any workspace.
+
+- `summarizeWorkspace` (`src/ui.ts`, exported) is the single authoritative per-workspace projection, shared by the Web UI `/api/workspaces` and the CLI. Do not build a second summary implementation.
+- Workspace resolution precedence: explicit `--workspace` (repeatable) > `--workspaces-dir` (1-level scan of dirs containing `.cbx/`) > default `.`; dedupe via `dedupWorkspaces`.
+- Each workspace is summarized independently with its own `catch` — one failing workspace yields an `error` field instead of failing the whole cross-workspace call.
+- Cross-workspace scheduling (run/start/batch) is intentionally out of scope: job creation remains single-workspace.

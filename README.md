@@ -210,6 +210,10 @@ graph LR
 
 ```powershell
 node dist/src/cli.js list --workspace .
+node dist/src/cli.js list --all --workspace A --workspace B            # 跨 workspace 列出任务（带前缀）
+node dist/src/cli.js ws --workspace A --workspace B                   # 跨 workspace 汇总（任务/队列/健康）
+node dist/src/cli.js ws --workspaces-dir ~/code                       # 扫描含 .cbx 的子目录汇总
+node dist/src/cli.js health --all --workspaces-dir ~/code             # 跨 workspace 健康汇总
 node dist/src/cli.js batch --task "任务A" --task "任务B" --workspace .       # 批量创建任务
 node dist/src/cli.js batch --task "A" --max-batch 2 --wait --workspace .    # 波次并发 + 等待终态汇总
 node dist/src/cli.js logs JOB_ID --workspace .

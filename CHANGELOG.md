@@ -6,6 +6,9 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Feature: 多 workspace CLI 调度。新增 `cbx ws`（跨 workspace 汇总：任务状态计数/队列深度/paused/git 分支，输出与 Web UI `/api/workspaces` 同形状；交互终端显示表格）。`cbx list --all` 跨 workspace 合并任务并带 `[workspace]` 前缀；`cbx health --all` 输出每 workspace 指标。workspace 解析：显式 `--workspace`（可重复）> `--workspaces-dir`（1 层扫描含 `.cbx/` 子目录）> 默认 `.`，去重复用 `dedupWorkspaces`。复用并导出 `summarizeWorkspace`（单一权威汇总实现，CLI/Web UI 共享）；每 ws 独立 catch（单 ws 失败以 error 字段标识，不拖垮整体）。只读查询，不触碰任何 workspace 状态。
+- Test: `tests/multi-workspace.test.ts`（ws 双 workspace 汇总/单 ws 兼容/--workspaces-dir 扫描/list --all 前缀/health --all）。总计 436 个测试全过。
+
 - Feature: 任务批处理 `cbx batch`。`--task`/`--task-file` 可重复（可混用）批量创建独立任务；run 选项（executor/review/isolated 等）透传。`--max-batch N` 波次分片入队（波间等上一波终态，不改变全局 maxConcurrent），默认 0 一次全量。`--wait` 等待全部终态输出成功/失败计数，超时（`--wait-timeout-ms`）返回未完成列表并以非零退出；批任务 job 与普通任务同构（可独立 retry/continue）。jobId 前缀 `batch-<ts>-<seq>`。
 - Test: `tests/batch.test.ts`（chunkBatch 分片边界 3 例 + summarizeBatch 聚合 3 例 + CLI 端到端 4 例：多任务创建/无任务报错/--max-batch 1 波次 --wait 汇总/runBatch 直接调用）。总计 424 个测试全过。
 
