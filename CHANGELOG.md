@@ -6,6 +6,10 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Refactor: workspace 发现收敛为单一共享入口。`discoverWorkspaces` / `dedupWorkspaces` / `listJobsAcrossWorkspaces` 从 CLI 本地副本移入 `src/artifacts.ts` 并经 `core.ts` re-export；CLI（`cbx ws --workspaces-dir`、`ui` 命令）改走共享实现，删除 `cli.ts` 本地重复。Web UI 不改（消费 CLI 已解析的 workspace 列表，发现是 CLI 层职责）。
+- Feature: MCP 新增 `cbx_list_workspaces` 工具（扫描 `root` 下含 `.cbx/` 的 workspace 并列出各自任务，`root` 缺省 cwd），复用 `listJobsAcrossWorkspaces`，输出 `{ workspaces: Array<{ workspace, jobs }> }`。
+- Test: `tests/mcp-migration.test.ts` 增补 `cbx_list_workspaces` 工具清单断言 + 双 workspace 功能用例。总计 462 个测试全过。
+
 - Feature: 多 workspace CLI 调度。新增 `cbx ws`（跨 workspace 汇总：任务状态计数/队列深度/paused/git 分支，输出与 Web UI `/api/workspaces` 同形状；交互终端显示表格）。`cbx list --all` 跨 workspace 合并任务并带 `[workspace]` 前缀；`cbx health --all` 输出每 workspace 指标。workspace 解析：显式 `--workspace`（可重复）> `--workspaces-dir`（1 层扫描含 `.cbx/` 子目录）> 默认 `.`，去重复用 `dedupWorkspaces`。复用并导出 `summarizeWorkspace`（单一权威汇总实现，CLI/Web UI 共享）；每 ws 独立 catch（单 ws 失败以 error 字段标识，不拖垮整体）。只读查询，不触碰任何 workspace 状态。
 - Test: `tests/multi-workspace.test.ts`（ws 双 workspace 汇总/单 ws 兼容/--workspaces-dir 扫描/list --all 前缀/health --all）。总计 436 个测试全过。
 

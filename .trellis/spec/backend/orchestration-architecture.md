@@ -284,6 +284,18 @@ Every job directory (`.cbx/jobs/<jobId>/`) contains:
 
 `artifacts.ts` defines `ARTIFACTS` set. Dynamic stage handback files must match `/^stage-\d+-[A-Za-z0-9._-]+-handback\.md$/`. All other filenames are rejected by `readArtifact()`.
 
+### Workspace Discovery (shared entrypoint)
+
+Workspace discovery — scanning a root dir for direct subdirectories containing a `.cbx/` dir — is **centralized** in `src/artifacts.ts`:
+
+- `discoverWorkspaces(root)` — 1-level scan for `.cbx/` subdirs; returns absolute paths
+- `dedupWorkspaces(paths)` — `path.resolve` dedup, first-occurrence order
+- `listJobsAcrossWorkspaces(root)` — discovery + per-workspace `listJobs`
+
+All three are re-exported via `src/core.ts` and consumed by **CLI** (`cbx ws --workspaces-dir`, `ui` command) and **MCP** (`cbx_list_workspaces`). **Never re-implement discovery per entry point** — import the shared functions.
+
+> **Warning**: Web UI (`createWebUiServer`) must **not** call `discoverWorkspaces` internally. It receives the already-resolved workspace list from the CLI layer and only maps over it (`/api/workspaces`). Discovery is a CLI-layer responsibility; moving it into `ui.ts` would break the explicit `--workspace` path (explicit workspaces are not necessarily discovery results) and the CLI→UI contract.
+
 ---
 
 ## 10. Key Design Decisions

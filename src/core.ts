@@ -19,7 +19,7 @@ export type { ForgetOptions, ForgetResult } from "./state.js";
 export { createJob } from "./jobs.js";
 
 // Artifacts
-export { ARTIFACTS, AUDIT_CANDIDATE, contextArtifacts, contextRedactor, listJobs, readArtifact, readEventsIncremental, listArtifacts } from "./artifacts.js";
+export { ARTIFACTS, AUDIT_CANDIDATE, contextArtifacts, contextRedactor, listJobs, readArtifact, readEventsIncremental, listArtifacts, discoverWorkspaces, dedupWorkspaces, listJobsAcrossWorkspaces } from "./artifacts.js";
 
 // Result writing
 export { writeResult } from "./result.js";

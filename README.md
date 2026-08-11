@@ -359,7 +359,7 @@ node dist/src/cli.js health --workspace .
 cbx mcp
 ```
 
-提供的工具：`cbx_start`、`cbx_status`、`cbx_review`、`cbx_continue`、`cbx_artifact`、`cbx_cancel`、`cbx_approve`、`cbx_list`、`cbx_logs`、`cbx_result`、`cbx_queue`、`cbx_queue_pause`、`cbx_queue_resume`、`cbx_retry`、`cbx_review_gate`（对工作区未提交改动跑独立审查，配合 `reviewGate.enabled` 的 Stop hook）、`cbx_clean`（清理任务遗留的 Git worktree，对应 CLI `cbx clean`）。
+提供的工具：`cbx_start`、`cbx_status`、`cbx_review`、`cbx_continue`、`cbx_artifact`、`cbx_cancel`、`cbx_approve`、`cbx_list`、`cbx_logs`、`cbx_result`、`cbx_queue`、`cbx_queue_pause`、`cbx_queue_resume`、`cbx_retry`、`cbx_review_gate`（对工作区未提交改动跑独立审查，配合 `reviewGate.enabled` 的 Stop hook）、`cbx_clean`（清理任务遗留的 Git worktree，对应 CLI `cbx clean`）、`cbx_list_workspaces`（扫描指定 root 下含 `.cbx/` 的 workspace 并列出各自任务）。
 
 MCP 还提供 `resources/list` 和 `resources/read`，可直接读取任务的 `result.json`、`events.ndjson`、`complete.patch`、`review.md`、`stage-*-handback.md` 等产物。
 

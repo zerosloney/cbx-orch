@@ -24,6 +24,8 @@ import {
   retryQueueJob,
   serveQueue,
   startBackground,
+  discoverWorkspaces,
+  dedupWorkspaces,
 } from "./core.js";
 import { runReviewGate, stopReviewGateHook } from "./review-gate.js";
 import { runTui, startWebUi, summarizeWorkspace } from "./ui.js";
@@ -47,49 +49,6 @@ function requireJobId(parsed: CliArgs, command: string): string {
   return jobId;
 }
 
-/** 扫描根目录下含 .cbx/ 的直接子目录(1 层深度,不递归)。返回绝对路径列表。 */
-async function discoverWorkspaces(root: string): Promise<string[]> {
-  const { readdir, stat } = await import("node:fs/promises");
-  const resolvedRoot = path.resolve(root);
-  let names: string[];
-  try {
-    names = await readdir(resolvedRoot);
-  } catch {
-    return [];
-  }
-  const out: string[] = [];
-  for (const name of names) {
-    if (name.startsWith(".") || name === "node_modules") continue;
-    const candidate = path.join(resolvedRoot, name);
-    let dirStat, cbxStat;
-    try {
-      dirStat = await stat(candidate);
-    } catch {
-      continue;
-    }
-    if (!dirStat.isDirectory()) continue;
-    try {
-      cbxStat = await stat(path.join(candidate, ".cbx"));
-    } catch {
-      continue;
-    }
-    if (cbxStat.isDirectory()) out.push(candidate);
-  }
-  return out;
-}
-
-/** 按 path.resolve 后的字符串去重,保留首次出现顺序。 */
-function dedupWorkspaces(paths: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const p of paths) {
-    const resolved = path.resolve(p);
-    if (seen.has(resolved)) continue;
-    seen.add(resolved);
-    out.push(resolved);
-  }
-  return out;
-}
 
 /** 解析跨 workspace 查询的 workspace 集合：显式 --workspace（可重复）> --workspaces-dir 扫描 > 默认 "."。 */
 async function resolveWorkspaces(parsed: CliArgs): Promise<string[]> {

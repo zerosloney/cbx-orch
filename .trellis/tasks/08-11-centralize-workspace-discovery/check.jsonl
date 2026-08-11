@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/mcp-server.md", "reason": "校验 cbx_list_workspaces 是否落入工具清单、契约是否与实现一致"}
+{"file": ".trellis/spec/backend/index.md", "reason": "校验 workspace 层共享入口与 CLI/UI/MCP 职责边界，确认无孤儿代码残留"}

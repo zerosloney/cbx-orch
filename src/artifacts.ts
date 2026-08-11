@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { listPersistedStates, redactText, type RuntimeConfig } from "./storage.js";
 import { jobDir } from "./state.js";
@@ -21,6 +21,69 @@ export function contextRedactor(governance?: RuntimeConfig["governance"]): (text
 export async function listJobs(workspaceInput: string): Promise<JobState[]> {
   const workspace = path.resolve(workspaceInput);
   return listPersistedStates<JobState>(workspace);
+}
+
+/**
+ * 扫描根目录下含 .cbx/ 的直接子目录（1 层深度，不递归），返回绝对路径列表。
+ * 复用：CLI `cbx ws --workspaces-dir`、CLI `ui` 命令、MCP `cbx_list_workspaces`
+ * 都走这一个入口，避免各入口各自实现"发现 workspace"。
+ */
+export async function discoverWorkspaces(
+  root: string,
+): Promise<string[]> {
+  const resolvedRoot = path.resolve(root);
+  let names: string[];
+  try {
+    names = await readdir(resolvedRoot);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const name of names) {
+    if (name.startsWith(".") || name === "node_modules") continue;
+    const candidate = path.join(resolvedRoot, name);
+    let dirStat;
+    try {
+      dirStat = await stat(candidate);
+    } catch {
+      continue;
+    }
+    if (!dirStat.isDirectory()) continue;
+    try {
+      const cbxStat = await stat(path.join(candidate, ".cbx"));
+      if (!cbxStat.isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    out.push(candidate);
+  }
+  return out;
+}
+
+export function listJobsAcrossWorkspaces(
+  root: string,
+): Promise<Array<{ workspace: string; jobs: JobState[] }>> {
+  return discoverWorkspaces(root).then((workspaces) =>
+    Promise.all(
+      workspaces.map(async (workspace) => ({
+        workspace,
+        jobs: await listJobs(workspace),
+      })),
+    ),
+  );
+}
+
+/** 按 path.resolve 后的字符串去重，保留首次出现顺序。 */
+export function dedupWorkspaces(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of paths) {
+    const resolved = path.resolve(p);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    out.push(resolved);
+  }
+  return out;
 }
 
 export async function readArtifact(workspaceInput: string, jobId: string, artifact: string): Promise<string> {

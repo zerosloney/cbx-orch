@@ -8,6 +8,7 @@ import {
   forgetJobKeepWorktree,
   listArtifacts,
   listJobs,
+  listJobsAcrossWorkspaces,
   listQueue,
   loadConfig,
   loadState,
@@ -368,6 +369,14 @@ const tools = [
       },
     },
   },
+  {
+    name: "cbx_list_workspaces",
+    description: "扫描 root 下含 .cbx/ 的 workspace 并列出各自任务",
+    inputSchema: {
+      type: "object",
+      properties: { root: { type: "string" } },
+    },
+  },
 ];
 
 async function callTool(
@@ -577,6 +586,8 @@ async function callTool(
   }
   if (name === "cbx_result")
     return JSON.parse(await readArtifact(root, id, "result.json"));
+  if (name === "cbx_list_workspaces")
+    return { workspaces: await listJobsAcrossWorkspaces(String(args.root ?? process.cwd())) };
   throw new Error(`未知工具：${name}`);
 }
 

@@ -6,7 +6,7 @@
 
 - Entry point: `cbx mcp` subcommand; also runnable directly as `node dist/src/mcp-server.js`.
 - Protocol: JSON-RPC 2.0 over stdin/stdout, one JSON object per line.
-- Tools: `cbx_start` `cbx_status` `cbx_review` `cbx_continue` `cbx_artifact` `cbx_cancel` `cbx_approve` `cbx_list` `cbx_logs` `cbx_result` `cbx_queue` `cbx_queue_pause` `cbx_queue_resume` `cbx_retry` `cbx_review_gate` `cbx_clean`.
+- Tools: `cbx_start` `cbx_status` `cbx_review` `cbx_continue` `cbx_artifact` `cbx_cancel` `cbx_approve` `cbx_list` `cbx_logs` `cbx_result` `cbx_queue` `cbx_queue_pause` `cbx_queue_resume` `cbx_retry` `cbx_review_gate` `cbx_clean` `cbx_list_workspaces`.
 - Resources: `resources/list` + `resources/read` over `cbx://job/<id>/<artifact>?workspace=<encoded>` URIs.
 
 ## Response Shape Convention (must stay uniform)
@@ -36,6 +36,7 @@ Clients read `structuredContent`. Rules:
 | `cbx_approve` | `job_id` | JobState; if `status === "queued"` the server calls `startBackground` (approval-then-launch) |
 | `cbx_review_gate` | `workspace?`, `executor?`, `timeout_ms?` | `{ pass, reason, verdict }` |
 | `cbx_clean` | `job_id`, `workspace?` | `{ job_id, cleaned: boolean }` — idempotent; no worktree record → `cleaned: false` (matches CLI `cbx clean`), does not throw |
+| `cbx_list_workspaces` | `root?` (default cwd) | `{ workspaces: Array<{ workspace: string; jobs: JobState[] }> }` — scans `root` for direct subdirectories containing `.cbx/`, lists jobs per workspace |
 
 ## Validation
 

@@ -124,6 +124,7 @@ test("MCP: tools/list returns all tool definitions", async () => {
     "cbx_queue_resume",
     "cbx_review_gate",
     "cbx_clean",
+    "cbx_list_workspaces",
   ];
   for (const name of expected)
     assert.ok(names.includes(name), `缺少工具：${name}`);
@@ -198,6 +199,54 @@ test("MCP: cbx_list returns jobs in workspace", async () => {
   assert.ok(parsed.length >= 2);
   assert.ok(parsed.some((j) => j.jobId === "mcp-list-1"));
   assert.ok(parsed.some((j) => j.jobId === "mcp-list-2"));
+});
+
+test("MCP: cbx_list_workspaces returns jobs across multiple workspaces", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-ws-"));
+  const ws1 = path.join(root, "ws1");
+  const ws2 = path.join(root, "ws2");
+  await mkdir(ws1);
+  await mkdir(ws2);
+  await createJob({
+    workspace: ws1,
+    task: "MCP 多 workspace 测试 1",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "mcp-ws-1",
+  });
+  await createJob({
+    workspace: ws2,
+    task: "MCP 多 workspace 测试 2",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "mcp-ws-2",
+  });
+  const responses = await mcpCall({
+    jsonrpc: "2.0",
+    id: 8,
+    method: "tools/call",
+    params: { name: "cbx_list_workspaces", arguments: { root } },
+  });
+  assert.equal(responses.length, 1);
+  const result = (responses[0] as Record<string, unknown>).result as {
+    content: Array<{ text: string }>;
+  };
+  const parsed = JSON.parse(result.content[0].text) as {
+    workspaces: Array<{ workspace: string; jobs: Array<{ jobId: string }> }>;
+  };
+  assert.equal(parsed.workspaces.length, 2);
+  const ws1Jobs = parsed.workspaces.find(
+    (w) => path.basename(w.workspace) === "ws1",
+  )?.jobs;
+  const ws2Jobs = parsed.workspaces.find(
+    (w) => path.basename(w.workspace) === "ws2",
+  )?.jobs;
+  assert.ok(ws1Jobs && ws1Jobs.some((j) => j.jobId === "mcp-ws-1"));
+  assert.ok(ws2Jobs && ws2Jobs.some((j) => j.jobId === "mcp-ws-2"));
 });
 
 test("MCP: cbx_cancel on a non-existent job does not crash", async () => {
