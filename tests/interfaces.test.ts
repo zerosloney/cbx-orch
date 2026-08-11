@@ -18,6 +18,7 @@ import { createWebUiServer } from "../src/ui.js";
 import {
   finishSpan,
   flushDeliveries,
+  matchesWebhookFilters,
   publishEvent,
   startSpan,
 } from "../src/observability.js";
@@ -1244,4 +1245,129 @@ export default {
   assert.equal(cancelled.status, "cancelled");
   assert.equal(cancelled.phase, "cancelled");
   assert.ok(cancelled.cancelledAt);
+});
+
+// ---------- matchesWebhookFilters：webhook 订阅过滤（AND 语义） ----------
+
+test("matchesWebhookFilters: 无 filters 全量放行", () => {
+  assert.equal(
+    matchesWebhookFilters(
+      { type: "job.state_changed", payload: { jobId: "j1", status: "done" } },
+      undefined,
+    ),
+    true,
+  );
+});
+
+test("matchesWebhookFilters: events 维度匹配与不匹配", () => {
+  const filters = { events: ["job.state_changed"] };
+  assert.equal(
+    matchesWebhookFilters({ type: "job.state_changed", payload: {} }, filters),
+    true,
+  );
+  assert.equal(
+    matchesWebhookFilters({ type: "other.event", payload: {} }, filters),
+    false,
+  );
+});
+
+test("matchesWebhookFilters: jobIds 匹配/不匹配/缺失", () => {
+  const filters = { jobIds: ["job-1"] };
+  assert.equal(
+    matchesWebhookFilters({ type: "x", payload: { jobId: "job-1" } }, filters),
+    true,
+  );
+  assert.equal(
+    matchesWebhookFilters({ type: "x", payload: { jobId: "job-2" } }, filters),
+    false,
+  );
+  // jobId 缺失 → 不匹配（避免误投递）
+  assert.equal(
+    matchesWebhookFilters({ type: "x", payload: {} }, filters),
+    false,
+  );
+});
+
+test("matchesWebhookFilters: statuses 匹配/不匹配/缺失", () => {
+  const filters = { statuses: ["done", "failed"] };
+  assert.equal(
+    matchesWebhookFilters({ type: "x", payload: { status: "done" } }, filters),
+    true,
+  );
+  assert.equal(
+    matchesWebhookFilters(
+      { type: "x", payload: { status: "running" } },
+      filters,
+    ),
+    false,
+  );
+  assert.equal(
+    matchesWebhookFilters({ type: "x", payload: {} }, filters),
+    false,
+  );
+});
+
+test("matchesWebhookFilters: 多条件 AND 语义", () => {
+  const filters = {
+    events: ["job.state_changed"],
+    jobIds: ["job-1"],
+    statuses: ["done"],
+  };
+  const event = {
+    type: "job.state_changed",
+    payload: { jobId: "job-1", status: "done" },
+  };
+  assert.equal(matchesWebhookFilters(event, filters), true);
+  assert.equal(
+    matchesWebhookFilters(
+      { ...event, payload: { jobId: "job-2", status: "done" } },
+      filters,
+    ),
+    false,
+  );
+  assert.equal(
+    matchesWebhookFilters(
+      { ...event, payload: { jobId: "job-1", status: "failed" } },
+      filters,
+    ),
+    false,
+  );
+});
+
+// ---------- publishEvent 集成：filters 过滤不产生 delivery ----------
+
+test("publishEvent with filters skips non-matching webhook deliveries", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-notif-filter-"));
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({
+      notifications: {
+        webhook: "http://127.0.0.1:9/never-reached",
+        filters: { jobIds: ["wanted"], statuses: ["done"] },
+      },
+    }),
+    "utf8",
+  );
+  // 不匹配 → 无 pending delivery
+  await publishEvent(workspace, "job.state_changed", {
+    jobId: "other",
+    status: "done",
+  });
+  await publishEvent(workspace, "job.state_changed", {
+    jobId: "wanted",
+    status: "failed",
+  });
+  assert.equal((await health(workspace)).metrics.pendingDeliveries, 0);
+  // 匹配 → 1 条 pending delivery
+  await publishEvent(workspace, "job.state_changed", {
+    jobId: "wanted",
+    status: "done",
+  });
+  assert.equal((await health(workspace)).metrics.pendingDeliveries, 1);
+  // 本地 events.ndjson 仍全量记录（3 条）
+  const raw = await readFile(
+    path.join(workspace, ".cbx", "events.ndjson"),
+    "utf8",
+  );
+  assert.equal(raw.trim().split("\n").length, 3);
 });

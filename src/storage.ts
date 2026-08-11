@@ -54,6 +54,11 @@ export interface RuntimeConfig {
     timeoutMs?: number;
     maxRetries?: number;
     retryBaseMs?: number;
+    filters?: {
+      events?: string[];
+      jobIds?: string[];
+      statuses?: string[];
+    };
   };
   telemetry?: {
     enabled?: boolean;
@@ -219,7 +224,10 @@ export async function loadRuntimeConfig(
       throw new Error("plugins.allowSha256 必须是 SHA-256 十六进制摘要。");
   }
   for (const [name, fields] of [
-    ["notifications", ["webhook", "timeoutMs", "maxRetries", "retryBaseMs"]],
+    [
+      "notifications",
+      ["webhook", "timeoutMs", "maxRetries", "retryBaseMs", "filters"],
+    ],
     [
       "telemetry",
       [
@@ -253,6 +261,24 @@ export async function loadRuntimeConfig(
       (typeof value.retryBaseMs !== "number" || value.retryBaseMs < 0)
     )
       throw new Error(`${name}.retryBaseMs 必须是非负数。`);
+    // notifications.filters：webhook 事件订阅过滤（仅 notifications 有）。
+    if (name === "notifications" && value.filters !== undefined) {
+      const filters = object(value.filters, "notifications.filters");
+      known(filters, "notifications.filters", ["events", "jobIds", "statuses"]);
+      for (const key of ["events", "jobIds", "statuses"] as const) {
+        if (
+          filters[key] !== undefined &&
+          (!Array.isArray(filters[key]) ||
+            filters[key].length < 1 ||
+            filters[key].some(
+              (item) => typeof item !== "string" || !item.trim(),
+            ))
+        )
+          throw new Error(
+            `notifications.filters.${key} 必须是非空字符串数组。`,
+          );
+      }
+    }
   }
   if (config.governance !== undefined) {
     const value = object(config.governance, "governance");

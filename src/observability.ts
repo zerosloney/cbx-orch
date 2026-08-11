@@ -22,6 +22,11 @@ interface DeliveryConfig {
 }
 interface NotificationConfig extends DeliveryConfig {
   webhook?: string;
+  filters?: {
+    events?: string[];
+    jobIds?: string[];
+    statuses?: string[];
+  };
 }
 interface TelemetryConfig extends DeliveryConfig {
   enabled?: boolean;
@@ -35,6 +40,31 @@ interface ObservabilityConfig extends RuntimeConfig {
 
 function isoNow(): string {
   return new Date().toISOString();
+}
+
+/** webhook 事件订阅过滤：AND 语义（多条件同时满足才投递）。未配置的维度不限制；
+ *  payload 中 jobId/status 缺失时该维度视为不匹配（避免误投递）。无 filters 时全量。 */
+export function matchesWebhookFilters(
+  event: { type: string; payload: Record<string, unknown> },
+  filters:
+    | {
+        events?: string[];
+        jobIds?: string[];
+        statuses?: string[];
+      }
+    | undefined,
+): boolean {
+  if (!filters) return true;
+  if (filters.events && !filters.events.includes(event.type)) return false;
+  const jobId =
+    typeof event.payload.jobId === "string" ? event.payload.jobId : undefined;
+  if (filters.jobIds && (!jobId || !filters.jobIds.includes(jobId)))
+    return false;
+  const status =
+    typeof event.payload.status === "string" ? event.payload.status : undefined;
+  if (filters.statuses && (!status || !filters.statuses.includes(status)))
+    return false;
+  return true;
 }
 function id(bytes = 16): string {
   return randomBytes(bytes).toString("hex");
@@ -217,14 +247,20 @@ export async function publishEvent(
         current.governance?.redactFields,
       ) as typeof event;
       await append(workspace, "events.ndjson", redacted);
-      if (current.notifications?.webhook) {
-        await enqueueDelivery(workspace, {
-          channel: "webhook",
-          endpoint: current.notifications.webhook,
-          body: redacted,
-          config: current.notifications,
-        });
-        scheduleDeliveryDrain(workspace);
+      const notifications = current.notifications;
+      const webhook = notifications?.webhook;
+      if (webhook && notifications) {
+        // webhook 订阅过滤：不匹配的事件不 enqueue、不落 delivery 记录。
+        // 本地 events.ndjson 已在上方 append（全量），仅投递被过滤。
+        if (matchesWebhookFilters({ type, payload }, notifications.filters)) {
+          await enqueueDelivery(workspace, {
+            channel: "webhook",
+            endpoint: webhook,
+            body: redacted,
+            config: notifications,
+          });
+          scheduleDeliveryDrain(workspace);
+        }
       }
     });
   eventChains.set(workspace, currentTask);

@@ -387,3 +387,77 @@ test("CLI --template expands task from config and unknown template errors", asyn
   const request = await readArtifact(workspace, created.jobId, "request.md");
   assert.match(request, /修复 review\.md 中的问题/);
 });
+
+test("notifications.filters accepts valid config and rejects invalid shapes", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-notif-schema-"));
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({
+      notifications: {
+        webhook: "https://example.test/cbx-events",
+        filters: {
+          events: ["job.state_changed"],
+          jobIds: ["job-1"],
+          statuses: ["done"],
+        },
+      },
+    }),
+    "utf8",
+  );
+  const config = await loadConfig(workspace);
+  assert.equal(
+    config.notifications?.webhook,
+    "https://example.test/cbx-events",
+  );
+  assert.deepEqual(config.notifications?.filters, {
+    events: ["job.state_changed"],
+    jobIds: ["job-1"],
+    statuses: ["done"],
+  });
+
+  // 未知 filters 键 → 拒绝
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({
+      notifications: { webhook: "https://x", filters: { unknown: ["x"] } },
+    }),
+    "utf8",
+  );
+  await assert.rejects(
+    () => loadConfig(workspace),
+    /notifications\.filters 不支持字段/,
+  );
+  // 空数组 → 拒绝
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({
+      notifications: { webhook: "https://x", filters: { statuses: [] } },
+    }),
+    "utf8",
+  );
+  await assert.rejects(
+    () => loadConfig(workspace),
+    /notifications\.filters\.statuses 必须是非空字符串数组/,
+  );
+  // 元素错类型 → 拒绝
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({
+      notifications: { webhook: "https://x", filters: { events: [1] } },
+    }),
+    "utf8",
+  );
+  await assert.rejects(
+    () => loadConfig(workspace),
+    /notifications\.filters\.events 必须是非空字符串数组/,
+  );
+  // 无 filters 时向后兼容（全量推送）
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({
+      notifications: { webhook: "https://example.test/cbx-events" },
+    }),
+    "utf8",
+  );
+  assert.equal((await loadConfig(workspace)).notifications?.filters, undefined);
+});
