@@ -28,6 +28,8 @@ const VALUE_OPTIONS = new Set([
   "--ui-token",
   "--template",
   "--format",
+  "--max-batch",
+  "--wait-timeout-ms",
 ]);
 
 export interface CliArgs {

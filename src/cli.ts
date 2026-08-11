@@ -26,6 +26,7 @@ import {
 import { runReviewGate, stopReviewGateHook } from "./review-gate.js";
 import { runTui, startWebUi } from "./ui.js";
 import { parseCliArgs, type CliArgs } from "./cli-args.js";
+import { runBatch } from "./batch.js";
 import {
   isInteractive,
   renderExport,
@@ -487,6 +488,102 @@ async function main(): Promise<void> {
     console.log(renderExport(state, result, format as "text" | "markdown"));
     return;
   }
+  if (command === "batch") {
+    if (parsed.option("--job-id"))
+      throw new Error("batch 不支持 --job-id（每个任务独立生成 jobId）。");
+    const tasks = parsed.all("--task");
+    for (const file of parsed.all("--task-file"))
+      tasks.push(await readFile(file, "utf8"));
+    if (tasks.length === 0)
+      throw new Error(
+        "请至少提供一个任务：--task <描述> 或 --task-file <文件>。",
+      );
+    const fileConfig = await loadConfig(workspace);
+    const defaults = mergeConfig(fileConfig, {
+      testCommand: parsed.option("--test"),
+      review: parsed.has("--review")
+        ? true
+        : parsed.has("--no-review")
+          ? false
+          : undefined,
+      isolated: parsed.has("--isolated")
+        ? true
+        : parsed.has("--no-isolated")
+          ? false
+          : undefined,
+      timeoutMs: parsed.intOption("--timeout-ms", undefined, { min: 100 }),
+      maxRetries: parsed.intOption("--max-retries", undefined, { min: 0 }),
+      maxTurns: parsed.intOption("--max-turns", undefined, { min: 1 }),
+      keepWorktree: parsed.has("--keep-worktree")
+        ? true
+        : parsed.has("--no-keep-worktree")
+          ? false
+          : undefined,
+      permissionMode: parsed.has("--dangerously-skip-permissions")
+        ? "dontAsk"
+        : parsed.option("--permission-mode"),
+      executor: parsed.option("--executor"),
+      reviewExecutor: parsed.option("--review-executor"),
+      autoBranch: parsed.has("--auto-branch")
+        ? true
+        : parsed.has("--no-auto-branch")
+          ? false
+          : undefined,
+      autoCommit: parsed.has("--auto-commit")
+        ? true
+        : parsed.has("--no-auto-commit")
+          ? false
+          : undefined,
+      commitMessage: parsed.option("--commit-message"),
+      trustMode: parsed.option("--trust-mode") as
+        "trusted" | "untrusted" | undefined,
+      dependencyGuard: parsed.has("--dependency-guard")
+        ? true
+        : parsed.has("--no-dependency-guard")
+          ? false
+          : undefined,
+    });
+    const maxBatch = parsed.intOption("--max-batch", 0, { min: 0 }) ?? 0;
+    const wait = parsed.has("--wait");
+    const waitTimeoutMs =
+      parsed.intOption("--wait-timeout-ms", 30 * 60_000, { min: 1_000 }) ??
+      30 * 60_000;
+    const summary = await runBatch({
+      workspace,
+      tasks,
+      maxBatch,
+      wait,
+      waitTimeoutMs,
+      jobOptions: {
+        testCommand: defaults.testCommand,
+        review: defaults.review,
+        isolated: defaults.isolated,
+        permissionMode: defaults.permissionMode,
+        maxTurns: defaults.maxTurns,
+        timeoutMs: defaults.timeoutMs,
+        maxRetries: defaults.maxRetries,
+        keepWorktree: defaults.keepWorktree,
+        approvalBeforeRun: defaults.approvalBeforeRun,
+        approvalBeforeComplete: defaults.approvalBeforeComplete,
+        autoBranch: defaults.autoBranch,
+        autoCommit: defaults.autoCommit,
+        commitMessage: defaults.commitMessage,
+        executor: defaults.executor,
+        reviewExecutor: defaults.reviewExecutor,
+        trustMode: defaults.trustMode,
+        dependencyGuard: defaults.dependencyGuard,
+        allowUnsafePermissions: parsed.has("--dangerously-skip-permissions"),
+      },
+    });
+    print(summary);
+    // --wait 且存在未完成或失败 → 非零退出（CI 友好）。
+    if (
+      wait &&
+      ((summary.unfinished?.length ?? 0) > 0 || (summary.failed ?? 0) > 0)
+    )
+      process.exit(2);
+    return;
+  }
   if (command === "review-gate") {
     const result = await runReviewGate(workspace, {
       executor: parsed.option("--executor"),
@@ -528,7 +625,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    "用法：cbx run|start|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|watch|ui|tui|review-gate|stop-review-gate ...",
+    "用法：cbx run|start|batch|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|watch|ui|tui|review-gate|stop-review-gate ...",
   );
 }
 
