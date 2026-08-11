@@ -5,6 +5,7 @@ import {
   cancelJob,
   cleanupWorktree,
   createJob,
+  forgetJobKeepWorktree,
   listArtifacts,
   listJobs,
   listQueue,
@@ -12,6 +13,7 @@ import {
   loadState,
   mergeConfig,
   pauseQueue,
+  purgeJob,
   readArtifact,
   readEventsIncremental,
   resumeQueue,
@@ -338,6 +340,34 @@ const tools = [
       },
     },
   },
+  {
+    name: "cbx_forget",
+    description:
+      "删除任务的 state.json / events.ndjson / 全部工件（保留 worktree）。不可逆——running/queued/awaiting_approval 状态会被拒绝，调用方需先 cancel 或 approve。",
+    inputSchema: {
+      type: "object",
+      required: ["job_id"],
+      properties: {
+        job_id: { type: "string" },
+        workspace: { type: "string" },
+        reason: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "cbx_purge",
+    description:
+      "cbx_forget 的破坏力加强版：连 worktree 一起删。不可逆——running/queued/awaiting_approval 状态会被拒绝，调用方需先 cancel 或 approve。",
+    inputSchema: {
+      type: "object",
+      required: ["job_id"],
+      properties: {
+        job_id: { type: "string" },
+        workspace: { type: "string" },
+        reason: { type: "string" },
+      },
+    },
+  },
 ];
 
 async function callTool(
@@ -525,6 +555,25 @@ async function callTool(
   if (name === "cbx_clean") {
     // 幂等清理：无 worktree 记录返回 cleaned:false，与 CLI `cbx clean` 一致，不抛错。
     return { job_id: id, cleaned: await cleanupWorktree(root, id) };
+  }
+  if (name === "cbx_forget" || name === "cbx_purge") {
+    // MCP 路径下没有 CLI 那种 --yes 交互门：reason 字段缺失时给一个默认的 source 标记
+    // 让审计链能区分是 MCP 触发而非 CLI 触发。状态守卫由后端原语保证。
+    const reason =
+      typeof args.reason === "string" && args.reason.trim()
+        ? `mcp:${name} ${args.reason}`
+        : `mcp:${name}`;
+    const result = await (name === "cbx_forget"
+      ? forgetJobKeepWorktree(root, id, reason)
+      : purgeJob(root, id, reason));
+    return {
+      job_id: result.jobId,
+      status: result.status,
+      deleted_directory: result.deletedDirectory,
+      worktree_cleaned: result.worktreeCleaned,
+      remaining_queue_entries: result.remainingQueueEntries,
+      tombstoned_at: result.tombstonedAt,
+    };
   }
   if (name === "cbx_result")
     return JSON.parse(await readArtifact(root, id, "result.json"));
