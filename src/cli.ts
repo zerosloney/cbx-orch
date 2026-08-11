@@ -9,6 +9,7 @@ import {
   dispatchQueue,
   createJob,
   executeJob,
+  forgetJobKeepWorktree,
   health,
   jobDir,
   listJobs,
@@ -17,6 +18,7 @@ import {
   loadState,
   mergeConfig,
   pauseQueue,
+  purgeJob,
   readArtifact,
   resumeQueue,
   retryQueueJob,
@@ -518,6 +520,39 @@ async function main(): Promise<void> {
     print({ jobId, cleaned: await cleanupWorktree(workspace, jobId) });
     return;
   }
+  if (command === "forget" || command === "purge") {
+    const jobId = requireJobId(parsed, command);
+    const reason = parsed.option("--reason");
+    if (command === "purge") {
+      // purge 是不可逆操作（连 worktree 一起删）：默认要求 --yes 显式确认。
+      // 脚本/CI 可走 CBX_YES=1 环境变量绕过；与现有 dangerous 操作保持一致。
+      if (!parsed.has("--yes") && !process.env.CBX_YES)
+        throw new Error(
+          `purge 会删除 worktree + state + 全部工件，不可恢复。请用 \`cbx purge ${jobId} --yes\` 确认，或设置 CBX_YES=1。`,
+        );
+      print(
+        await purgeJob(
+          workspace,
+          jobId,
+          reason ?? "cli:cbx purge",
+        ),
+      );
+      return;
+    }
+    // forget 默认也要确认：state.json + events.ndjson + 全部工件都没了，重建无门。
+    if (!parsed.has("--yes") && !process.env.CBX_YES)
+      throw new Error(
+        `forget 会删除 state.json / events.ndjson / 全部工件（保留 worktree）。请用 \`cbx forget ${jobId} --yes\` 确认，或设置 CBX_YES=1。`,
+      );
+    print(
+      await forgetJobKeepWorktree(
+        workspace,
+        jobId,
+        reason ?? "cli:cbx forget",
+      ),
+    );
+    return;
+  }
   if (command === "export") {
     const jobId = requireJobId(parsed, command);
     const format = (parsed.option("--format") ?? "text") as "text" | "markdown";
@@ -715,7 +750,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    "用法：cbx run|start|batch|ws|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|watch|ui|tui|review-gate|stop-review-gate ...",
+    "用法：cbx run|start|batch|ws|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|forget|purge|watch|ui|tui|review-gate|stop-review-gate ...",
   );
 }
 
