@@ -10,6 +10,13 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 - Feature: MCP 新增 `cbx_list_workspaces` 工具（扫描 `root` 下含 `.cbx/` 的 workspace 并列出各自任务，`root` 缺省 cwd），复用 `listJobsAcrossWorkspaces`，输出 `{ workspaces: Array<{ workspace, jobs }> }`。
 - Test: `tests/mcp-migration.test.ts` 增补 `cbx_list_workspaces` 工具清单断言 + 双 workspace 功能用例。总计 462 个测试全过。
 
+- Feature: 任务生命周期清理 `cbx forget` / `cbx purge`。此前 job 存储只增不减——`state.json`/`events.ndjson`/artifacts 与 SQLite 行在任务到终态后永久留存，仅有 `cbx clean`（仅 worktree）与 `prunePersistedData`（仅 delivery_failures）。新增 `forgetJobKeepWorktree` / `purgeJob` 原语：`cbx forget <jobId> [--reason <text>] [--yes]` 删 `state.json`/`events.ndjson`/全部 artifact 但保留 worktree，并写 tombstone 到 metadata 防止同 id 重建静默继承孤儿状态；`cbx purge` 连 worktree 一起删。`--reason` 落审计轨迹。
+- Feature: MCP 新增 `cbx_forget` / `cbx_purge` 工具，复用同一 state 原语（无第二条删除路径）；刻意拆成两个工具而非单一 `cbx_forget{purge_worktree}`，便于模型在 schema 描述中明确选择、且审计记录 `cbx_purge` 而非猜测意图。状态守卫/事件顺序/tombstone/webhook 尽力投递与 CLI 一致。
+- Feature: TUI 新增 `d`（forget，保留 worktree）/ `D`（purge，删 worktree）两步确认。forget/purge 不可逆（state/events/artifacts 删除后无恢复路径），故需二次按键：首按 arm 动作（记住 action/jobId/armedAt），状态栏提示「再按 d 确认」；超时或切换选中重置。
+- Feature: Web UI 新增 `POST /api/jobs/:id/forget` 与 `POST /api/jobs/:id/purge` 路由 + 详情面板按钮（与 cancel/approve/retry/continue 同前缀、同鉴权），补齐任务真正结束后的清理入口。
+- Refactor: 保留期清理收敛到 `pruneAfterTerminal`。`prunePersistedData` 迁入 `storage.ts` 后 6 处终态调用点各自重复「解析 governance.retentionDays + 调用 prune」；收敛为单一入口（approval.ts 3 处/lifecycle.ts 2 处/execution.ts 2 处 + queue-api.ts 健康检查），消除重复解析与高频状态写入时的配置重载/DB 扫描。
+- Test: `tests/ui.test.ts`/`tests/tui.test.ts` 增补 forget/purge HTTP 路由、TUI 两步确认（arm/confirm/timeout/reset）与保留策略收敛用例。
+
 - Feature: 多 workspace CLI 调度。新增 `cbx ws`（跨 workspace 汇总：任务状态计数/队列深度/paused/git 分支，输出与 Web UI `/api/workspaces` 同形状；交互终端显示表格）。`cbx list --all` 跨 workspace 合并任务并带 `[workspace]` 前缀；`cbx health --all` 输出每 workspace 指标。workspace 解析：显式 `--workspace`（可重复）> `--workspaces-dir`（1 层扫描含 `.cbx/` 子目录）> 默认 `.`，去重复用 `dedupWorkspaces`。复用并导出 `summarizeWorkspace`（单一权威汇总实现，CLI/Web UI 共享）；每 ws 独立 catch（单 ws 失败以 error 字段标识，不拖垮整体）。只读查询，不触碰任何 workspace 状态。
 - Test: `tests/multi-workspace.test.ts`（ws 双 workspace 汇总/单 ws 兼容/--workspaces-dir 扫描/list --all 前缀/health --all）。总计 436 个测试全过。
 
