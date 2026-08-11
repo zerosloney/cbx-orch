@@ -353,11 +353,21 @@ node dist/src/cli.js health --workspace .
 
 ## MCP
 
-最小 MCP stdio 适配器，不依赖 MCP SDK。安装 CLI 后直接调用子命令：
+最小 MCP 适配器，不依赖 MCP SDK。两种传输：
+
+**stdio（默认，向后兼容）**：
 
 ```powershell
 cbx mcp
 ```
+
+**streamable HTTP（协议 2025-06-18，支持实时事件推送）**：
+
+```powershell
+cbx mcp --http --port 8931 --host 127.0.0.1 [--token <t>]
+```
+
+客户端把 MCP 配置从 `command: cbx mcp` 改为 `url: http://127.0.0.1:8931/mcp`（可选 `Authorization: Bearer <t>` 头）即接入。HTTP 模式启用 `resources/subscribe`：订阅 `cbx://job/<id>/events?workspace=<ws>` 后，该任务事件变化会经 SSE 推 `notifications/resources/updated`（通知为变更信号，数据经 `resources/read` 读增量 `{ events, next_offset }`）。仅绑定 loopback。
 
 提供的工具：`cbx_start`、`cbx_status`、`cbx_review`、`cbx_continue`、`cbx_artifact`、`cbx_cancel`、`cbx_approve`、`cbx_list`、`cbx_logs`、`cbx_result`、`cbx_queue`、`cbx_queue_pause`、`cbx_queue_resume`、`cbx_retry`、`cbx_review_gate`（对工作区未提交改动跑独立审查，配合 `reviewGate.enabled` 的 Stop hook）、`cbx_clean`（清理任务遗留的 Git worktree，对应 CLI `cbx clean`）、`cbx_list_workspaces`（扫描指定 root 下含 `.cbx/` 的 workspace 并列出各自任务）。
 

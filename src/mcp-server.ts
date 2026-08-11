@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
+import { createServer, type ServerResponse } from "node:http";
 import {
   approveJob,
   cancelJob,
@@ -591,8 +592,155 @@ async function callTool(
   throw new Error(`未知工具：${name}`);
 }
 
+/**
+ * 共享 JSON-RPC dispatch：stdio 与 HTTP(--http) 两个 transport 复用同一套请求处理。
+ * initialize 的协议版本与 subscribe 能力按 transport 区分（stdio 保持 2024-11-05 兼容，
+ * HTTP 升级 2025-06-18 并启用资源订阅推送）。
+ */
+interface DispatchContext {
+  protocolVersion: string;
+  subscribeCapable: boolean;
+  onSubscribe?: (uri: string) => void | Promise<void>;
+  onUnsubscribe?: (uri: string) => void | Promise<void>;
+}
+interface RpcResult {
+  result?: unknown;
+  error?: { code: number; message: string };
+}
+
+async function dispatch(
+  request: { method?: string; params?: Record<string, unknown> },
+  ctx: DispatchContext,
+): Promise<RpcResult> {
+  try {
+    const method = request.method;
+    if (method === "initialize")
+      return {
+        result: {
+          protocolVersion: ctx.protocolVersion,
+          capabilities: {
+            tools: {},
+            resources: { subscribe: ctx.subscribeCapable, listChanged: false },
+          },
+          serverInfo,
+        },
+      };
+    if (method === "ping") return { result: {} };
+    if (method === "tools/list") return { result: { tools } };
+    if (method === "resources/list") {
+      const root = workspace(
+        (request.params ?? {}) as Record<string, unknown>,
+      );
+      const jobs = await listJobs(root);
+      const resources: Array<{
+        uri: string;
+        name: string;
+        mimeType: string;
+      }> = [];
+      for (const job of jobs) {
+        for (const name of await listArtifacts(root, job.jobId))
+          resources.push({
+            uri: `cbx://job/${job.jobId}/${name}?workspace=${encodeURIComponent(root)}`,
+            name: `${job.jobId}/${name}`,
+            mimeType: name.endsWith(".json")
+              ? "application/json"
+              : "text/plain",
+          });
+        // 事件流资源：可订阅（resources/subscribe），变更时推 notifications/resources/updated。
+        resources.push({
+          uri: `cbx://job/${job.jobId}/events?workspace=${encodeURIComponent(root)}`,
+          name: `${job.jobId}/events`,
+          mimeType: "application/json",
+        });
+      }
+      return { result: { resources } };
+    }
+    if (method === "resources/read") {
+      const uri = String(request.params?.uri ?? "");
+      const match =
+        /^cbx:\/\/job\/([^/]+)\/([^?]+)(?:\?workspace=(.*))?$/.exec(uri);
+      if (!match) throw new Error(`不支持的资源 URI：${uri}`);
+      const root = match[3] ? decodeURIComponent(match[3]) : process.cwd();
+      if (match[2] === "events") {
+        // 事件流资源：返回 readEventsIncremental 增量（含 next_offset 游标）。
+        // 尚无 events.ndjson 的任务返回空增量，不当作错误。
+        let incremental;
+        try {
+          incremental = await readEventsIncremental(root, match[1], 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code === "ENOENT")
+            incremental = { events: [], next_offset: 0 };
+          else throw error;
+        }
+        return {
+          result: {
+            contents: [
+              {
+                uri,
+                mimeType: "application/json",
+                text: JSON.stringify(incremental, null, 2),
+              },
+            ],
+          },
+        };
+      }
+      const content = await readArtifact(root, match[1], match[2]);
+      return {
+        result: {
+          contents: [
+            {
+              uri,
+              mimeType: match[2].endsWith(".json")
+                ? "application/json"
+                : "text/plain",
+              text: content,
+            },
+          ],
+        },
+      };
+    }
+    if (method === "resources/subscribe") {
+      if (!ctx.subscribeCapable || !ctx.onSubscribe)
+        throw new Error("资源订阅需要 HTTP(--http) 模式。");
+      const uri = String(request.params?.uri ?? "");
+      if (!uri.startsWith("cbx://job/"))
+        throw new Error(`不支持订阅的资源 URI：${uri}`);
+      await ctx.onSubscribe(uri);
+      return { result: {} };
+    }
+    if (method === "resources/unsubscribe") {
+      if (!ctx.subscribeCapable || !ctx.onUnsubscribe)
+        throw new Error("资源订阅需要 HTTP(--http) 模式。");
+      await ctx.onUnsubscribe(String(request.params?.uri ?? ""));
+      return { result: {} };
+    }
+    if (method === "tools/call")
+      return {
+        result: text(
+          await callTool(
+            String(request.params?.name),
+            (request.params?.arguments ?? {}) as Record<string, unknown>,
+          ),
+        ),
+      };
+    throw new Error(`未知方法：${method ?? "<missing>"}`);
+  } catch (error) {
+    return {
+      error: {
+        code: -32000,
+        message: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+}
+
+/** stdio transport（默认）：协议 2024-11-05，无订阅推送，行为与历史版本一致。 */
 export function runMcpServer(): void {
   const input = createInterface({ input: process.stdin });
+  const ctx: DispatchContext = {
+    protocolVersion: "2024-11-05",
+    subscribeCapable: false,
+  };
   input.on("line", async (line) => {
     if (!line.trim()) return;
     let requestId: unknown = null;
@@ -605,67 +753,10 @@ export function runMcpServer(): void {
       requestId = request.id ?? null;
       // Per JSON-RPC 2.0, a request without an id is a notification and must not receive a response.
       const isNotification = request.id === undefined || request.id === null;
-      if (isNotification && request.method && request.method !== "ping") return;
-      if (request.method === "initialize")
-        send(request.id, {
-          protocolVersion: "2024-11-05",
-          capabilities: {
-            tools: {},
-            resources: { subscribe: false, listChanged: false },
-          },
-          serverInfo,
-        });
-      else if (request.method === "ping") send(request.id, {});
-      else if (request.method === "tools/list") send(request.id, { tools });
-      else if (request.method === "resources/list") {
-        const root = workspace(
-          (request.params ?? {}) as Record<string, unknown>,
-        );
-        const jobs = await listJobs(root);
-        const resources: Array<{
-          uri: string;
-          name: string;
-          mimeType: string;
-        }> = [];
-        for (const job of jobs)
-          for (const name of await listArtifacts(root, job.jobId))
-            resources.push({
-              uri: `cbx://job/${job.jobId}/${name}?workspace=${encodeURIComponent(root)}`,
-              name: `${job.jobId}/${name}`,
-              mimeType: name.endsWith(".json")
-                ? "application/json"
-                : "text/plain",
-            });
-        send(request.id, { resources });
-      } else if (request.method === "resources/read") {
-        const uri = String(request.params?.uri ?? "");
-        const match =
-          /^cbx:\/\/job\/([^/]+)\/([^?]+)(?:\?workspace=(.*))?$/.exec(uri);
-        if (!match) throw new Error(`不支持的资源 URI：${uri}`);
-        const root = match[3] ? decodeURIComponent(match[3]) : process.cwd();
-        const content = await readArtifact(root, match[1], match[2]);
-        send(request.id, {
-          contents: [
-            {
-              uri,
-              mimeType: match[2].endsWith(".json")
-                ? "application/json"
-                : "text/plain",
-              text: content,
-            },
-          ],
-        });
-      } else if (request.method === "tools/call")
-        send(
-          request.id,
-          text(
-            await callTool(
-              String(request.params?.name),
-              (request.params?.arguments ?? {}) as Record<string, unknown>,
-            ),
-          ),
-        );
-      else throw new Error(`未知方法：${request.method ?? "<missing>"}`);
+      if (isNotification && request.method && request.method !== "ping")
+        return;
+      const { result, error } = await dispatch(request, ctx);
+      send(request.id, result, error);
     } catch (error) {
       send(requestId, undefined, {
         code: -32000,
@@ -673,6 +764,182 @@ export function runMcpServer(): void {
       });
     }
   });
+}
+
+interface SseConnection {
+  res: ServerResponse;
+}
+
+/**
+ * streamable HTTP transport（`cbx mcp --http`）：协议 2025-06-18，单 endpoint `POST /mcp`，
+ * 启用 `resources/subscribe` + `notifications/resources/updated` 服务端推送。
+ * 无状态会话：订阅按 uri 全局登记，变更通知广播到所有打开的 SSE 连接（`GET /mcp`）。
+ * intentional-simple: 单用户 loopback 场景，广播 + 客户端按 uri 过滤足够；
+ * 若需多租户隔离再引入 Mcp-Session-Id 会话表。
+ */
+export interface McpHttpServer {
+  port: number;
+  close(): Promise<void>;
+}
+
+export async function runMcpHttpServer(opts: {
+  port: number;
+  host: string;
+  token?: string;
+}): Promise<McpHttpServer> {
+  const { port, host, token } = opts;
+  if (!new Set(["127.0.0.1", "localhost", "::1"]).has(host))
+    throw new Error("MCP HTTP 仅允许绑定到本机回环地址；远程访问需在受认证的反向代理后实现。");
+  const uris = new Set<string>();
+  const connections = new Set<SseConnection>();
+  const tailers = new Map<string, () => void>();
+
+  const pushUpdated = (uri: string): void => {
+    const frame = `data: ${JSON.stringify({
+      jsonrpc: "2.0",
+      method: "notifications/resources/updated",
+      params: { uri },
+    })}\n\n`;
+    for (const conn of connections) {
+      try {
+        conn.res.write(frame);
+      } catch {
+        /* 连接已断开 */
+      }
+    }
+  };
+
+  // 订阅某个 job 的事件资源时，轮询该 job 的 events.ndjson 行数增量，变化则推送 updated。
+  // 基线在订阅时读取（await），此后行数增长才推送——保证订阅前已存在的事件不算增量。
+  const ensureTailer = async (workspace: string, jobId: string): Promise<void> => {
+    const key = `${workspace}\u0000${jobId}`;
+    if (tailers.has(key)) return;
+    let lastLen = 0;
+    try {
+      lastLen = (await readEventsIncremental(workspace, jobId, 0)).events.length;
+    } catch {
+      /* 尚无 events.ndjson，基线为 0 */
+    }
+    const timer = setInterval(async () => {
+      try {
+        const { events } = await readEventsIncremental(workspace, jobId, 0);
+        if (events.length > lastLen) {
+          const uri = `cbx://job/${jobId}/events?workspace=${encodeURIComponent(workspace)}`;
+          if (uris.has(uri)) pushUpdated(uri);
+        }
+        lastLen = events.length;
+      } catch {
+        /* events.ndjson 缺失等，跳过本轮 */
+      }
+    }, 500);
+    timer.unref();
+    tailers.set(key, () => clearInterval(timer));
+  };
+
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", `http://${host}`);
+    if (token && req.headers.authorization !== `Bearer ${token}`) {
+      res.writeHead(401, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/mcp") {
+      let raw = "";
+      try {
+        for await (const chunk of req) raw += chunk;
+      } catch {
+        /* body 读取失败 */
+      }
+      let request: { id?: unknown; method?: string; params?: Record<string, unknown> };
+      try {
+        request = JSON.parse(raw) as typeof request;
+      } catch {
+        res.writeHead(400, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "请求体必须是合法 JSON。" }));
+        return;
+      }
+      const ctx: DispatchContext = {
+        protocolVersion: "2025-06-18",
+        subscribeCapable: true,
+        onSubscribe: async (uri) => {
+          uris.add(uri);
+          const m =
+            /^cbx:\/\/job\/([^/]+)\/events(?:\?workspace=(.*))?$/.exec(uri);
+          if (m)
+            await ensureTailer(
+              m[2] ? decodeURIComponent(m[2]) : process.cwd(),
+              m[1],
+            );
+        },
+        onUnsubscribe: (uri) => {
+          uris.delete(uri);
+        },
+      };
+      const { result, error } = await dispatch(request, ctx);
+      const payload =
+        error !== undefined
+          ? { jsonrpc: "2.0", id: request.id ?? null, error }
+          : { jsonrpc: "2.0", id: request.id ?? null, result };
+      res.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      res.end(JSON.stringify(payload));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/mcp") {
+      // SSE 长连接：服务端推送 notifications/resources/updated 的承载通道。
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      res.write(": connected\n\n");
+      const conn: SseConnection = { res };
+      connections.add(conn);
+      req.on("close", () => connections.delete(conn));
+      return;
+    }
+    if (url.pathname !== "/mcp") {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    res.writeHead(405, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "method not allowed" }));
+  });
+
+  await new Promise<void>((resolve) => server.listen(port, host, resolve));
+  const addr = server.address();
+  const actualPort =
+    addr !== null && typeof addr === "object" ? addr.port : port;
+  process.stdout.write(
+    `cbx MCP (streamable HTTP) 监听 ${host}:${actualPort}/mcp，协议 2025-06-18\n`,
+  );
+  // 打开的 listener 本身保持进程常驻，无需调用方阻塞等待 close。
+  return {
+    port: actualPort,
+    close: () =>
+      new Promise<void>((resolve) => {
+        // 关闭前销毁所有打开的 SSE 连接与 tailer，否则 server.close() 会因活动连接挂起。
+        for (const conn of connections) {
+          try {
+            conn.res.destroy();
+          } catch {
+            /* 已断开 */
+          }
+        }
+        connections.clear();
+        for (const stop of tailers.values()) stop();
+        tailers.clear();
+        server.close(() => resolve());
+      }),
+  };
 }
 
 // Backward compat: `node dist/src/mcp-server.js` still starts the server directly.

@@ -26,6 +26,7 @@ const VALUE_OPTIONS = new Set([
   "--port",
   "--host",
   "--ui-token",
+  "--token",
   "--template",
   "--format",
   "--max-batch",

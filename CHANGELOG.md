@@ -6,6 +6,9 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Feature: MCP streamable HTTP 传输。新增 `cbx mcp --http [--port] [--host] [--token]` 模式,协议升级 2025-06-18,单 endpoint `POST /mcp` + `GET /mcp`(SSE 承载服务端推送),仅绑定 loopback、token 鉴权(与 `cbx ui` 同源)。启用 `resources/subscribe` + `notifications/resources/updated`:订阅 `cbx://job/<id>/events` 后,任务事件变化实时推送(通知为变更信号,数据经 `resources/read` 读增量 `{events, next_offset}`;订阅时建基线,此前事件不算增量)。stdio 模式保持默认与协议 2024-11-05,完全向后兼容;19 个工具与 resources 契约不变。零依赖(Node 原生 http + 手写 SSE,对齐 `cbx ui`)。
+- Test: 新增 `tests/mcp-http.test.ts`(6 例:initialize 2025-06-18+subscribe、tools/list 19 工具、events 资源 list/read、订阅→事件→updated 推送、非 loopback 拒绝、token 401/200)。总计 469 个测试全过。
+
 - Fix: TUI forget/purge 二次确认提示。按下 `d`/`D` 进入 armed 后状态栏显示「再按 d/D 确认 <job>（3s）」黄色提示，超时或按其他键自动取消；此前 armed 状态对用户不可见。
 - Refactor: workspace 发现收敛为单一共享入口。`discoverWorkspaces` / `dedupWorkspaces` / `listJobsAcrossWorkspaces` 从 CLI 本地副本移入 `src/artifacts.ts` 并经 `core.ts` re-export；CLI（`cbx ws --workspaces-dir`、`ui` 命令）改走共享实现，删除 `cli.ts` 本地重复。Web UI 不改（消费 CLI 已解析的 workspace 列表，发现是 CLI 层职责）。
 - Feature: MCP 新增 `cbx_list_workspaces` 工具（扫描 `root` 下含 `.cbx/` 的 workspace 并列出各自任务，`root` 缺省 cwd），复用 `listJobsAcrossWorkspaces`，输出 `{ workspaces: Array<{ workspace, jobs }> }`。

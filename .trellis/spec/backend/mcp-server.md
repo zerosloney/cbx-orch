@@ -1,13 +1,23 @@
 # MCP Server Contract
 
-`src/mcp-server.ts` exposes the orchestrator over MCP JSON-RPC (stdio). It is the control-plane counterpart to `src/cli.ts`; both call the same `src/core.js` functions.
+`src/mcp-server.ts` exposes the orchestrator over MCP JSON-RPC. It is the control-plane counterpart to `src/cli.ts`; both call the same `src/core.js` functions.
 
 ## Scope
 
-- Entry point: `cbx mcp` subcommand; also runnable directly as `node dist/src/mcp-server.js`.
-- Protocol: JSON-RPC 2.0 over stdin/stdout, one JSON object per line.
+- Entry points: `cbx mcp`（stdio，默认）与 `cbx mcp --http`（streamable HTTP）。
+- stdio 模式:JSON-RPC 2.0 over stdin/stdout,one JSON object per line;协议 `2024-11-05`,无订阅推送(向后兼容)。
+- HTTP 模式:`cbx mcp --http [--port] [--host] [--token]`,单 endpoint `POST /mcp` + `GET /mcp`(SSE 长连接承载服务端推送);协议 `2025-06-18`。仅绑定 loopback;`--token` 或 `.cbx.json` `ui.token` 鉴权(Bearer)。
 - Tools: `cbx_start` `cbx_status` `cbx_review` `cbx_continue` `cbx_artifact` `cbx_cancel` `cbx_approve` `cbx_list` `cbx_logs` `cbx_result` `cbx_queue` `cbx_queue_pause` `cbx_queue_resume` `cbx_retry` `cbx_review_gate` `cbx_clean` `cbx_list_workspaces`.
-- Resources: `resources/list` + `resources/read` over `cbx://job/<id>/<artifact>?workspace=<encoded>` URIs.
+- Resources: `resources/list` + `resources/read` over `cbx://job/<id>/<artifact>?workspace=<encoded>` URIs;外加可订阅的**事件流资源** `cbx://job/<id>/events?workspace=<encoded>`。
+
+## Streamable HTTP 订阅推送
+
+- 能力:`initialize` 返回 `protocolVersion: "2025-06-18"` + `capabilities.resources.subscribe: true`。
+- `resources/subscribe { uri: "cbx://job/<id>/events?workspace=..." }` → 登记订阅;此后该 job 的 `events.ndjson` 行数增长时,向所有打开的 SSE 连接(`GET /mcp`)推 `notifications/resources/updated { uri }`。
+- **通知 = 变更信号**:客户端收到 updated 后,`resources/read` 读该 events 资源拿增量(`readEventsIncremental` 输出 `{ events, next_offset }`);通知体不含事件数据(控 payload)。
+- 基线:订阅时读取当前事件数作为基线,此后增长才推送——订阅前已存在的事件不算增量。
+- 无状态会话:不要求 `Mcp-Session-Id`;订阅按 uri 全局登记,变更广播到所有打开的 SSE 连接。intentional-simple:单用户 loopback 场景,客户端按 uri 过滤即可。
+- 无事件文件的任务,`resources/read` 返回空增量 `{ events: [], next_offset: 0 }`(非错误)。
 
 ## Response Shape Convention (must stay uniform)
 
@@ -60,6 +70,14 @@ Clients read `structuredContent`. Rules:
 **Context**: `cbx_review` caught missing `review.md` and returned a placeholder; `cbx_artifact`/`cbx_result` propagated errors.
 
 **Decision**: propagate. Uniform failure semantics beat a friendlier-looking but shape-breaking fallback; the MCP client already handles JSON-RPC errors.
+
+### Decision: streamable HTTP transport for server push (stdio kept as default)
+
+**Context**: `cbx_logs` cursor polling gave MCP clients no real-time event stream; Web UI `/events` has true SSE push.
+
+**Options**: (a) long-poll `cbx_logs`, (b) server-initiated JSON-RPC notifications over stdio, (c) upgrade to streamable HTTP transport (2025-06-18) with `resources/subscribe` push.
+
+**Decision**: (c). stdio stays the default transport (protocol 2024-11-05, backward compatible); `cbx mcp --http` adds streamable HTTP (2025-06-18) with `resources/subscribe` + `notifications/resources/updated` — the spec-native push mechanism mainstream clients support. Zero-dependency (Node native `http` + hand-written SSE, matching `cbx ui`). Long-poll was rejected (held request, not push); stdio notifications rejected (client transport support for unsolicited messages is uncontrollable).
 
 ## Tests
 

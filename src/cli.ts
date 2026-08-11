@@ -225,8 +225,21 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "mcp") {
-    const { runMcpServer } = await import("./mcp-server.js");
-    runMcpServer();
+    if (parsed.has("--http")) {
+      // streamable HTTP 模式（协议 2025-06-18）：`cbx mcp --http [--port] [--host] [--token]`。
+      const { runMcpHttpServer } = await import("./mcp-server.js");
+      // token 优先级：CLI --token > .cbx.json ui.token（与 ui 命令同源）。
+      const cliToken = parsed.option("--token");
+      const configToken = (await loadConfig(workspace)).ui?.token;
+      await runMcpHttpServer({
+        port: parsed.intOption("--port", 8931, { min: 1, max: 65535 })!,
+        host: parsed.option("--host", "127.0.0.1")!,
+        token: cliToken ?? configToken,
+      });
+    } else {
+      const { runMcpServer } = await import("./mcp-server.js");
+      runMcpServer();
+    }
     return;
   }
   if (command === "status") {
