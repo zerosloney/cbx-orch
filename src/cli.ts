@@ -530,6 +530,28 @@ async function main(): Promise<void> {
     } catch {
       /* 无 result.json：输出基本状态 */
     }
+    // 关键工件（test.log / review.md / complete.patch）— 任意缺失均不影响整体输出，
+    // 渲染端按字段存在与否决定是否绘制对应段落。
+    const tryRead = async (name: string): Promise<string | undefined> => {
+      try {
+        return await readArtifact(workspace, jobId, name);
+      } catch {
+        return undefined;
+      }
+    };
+    const [testLog, review, completePatch] = await Promise.all([
+      tryRead("test.log"),
+      tryRead("review.md"),
+      tryRead("complete.patch"),
+    ]);
+    if (result) {
+      if (testLog) result.testLog = testLog;
+      if (review) result.review = review;
+      if (completePatch) result.completePatch = completePatch;
+    } else if (testLog || review || completePatch) {
+      // 无 result.json 但工件存在：构造最小 result 保留 handback-like 字段
+      result = { testLog, review, completePatch } as Record<string, unknown>;
+    }
     console.log(renderExport(state, result, format as "text" | "markdown"));
     return;
   }
