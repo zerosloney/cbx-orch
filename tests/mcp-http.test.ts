@@ -262,6 +262,14 @@ test("MCP HTTP: 配置 token 后未鉴权 401，鉴权后 200", async () => {
       method: "ping",
     });
     assert.equal(unauth.status, 401);
+    // 错误 token 同样 401（覆盖常量时间比较的负路径）。
+    const wrong = await postJson(
+      server.port,
+      "/mcp",
+      { jsonrpc: "2.0", id: 8, method: "ping" },
+      "not-the-secret",
+    );
+    assert.equal(wrong.status, 401);
     const authed = await postJson(
       server.port,
       "/mcp",

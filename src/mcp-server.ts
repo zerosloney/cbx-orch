@@ -24,6 +24,7 @@ import {
   type TaskContract,
 } from "./core.js";
 import { runReviewGate } from "./review-gate.js";
+import { constantTimeEqual } from "./storage.js";
 import { APP_VERSION } from "./version.js";
 
 const serverInfo = { name: "cbx-orch", version: APP_VERSION };
@@ -387,6 +388,9 @@ async function callTool(
   const root = workspace(args);
   const id = String(args.job_id ?? "");
   if (name === "cbx_start") {
+    // schema 声明 required，但 JSON-RPC 不强制 schema：缺 task 时 String(undefined) 会创建 "undefined" 垃圾任务。
+    if (typeof args.task !== "string" || !args.task.trim())
+      throw new Error("task 必须是非空字符串。");
     const config = await loadConfig(root);
     if (
       args.approval_before_complete !== undefined &&
@@ -462,7 +466,7 @@ async function callTool(
       : undefined;
     const job = await createJob({
       workspace: root,
-      task: String(args.task),
+      task: args.task,
       contextSnapshot:
         args.context_snapshot === undefined
           ? undefined
@@ -509,6 +513,11 @@ async function callTool(
         Number(args.extra_rounds) > 100)
     )
       throw new Error("extra_rounds 必须是 1 到 100 的整数。");
+    if (
+      args.refresh_baseline !== undefined &&
+      typeof args.refresh_baseline !== "boolean"
+    )
+      throw new Error("refresh_baseline 必须是布尔值。");
     await startBackground(
       root,
       id,
@@ -517,7 +526,7 @@ async function callTool(
       args.context_snapshot === undefined
         ? undefined
         : String(args.context_snapshot),
-      Boolean(args.refresh_baseline),
+      args.refresh_baseline === true,
       Number(args.extra_rounds ?? 0),
     );
     return { job_id: id, status: "queued" };
@@ -838,13 +847,19 @@ export async function runMcpHttpServer(opts: {
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${host}`);
-    if (token && req.headers.authorization !== `Bearer ${token}`) {
-      res.writeHead(401, {
-        "content-type": "application/json; charset=utf-8",
-        "cache-control": "no-store",
-      });
-      res.end(JSON.stringify({ error: "unauthorized" }));
-      return;
+    if (token) {
+      // 与 cbx ui 同源：token 校验用 SHA-256 + timingSafeEqual 常量时间比较，
+      // 避免 `===` 逐字节短路的时序侧信道（CHANGELOG 0.10.2 加固项对新增 HTTP 路径同样适用）。
+      const auth = req.headers.authorization;
+      const presented = auth?.startsWith("Bearer ") ? auth.slice(7) : undefined;
+      if (!presented || !constantTimeEqual(presented, token)) {
+        res.writeHead(401, {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+        });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
     }
     if (req.method === "POST" && url.pathname === "/mcp") {
       let raw = "";

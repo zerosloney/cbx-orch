@@ -169,7 +169,12 @@ export async function enqueueJob(runtime: QueueRuntime, workspaceInput: string, 
     const maxConcurrent = configuredConcurrency((await runtime.loadConfig(workspace)).maxConcurrent);
     const queue = await loadQueue(workspace);
     queue.maxConcurrent = maxConcurrent;
-    const duplicate = queue.entries.find(item => item.jobId === jobId && ["queued", "running"].includes(item.status));
+    // awaiting_approval 也是活跃状态：等待审批的任务不应被再次入队（否则双 entry 会旁路审批门）。
+    const duplicate = queue.entries.find(
+      (item) =>
+        item.jobId === jobId &&
+        ["queued", "running", "awaiting_approval"].includes(item.status),
+    );
     if (duplicate) throw new Error(`任务已经在队列中：${jobId}`);
     const created: QueueEntry = { queueId: `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`, jobId, workspace, extra, status: "queued", createdAt: now(), priority };
     queue.entries.push(created);
@@ -219,6 +224,41 @@ export async function cancelQueueEntries(runtime: QueueRuntime, workspaceInput: 
     }
     await saveQueue(workspace, queue);
     return queue;
+  });
+}
+
+/**
+ * 单锁内原子完成取消终态：把 jobId 所有活跃队列条目标记 cancelled，并同时写入最终 state。
+ * 与 worker 终态双写（writeState 携带 queueEntryId 的路径）共用同一把队列锁，二者串行化，
+ * 避免并发时 state 与 queue entry 撕裂——典型场景：任务恰好自然完成写了 done，
+ * cancelJob 随后单独写 cancelled，导致 state=cancelled 而 entry=done 的不一致残留。
+ * 幂等：已 cancelled/done 的条目不会被再次改写。
+ */
+export async function cancelQueueEntriesWithState(
+  runtime: QueueRuntime,
+  workspaceInput: string,
+  jobId: string,
+  updates: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const workspace = path.resolve(workspaceInput);
+  return withQueueLock(workspace, async () => {
+    const queue = await loadQueue(workspace);
+    for (const entry of queue.entries.filter(
+      (item) =>
+        item.jobId === jobId &&
+        ["queued", "running", "awaiting_approval"].includes(item.status),
+    )) {
+      entry.status = "cancelled";
+      entry.finishedAt = now();
+      entry.pid = undefined;
+    }
+    const current = (await runtime.loadState(
+      workspace,
+      jobId,
+    )) as Record<string, unknown>;
+    const state = { ...current, ...updates, updatedAt: now() };
+    await runtime.saveStateAndQueue(workspace, jobId, state, queue);
+    return state;
   });
 }
 

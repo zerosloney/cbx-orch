@@ -1,12 +1,17 @@
 import { existsSync } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { loadConfig, loadState, writeState, jobDir, logJobEvent } from "./state.js";
+import { loadConfig, loadState, jobDir, logJobEvent } from "./state.js";
 import { redactText, saveJson, now } from "./storage.js";
 import { pruneAfterTerminal } from "./state.js";
 import { refreshBaseline } from "./baseline.js";
 import { prepareContinuation } from "./execution.js";
-import { enqueueJob, listQueue, cancelQueueEntries } from "./queue-api.js";
+import {
+  enqueueJob,
+  listQueue,
+  cancelQueueEntries,
+  cancelJobState,
+} from "./queue-api.js";
 import { cleanupWorktree } from "./worktree.js";
 import { terminateTree } from "./process-runner.js";
 import type { JobState } from "./types.js";
@@ -54,12 +59,12 @@ export async function cancelJob(workspaceInput: string, jobId: string): Promise<
   }
   if (survivors.length > 0) {
     logJobEvent(workspace, jobId, "cancel_process_survived", { pids: survivors });
-    const state = await writeState(workspace, jobId, { status: "needs_fix", phase: "cancel_failed", error: `无法确认进程树已退出：${survivors.join(", ")}` });
+    const state = await cancelJobState(workspace, jobId, { status: "needs_fix", phase: "cancel_failed", error: `无法确认进程树已退出：${survivors.join(", ")}` });
     await pruneAfterTerminal(workspace);
     return state;
   }
   try { await cleanupWorktree(workspace, jobId); } catch (error) { logJobEvent(workspace, jobId, "cleanup_failed", { phase: "cancel", error: error instanceof Error ? error.message : String(error) }); }
-  const state = await writeState(workspace, jobId, { status: "cancelled", phase: "cancelled", cancelledAt: now() });
+  const state = await cancelJobState(workspace, jobId, { status: "cancelled", phase: "cancelled", cancelledAt: now() });
   await pruneAfterTerminal(workspace);
   return state;
 }

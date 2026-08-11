@@ -165,7 +165,11 @@ graph LR
   "execution": { "trustMode": "trusted" },
   "dependencyGuard": true,
   "templates": {
-    "bugfix": { "task": "修复 review.md 中的问题", "test": "npm test", "review": true },
+    "bugfix": {
+      "task": "修复 review.md 中的问题",
+      "test": "npm test",
+      "review": true
+    },
     "feature": { "task": "实现新功能", "executor": "opencode" }
   },
   "adaptive": {
@@ -217,7 +221,7 @@ node dist/src/cli.js health --all --workspaces-dir ~/code             # 跨 work
 node dist/src/cli.js batch --task "任务A" --task "任务B" --workspace .       # 批量创建任务
 node dist/src/cli.js batch --task "A" --max-batch 2 --wait --workspace .    # 波次并发 + 等待终态汇总
 node dist/src/cli.js logs JOB_ID --workspace .
-node dist/src/cli.js files JOB_ID --workspace .
+node dist/src/cli.js files JOB_ID --workspace .                     # 列出任务 artifact 文件（读内容用 result/review/logs）
 node dist/src/cli.js result JOB_ID --workspace .
 node dist/src/cli.js export JOB_ID [--format text|markdown] --workspace .
 node dist/src/cli.js approve JOB_ID --workspace .
@@ -233,50 +237,60 @@ node dist/src/cli.js stop-review-gate                   # Stop hook 入口（std
 `cbx batch` 批量创建独立任务：`--task`/`--task-file` 可重复（可混用）；run 选项（`--executor`/`--review`/`--isolated` 等）透传到每个任务。`--max-batch N` 将批任务按 N 个一波分片入队（波间等上一波终态，不改变全局 `maxConcurrent`）；默认 0 = 一次全量入队。`--wait` 等待全部终态并输出成功/失败计数，超时（`--wait-timeout-ms`）返回未完成列表并以非零退出；批任务 job 与普通任务同构，可独立 `retry`/`continue`。
 
 # 本地 Web UI / TUI
+
 node dist/src/cli.js ui --workspace . --port 4173
 node dist/src/cli.js ui --workspace . --port 4173 --ui-token your-secret-token
 node dist/src/cli.js tui --workspace .
 
 # 多 workspace 模式:一个 UI 看多个项目,顶部 workspace 选择器 + Dashboard 卡片
+
 node dist/src/cli.js ui --workspace ~/code/proj-a --workspace ~/code/proj-b --port 4173
-node dist/src/cli.js ui --workspaces-dir ~/code --port 4173  # 仅扫描直接子目录（1 层，不递归）
+node dist/src/cli.js ui --workspaces-dir ~/code --port 4173 # 仅扫描直接子目录（1 层，不递归）
+
 # 单 workspace 时 ws-list 自动隐藏;Dashboard 卡片和实时秒表对单/多模式都生效
 
 # Web UI 接口（直接可读）
-curl http://127.0.0.1:4173/                                    # HTML 仪表板
-curl http://127.0.0.1:4173/events                               # SSE 实时事件流（支持 Last-Event-ID 回放）
-curl http://127.0.0.1:4173/api/workspaces                       # 所有 workspace 状态摘要
-curl http://127.0.0.1:4173/api/jobs                             # 任务列表
-curl http://127.0.0.1:4173/api/jobs/<id>                        # 单个任务详情
-curl http://127.0.0.1:4173/api/jobs/<id>/artifacts              # 可用 artifact 列表
-curl http://127.0.0.1:4173/api/jobs/<id>/artifact/<name>        # 读取 artifact（handback.md / complete.patch / test.log / review.md 等）
-curl http://127.0.0.1:4173/api/jobs/<id>/timeline               # 阶段时间线(stages + currentStage + elapsedSec)
-curl http://127.0.0.1:4173/api/jobs/<id>/executor               # PID/heartbeat/命令 + 进程是否还活
-curl http://127.0.0.1:4173/api/jobs/<id>/agent.log?since=0     # agent.log 增量(默认 256KB)
-curl http://127.0.0.1:4173/api/queue                            # 队列状态
-curl http://127.0.0.1:4173/healthz                              # 健康检查
-curl http://127.0.0.1:4173/api/metrics                          # 运行指标
+
+curl http://127.0.0.1:4173/ # HTML 仪表板
+curl http://127.0.0.1:4173/events # SSE 实时事件流（支持 Last-Event-ID 回放）
+curl http://127.0.0.1:4173/api/workspaces # 所有 workspace 状态摘要
+curl http://127.0.0.1:4173/api/jobs # 任务列表
+curl http://127.0.0.1:4173/api/jobs/<id> # 单个任务详情
+curl http://127.0.0.1:4173/api/jobs/<id>/artifacts # 可用 artifact 列表
+curl http://127.0.0.1:4173/api/jobs/<id>/artifact/<name> # 读取 artifact（handback.md / complete.patch / test.log / review.md 等）
+curl http://127.0.0.1:4173/api/jobs/<id>/timeline # 阶段时间线(stages + currentStage + elapsedSec)
+curl http://127.0.0.1:4173/api/jobs/<id>/executor # PID/heartbeat/命令 + 进程是否还活
+curl http://127.0.0.1:4173/api/jobs/<id>/agent.log?since=0 # agent.log 增量(默认 256KB)
+curl http://127.0.0.1:4173/api/queue # 队列状态
+curl http://127.0.0.1:4173/healthz # 健康检查
+curl http://127.0.0.1:4173/api/metrics # 运行指标
 
 # Web UI 写操作（POST，需鉴权；浏览器自动携带 HttpOnly cookie，curl 需 Authorization: Bearer <token>）
-curl -X POST http://127.0.0.1:4173/api/jobs/<id>/cancel         # 取消任务
-curl -X POST http://127.0.0.1:4173/api/jobs/<id>/retry          # 重试失败任务
-curl -X POST http://127.0.0.1:4173/api/jobs/<id>/approve        # 批准等待中的任务（before_run 批准后自动启动）
-curl -X POST http://127.0.0.1:4173/api/jobs/<id>/continue       # 续跑（body: {message, priority, refresh_baseline, extra_rounds}）
-curl -X POST http://127.0.0.1:4173/api/queue/pause              # 暂停队列
-curl -X POST http://127.0.0.1:4173/api/queue/resume             # 恢复队列
+
+curl -X POST http://127.0.0.1:4173/api/jobs/<id>/cancel # 取消任务
+curl -X POST http://127.0.0.1:4173/api/jobs/<id>/retry # 重试失败任务
+curl -X POST http://127.0.0.1:4173/api/jobs/<id>/approve # 批准等待中的任务（before_run 批准后自动启动）
+curl -X POST http://127.0.0.1:4173/api/jobs/<id>/continue # 续跑（body: {message, priority, refresh_baseline, extra_rounds}）
+curl -X POST http://127.0.0.1:4173/api/queue/pause # 暂停队列
+curl -X POST http://127.0.0.1:4173/api/queue/resume # 恢复队列
 
 # CI 模式：任务失败时返回非 0 退出码
+
 node dist/src/cli.js run --ci --workspace . --task "实现某功能" --test "npm test"
 
 # 单次调度：回收死 worker 并启动排队任务
+
 node dist/src/cli.js dispatch --workspace .
 
 # 常驻调度器：启动时回收死 worker，随后按间隔调度；SIGINT/SIGTERM 会停止调度器
+
 node dist/src/cli.js serve --workspace . --interval-ms 30000
 
 # 不含任务正文的健康与运行指标
+
 node dist/src/cli.js health --workspace .
-```
+
+````
 
 `ui` 命令支持 token 鉴权：通过 `--ui-token <token>` 或 `.cbx.json` 的 `ui.token` 配置。启用后浏览器首次加载首页会收到 `cbx_token` HttpOnly cookie（`SameSite=Strict`），同源 API/SSE 请求自动携带——token 不进入页面 JS 作用域、不出现在 URL 查询串，降低 XSS 与浏览器历史泄露面。curl/API 客户端仍可用 `Authorization: Bearer <token>` 请求头；SSE 兼容旧客户端可传 `?token=<token>` 查询参数。`/healthz` 健康检查和 `/` 首页无需 token。
 
@@ -309,7 +323,7 @@ node dist/src/cli.js health --workspace .
     ]
   }
 }
-```
+````
 
 前置 stage 进入失败终态（review FAIL / 非零退出）后，后继 stage 标记 skipped 而非执行（失败传播），并记 `stage_skipped` 事件。stage 的 handback 注入会聚合所有 dependsOn stage 的交接文档。悬空依赖（引用不存在的 name）与循环依赖在任务创建时即被拒绝。当前层内仍串行执行（单 worktree 安全），物理并行执行为后续规划。
 

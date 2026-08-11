@@ -17,6 +17,7 @@ import {
   type RuntimeConfig,
 } from "./storage.js";
 import { assertJobId } from "./validation.js";
+import { CbxError } from "./errors.js";
 import { cleanupWorktree } from "./worktree.js";
 import { normalizeAdaptiveOptions } from "./adaptive-manager.js";
 import type { JobState, CbxConfig, Json } from "./types.js";
@@ -51,7 +52,10 @@ export async function loadState(
   jobDir(workspace, jobId);
   const value = await loadPersistedState<JobState>(workspace, jobId);
   if (!value || typeof value !== "object")
-    throw new Error(`任务不存在或状态文件损坏：${jobId}`);
+    throw new CbxError(
+      "E_NOT_FOUND",
+      `任务不存在或状态文件损坏：${jobId}`,
+    );
   return value;
 }
 

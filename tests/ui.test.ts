@@ -669,6 +669,18 @@ test("HTTP: POST continue 携带 message 且非法 extra_rounds 报 400", async 
       },
     );
     assert.equal(bad.status, 400);
+    // refresh_baseline 字符串 "false" 不得被强转成 true → 400（布尔类型校验）
+    const badBool = await fetch(
+      `http://127.0.0.1:${port}/api/jobs/${job.jobId}/continue`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ refresh_baseline: "false" }),
+      },
+    );
+    assert.equal(badBool.status, 400);
+    const badBoolBody = (await badBool.json()) as { error: string };
+    assert.match(badBoolBody.error, /refresh_baseline 必须是布尔值/);
   });
 });
 
@@ -749,13 +761,13 @@ test("HTTP: 未知路由返回 404", async () => {
   });
 });
 
-test("HTTP: /api/jobs/:id 不存在时 loadState 抛错映射 500", async () => {
+test("HTTP: /api/jobs/:id 不存在时 loadState 抛 E_NOT_FOUND 映射 404", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-enoent-"));
   await withServer(workspace, undefined, async (port) => {
     const res = await fetch(`http://127.0.0.1:${port}/api/jobs/missing-job`);
-    // loadState 对不存在的 job 抛普通 Error（非 ENOENT），HTTP 层映射 500。
-    // ENOENT→404 映射专门用于 readArtifact 等文件读取路径（见下方 artifact 测试）。
-    assert.equal(res.status, 500);
+    // loadState 对不存在的 job 抛 CbxError E_NOT_FOUND，HTTP 层映射 404；
+    // ENOENT→404 映射专用于 readArtifact 等文件读取路径（见下方 artifact 测试）。
+    assert.equal(res.status, 404);
     assert.match(JSON.stringify(await res.json()), /任务不存在/);
   });
 });
@@ -1006,7 +1018,7 @@ test("HTTP: POST forget 拒绝 running 任务（500 抛错）", async () => {
       `http://127.0.0.1:${port}/api/jobs/${job.jobId}/forget`,
       { method: "POST" },
     );
-    // 后端抛错 → HTTP 500（与 /api/jobs/:id 不存在时的映射一致）
+    // 后端状态守卫抛普通 Error（无错误码）→ HTTP 500（区别于缺失 job 的 E_NOT_FOUND→404）。
     assert.equal(res.status, 500);
     const body = (await res.json()) as { error: string };
     assert.match(body.error, /当前状态为 running/);

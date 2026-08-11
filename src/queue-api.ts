@@ -112,6 +112,20 @@ export async function cancelQueueEntries(
   return queue.cancelQueueEntries(queueRuntime, workspaceInput, jobId);
 }
 
+/** 单锁内原子完成取消终态（标记队列条目 cancelled + 写 state），供 cancelJob 使用。 */
+export async function cancelJobState(
+  workspaceInput: string,
+  jobId: string,
+  updates: Record<string, unknown>,
+): Promise<JobState> {
+  return (await queue.cancelQueueEntriesWithState(
+    queueRuntime,
+    workspaceInput,
+    jobId,
+    updates,
+  )) as unknown as JobState;
+}
+
 export async function retryQueueJob(
   workspaceInput: string,
   jobId: string,

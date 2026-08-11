@@ -5,7 +5,8 @@ export type CbxErrorCode =
   | "E_ARTIFACT_FORBIDDEN"
   | "E_INVALID_CONTEXT"
   | "E_LOCK_BUSY"
-  | "E_QUEUE_BUSY";
+  | "E_QUEUE_BUSY"
+  | "E_NOT_FOUND";
 
 export class CbxError extends Error {
   readonly code: CbxErrorCode;

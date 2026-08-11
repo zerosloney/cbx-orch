@@ -831,6 +831,12 @@ export function createWebUiServer(
             body.priority === undefined ? 0 : Number(body.priority);
           if (body.priority !== undefined && !Number.isFinite(priority))
             return json(res, { error: "priority 必须是数字。" }, 400);
+          // refresh_baseline 只接受布尔：JSON body 里字符串 "false" 不得被 Boolean() 强转成 true。
+          if (
+            body.refresh_baseline !== undefined &&
+            typeof body.refresh_baseline !== "boolean"
+          )
+            return json(res, { error: "refresh_baseline 必须是布尔值。" }, 400);
           await startBackground(
             ws,
             jobId,
@@ -839,9 +845,7 @@ export function createWebUiServer(
             body.context_snapshot === undefined
               ? undefined
               : String(body.context_snapshot),
-            body.refresh_baseline === undefined
-              ? false
-              : Boolean(body.refresh_baseline),
+            body.refresh_baseline === true,
             extraRounds,
           );
           return json(res, { jobId, status: "queued" });
@@ -855,11 +859,13 @@ export function createWebUiServer(
       const status =
         code === "ENOENT"
           ? 404
-          : isCbxError(error, "E_ARTIFACT_FORBIDDEN")
-            ? 403
-            : isCbxError(error, "E_INVALID_JOB_ID")
-              ? 400
-              : 500;
+          : isCbxError(error, "E_NOT_FOUND")
+            ? 404
+            : isCbxError(error, "E_ARTIFACT_FORBIDDEN")
+              ? 403
+              : isCbxError(error, "E_INVALID_JOB_ID")
+                ? 400
+                : 500;
       json(res, { error: message }, status);
     }
   });

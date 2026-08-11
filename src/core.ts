@@ -46,7 +46,7 @@ export { startBackground, cancelJob } from "./lifecycle.js";
 export { cleanupWorktree } from "./worktree.js";
 
 // Queue operations facade
-export { dispatchQueue, health, serveQueue, enqueueJob, finishQueueEntry, listQueue, pauseQueue, resumeQueue, cancelQueueEntries, retryQueueJob } from "./queue-api.js";
+export { dispatchQueue, health, serveQueue, enqueueJob, finishQueueEntry, listQueue, pauseQueue, resumeQueue, cancelQueueEntries, cancelJobState, retryQueueJob } from "./queue-api.js";
 
 // Re-export types from queue.js for convenience
 export type { QueueEntry, QueueEntryStatus, QueueFile } from "./queue.js";

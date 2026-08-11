@@ -5,12 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { createJob, enqueueJob, readArtifact } from "../src/core.js";
+import { createJob, enqueueJob, readArtifact, cancelJobState, listQueue } from "../src/core.js";
 import { parseCliArgs } from "../src/cli-args.js";
 import { CbxError, isCbxError } from "../src/errors.js";
 import {
   constantTimeEqual,
   loadJobContext,
+  loadPersistedQueue,
   now,
   queueLockFile,
   redactText,
@@ -324,6 +325,22 @@ test("captureAsync returns same result as sync capture and surfaces exit codes",
   assert.ok(missing.stderr.length > 0);
 });
 
+test("captureAsync 输出超上限时截断而非无限累积（UI 进程内存保护）", async () => {
+  // 产出超过 4MB 上限的输出：捕获必须被截断到 MAX_CAPTURE_BYTES 以内，且保留尾部。
+  const { MAX_CAPTURE_BYTES } = await import("../src/process-runner.js");
+  const big = await captureAsync(
+    ["node", "-e", "process.stdout.write('x'.repeat(5 * 1024 * 1024) + 'TAIL_MARKER')"],
+    ".",
+  );
+  assert.equal(big.code, 0);
+  assert.ok(
+    Buffer.byteLength(big.stdout, "utf8") <= MAX_CAPTURE_BYTES,
+    `stdout 超过上限：${Buffer.byteLength(big.stdout, "utf8")}`,
+  );
+  // BoundedOutput 保留尾部，截断后仍能看到末尾标记。
+  assert.ok(big.stdout.endsWith("TAIL_MARKER"), "应保留输出的尾部");
+});
+
 // ---- 加密随机数与常量时间比较 ----
 
 test("identifiers use crypto randomness and token comparison is constant-time", async () => {
@@ -349,6 +366,73 @@ test("identifiers use crypto randomness and token comparison is constant-time", 
   });
   const entry = await enqueueJob(workspace, job.jobId, "", 0);
   assert.match(entry.queueId, /^[0-9a-z]+-[0-9a-f]{6}$/);
+});
+
+test("enqueueJob 对 awaiting_approval 的任务也拒绝重复入队", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-enqueue-dup-"));
+  const job = await createJob({
+    workspace,
+    task: "重复入队",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "enqueue-dup",
+  });
+  await enqueueJob(workspace, job.jobId, "", 0);
+  // 模拟任务进入 awaiting_approval：执行器终态映射会把队列条目标记成 awaiting_approval
+  //（writeState + savePersistedStateAndFinishQueue 的 status 映射），此处等价复刻。
+  const queue = await loadPersistedQueue<{
+    maxConcurrent: number;
+    paused: boolean;
+    updatedAt: string;
+    entries: Array<Record<string, unknown>>;
+  }>(workspace, { maxConcurrent: 2, paused: false, entries: [], updatedAt: "" });
+  for (const entry of queue.entries ?? [])
+    if (entry.jobId === job.jobId) entry.status = "awaiting_approval";
+  await savePersistedQueue(workspace, queue);
+  await assert.rejects(
+    enqueueJob(workspace, job.jobId, "", 0),
+    /任务已经在队列中/,
+  );
+});
+
+test("cancelJobState 原子写入取消终态：state 与队列条目一致", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-cancel-state-"));
+  const job = await createJob({
+    workspace,
+    task: "取消原子写",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "cancel-atomic",
+  });
+  await enqueueJob(workspace, job.jobId, "", 0);
+  // 模拟运行中：把 entry 标记为 running + pid，使取消路径覆盖活跃分支。
+  const queue = await loadPersistedQueue<{
+    maxConcurrent: number;
+    paused: boolean;
+    updatedAt: string;
+    entries: Array<Record<string, unknown>>;
+  }>(workspace, { maxConcurrent: 2, paused: false, entries: [], updatedAt: "" });
+  for (const e of queue.entries ?? [])
+    if (e.jobId === job.jobId) {
+      e.status = "running";
+      e.pid = 999999;
+    }
+  await savePersistedQueue(workspace, queue);
+  const state = await cancelJobState(workspace, job.jobId, {
+    status: "cancelled",
+    phase: "cancelled",
+    cancelledAt: now(),
+  });
+  assert.equal(state.status, "cancelled");
+  // 同一锁内完成：所有该 job 的队列条目必须同步标记 cancelled，不能残留 running。
+  const after = await listQueue(workspace);
+  const entries = after.entries.filter((e) => e.jobId === job.jobId);
+  assert.ok(entries.length > 0, "队列中应存在该 job 的条目");
+  for (const e of entries) assert.equal(e.status, "cancelled");
 });
 
 // ---- cbx export：任务结果导出（text / markdown / 缺失降级） ----
@@ -449,4 +533,37 @@ test("cbx export falls back to basic state when result.json is missing", async (
   assert.equal(out.status, 0, out.stderr);
   assert.match(out.stdout, /export-basic/);
   assert.match(out.stdout, /无 result\.json/);
+});
+
+test("cbx files 列出任务的 artifact 清单而非 result.json 内容", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-files-cli-"));
+  const job = await createJob({
+    workspace,
+    task: "列出产物",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "files-cli",
+  });
+  const cliPath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "src",
+    "cli.js",
+  );
+  const out = spawnSync(
+    process.execPath,
+    [cliPath, "files", job.jobId, "--workspace", workspace],
+    { encoding: "utf8" },
+  );
+  assert.equal(out.status, 0, out.stderr);
+  const files = JSON.parse(out.stdout) as string[];
+  // 新建任务至少包含这三个 artifact；listArtifacts 返回文件名数组（非 result.json 正文）。
+  for (const name of ["request.md", "context.json", "state.json"])
+    assert.ok(files.includes(name), `files 缺少 ${name}`);
+  assert.ok(
+    !out.stdout.includes('"status"'),
+    "cbx files 不应输出 result.json 正文（status 字段）",
+  );
 });

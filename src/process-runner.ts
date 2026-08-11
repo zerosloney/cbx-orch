@@ -62,7 +62,8 @@ export function capture(
 }
 
 /** 异步版 capture：不阻塞调用方事件循环。用于主进程内的 UI/调度路径（SSE 心跳、多客户端共享事件循环）；
- *  worker 进程内的 git-ops 调用保持同步 capture——worker 是单用途进程，阻塞无副作用，且调用链全同步更简单。 */
+ *  worker 进程内的 git-ops 调用保持同步 capture——worker 是单用途进程，阻塞无副作用，且调用链全同步更简单。
+ *  输出与 runProcess 一致走 BoundedOutput（默认 4MB 上限，保留尾部），避免大仓库 git 输出撑爆 UI 进程内存。 */
 export function captureAsync(
   args: string[],
   cwd: string,
@@ -74,26 +75,24 @@ export function captureAsync(
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let stdout = "";
-    let stderr = "";
+    const stdout = new BoundedOutput();
+    const stderr = new BoundedOutput();
     const timer = setTimeout(() => {
       child.kill();
     }, timeout);
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr += chunk.toString("utf8");
-    });
+    child.stdout.on("data", (chunk: Buffer) => stdout.append(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.append(chunk));
     child.on("error", (error: Error) => {
       clearTimeout(timer);
-      resolve({ code: -1, stdout, stderr: String(error.message ?? error) });
+      resolve({
+        code: -1,
+        stdout: stdout.text(),
+        stderr: String(error.message ?? error),
+      });
     });
     child.on("close", (code: number | null) => {
       clearTimeout(timer);
-      resolve({ code: code ?? -1, stdout, stderr });
+      resolve({ code: code ?? -1, stdout: stdout.text(), stderr: stderr.text() });
     });
   });
 }

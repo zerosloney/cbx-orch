@@ -12,6 +12,7 @@ import {
   forgetJobKeepWorktree,
   health,
   jobDir,
+  listArtifacts,
   listJobs,
   listQueue,
   loadConfig,
@@ -338,12 +339,9 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "files") {
-    const jobId = requireJobId(parsed, command);
-    try {
-      print(JSON.parse(await readArtifact(workspace, jobId, "result.json")));
-    } catch {
-      console.log("任务尚无 result.json");
-    }
+    // 列出任务的可用 artifact（含动态发现的 stage-*-handback.md 副本），
+    // 与 Web UI `/api/jobs/:id/artifacts` 同一实现；读内容请用 `cbx result`/`cbx review`/`cbx logs`。
+    print(await listArtifacts(workspace, requireJobId(parsed, command)));
     return;
   }
   if (command === "result") {

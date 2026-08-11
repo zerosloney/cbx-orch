@@ -202,6 +202,21 @@ test("app.js rowHtml renders job row with escaping and elapsed", async () => {
   assert.ok(html.includes("v-PASS"), "review verdict 类名");
   assert.ok(html.includes(">2<"), "attempt");
   assert.ok(html.includes("data-id"), "data-id 属性");
+  // status / reviewVerdict / attempt 同样不得未转义插入 HTML（与 jobId/phase 保持一致）。
+  const hostile = rowHtml({
+    jobId: "xss",
+    status: '"><script>alert(1)</script>',
+    phase: "p",
+    attempt: "<b>2</b>",
+    reviewVerdict: '"><svg onload=alert(1)>',
+    createdAt: null,
+    updatedAt: null,
+  });
+  assert.ok(hostile.includes("&lt;script&gt;"), "status 必须被转义");
+  assert.ok(!hostile.includes("<script>"), "未转义的 status 不得出现");
+  assert.ok(hostile.includes("&lt;svg"), "reviewVerdict 必须被转义");
+  assert.ok(!hostile.includes("<svg"), "未转义的 reviewVerdict 不得出现");
+  assert.ok(hostile.includes("&lt;b&gt;2&lt;/b&gt;"), "attempt 必须被转义");
 });
 
 // ---------- updateCards：仪表盘卡片状态 ----------

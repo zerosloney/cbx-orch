@@ -249,6 +249,78 @@ test("MCP: cbx_list_workspaces returns jobs across multiple workspaces", async (
   assert.ok(ws2Jobs && ws2Jobs.some((j) => j.jobId === "mcp-ws-2"));
 });
 
+test("MCP: cbx_start rejects missing or empty task", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-task-"));
+  // 缺 task：JSON-RPC 不强制 schema，必须由实现显式拒绝，不能创建 "undefined" 垃圾任务。
+  const missing = await mcpCall(
+    {
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/call",
+      params: { name: "cbx_start", arguments: { workspace } },
+    },
+    { workspace },
+  );
+  assert.equal(missing.length, 1);
+  const err1 = (missing[0] as Record<string, unknown>).error as {
+    message: string;
+  };
+  assert.match(err1.message, /task 必须是非空字符串/);
+  // 空白 task 同样拒绝。
+  const blank = await mcpCall(
+    {
+      jsonrpc: "2.0",
+      id: 12,
+      method: "tools/call",
+      params: {
+        name: "cbx_start",
+        arguments: { task: "   ", workspace },
+      },
+    },
+    { workspace },
+  );
+  assert.equal(blank.length, 1);
+  const err2 = (blank[0] as Record<string, unknown>).error as {
+    message: string;
+  };
+  assert.match(err2.message, /task 必须是非空字符串/);
+});
+
+test("MCP: cbx_continue rejects non-boolean refresh_baseline", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-cont-"));
+  await createJob({
+    workspace,
+    task: "MCP continue 测试",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "mcp-cont",
+  });
+  // 字符串 "false" 不得被 Boolean() 强转成 true：校验不通过即报错，不触发入队。
+  const responses = await mcpCall(
+    {
+      jsonrpc: "2.0",
+      id: 13,
+      method: "tools/call",
+      params: {
+        name: "cbx_continue",
+        arguments: {
+          job_id: "mcp-cont",
+          refresh_baseline: "false",
+          workspace,
+        },
+      },
+    },
+    { workspace },
+  );
+  assert.equal(responses.length, 1);
+  const err = (responses[0] as Record<string, unknown>).error as {
+    message: string;
+  };
+  assert.match(err.message, /refresh_baseline 必须是布尔值/);
+});
+
 test("MCP: cbx_cancel on a non-existent job does not crash", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-cancel-"));
   const responses = await mcpCall(
