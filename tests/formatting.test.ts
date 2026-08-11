@@ -3,12 +3,17 @@ import assert from "node:assert/strict";
 import chalk from "chalk";
 import {
   colorizeStatus,
+  fmtDuration,
   fmtElapsed,
   isInteractive,
+  jobElapsedMs,
+  renderExport,
   renderHealth,
   renderJobDetail,
   renderJobsTable,
   renderQueueTable,
+  summarizePatch,
+  summarizeTestLog,
 } from "../src/formatting.js";
 import type { JobState } from "../src/types.js";
 
@@ -316,4 +321,244 @@ test("renderHealth: 无 jobsByStatus 时不渲染该区块", () => {
     },
   });
   assert.ok(!out.includes("Jobs by status"));
+});
+
+// ---------- fmtDuration / jobElapsedMs ----------
+test("fmtDuration: 边界值（<60s / <1h / >=1h / 非法）", () => {
+  assert.equal(fmtDuration(0), "0s");
+  assert.equal(fmtDuration(45_000), "45s");
+  assert.equal(fmtDuration(60_000), "1m 0s");
+  assert.equal(fmtDuration(125_000), "2m 5s");
+  assert.equal(fmtDuration(3_600_000), "1h 0m");
+  assert.equal(fmtDuration(3_725_000), "1h 2m");
+  assert.equal(fmtDuration(NaN), "—");
+  assert.equal(fmtDuration(-1), "—");
+  assert.equal(fmtDuration(null), "—");
+  assert.equal(fmtDuration(undefined), "—");
+});
+
+test("fmtElapsed: 与 fmtDuration 在 valid input 下一致", () => {
+  // 锚定 createdAt 到过去某点，fmtElapsed 用 Date.now() 实时算 → 不直接断言具体值，
+  // 只验证非空且是合法格式；具体格式验证交给 fmtDuration。
+  const out = fmtElapsed(new Date(Date.now() - 30_000).toISOString());
+  assert.match(out, /^\d+s$/);
+  assert.equal(fmtElapsed(""), "—");
+  assert.equal(fmtElapsed(undefined), "—");
+});
+
+test("jobElapsedMs: 终态用 updatedAt 固定值，非终态用 now", () => {
+  const start = new Date("2026-08-01T00:00:00Z");
+  const end = new Date("2026-08-01T00:01:30Z"); // 90s
+  assert.equal(
+    jobElapsedMs({
+      createdAt: start.toISOString(),
+      updatedAt: end.toISOString(),
+      status: "done",
+    }),
+    90_000,
+  );
+  // updatedAt 缺失时退化为 now（>0 即可，具体值会随调用时刻变化）
+  const live = jobElapsedMs({ createdAt: start.toISOString() });
+  assert.ok(live != null && live >= 90_000);
+  // createdAt 缺失 → null
+  assert.equal(
+    jobElapsedMs({ createdAt: "", updatedAt: end.toISOString() }),
+    null,
+  );
+});
+
+// ---------- summarizeTestLog ----------
+test("summarizeTestLog: 空输入", () => {
+  const s = summarizeTestLog("");
+  assert.equal(s.lineCount, 0);
+  assert.equal(s.passed, null);
+  assert.equal(s.failed, null);
+  assert.equal(s.tail, "");
+});
+
+test("summarizeTestLog: mocha 风格 42 passing / 3 failing", () => {
+  const log = [
+    "  42 passing (2s)",
+    "  3 failing",
+    "",
+    "  1) suite test name",
+    "  2) another failure",
+    "  3) third",
+  ].join("\n");
+  const s = summarizeTestLog(log);
+  assert.equal(s.lineCount, log.split("\n").length);
+  assert.equal(s.passed, 42);
+  assert.equal(s.failed, 3);
+  // 末尾保留原始行
+  assert.ok(s.tail.includes("3) third"));
+});
+
+test("summarizeTestLog: jest 风格 Tests: X failed, Y passed", () => {
+  const log = ["FAIL src/foo.test.ts", "Tests:       2 failed, 5 passed, 7 total"];
+  const s = summarizeTestLog(log.join("\n"));
+  assert.equal(s.passed, 5);
+  assert.equal(s.failed, 2);
+});
+
+test("summarizeTestLog: 无结构化计数但含 FAILED 关键词 → failed=1", () => {
+  const s = summarizeTestLog("error: FAILED to compile");
+  assert.equal(s.passed, null);
+  assert.equal(s.failed, 1);
+});
+
+test("summarizeTestLog: 仅有 OK 关键词 → passed=0（兜底标记）", () => {
+  const s = summarizeTestLog("... OK (12ms)");
+  assert.equal(s.passed, 0);
+  assert.equal(s.failed, null);
+});
+
+// ---------- summarizePatch ----------
+test("summarizePatch: 空 patch", () => {
+  const s = summarizePatch("");
+  assert.equal(s.filesChanged, 0);
+  assert.equal(s.insertions, 0);
+  assert.equal(s.deletions, 0);
+});
+
+test("summarizePatch: 单文件 +3 / -1", () => {
+  const patch = [
+    "diff --git a/src/foo.ts b/src/foo.ts",
+    "index 1234..5678 100644",
+    "--- a/src/foo.ts",
+    "+++ b/src/foo.ts",
+    "@@ -1,3 +1,6 @@",
+    " line1",
+    "+inserted1",
+    "+inserted2",
+    "-removed1",
+    "+inserted3",
+    " line2",
+    " line3",
+  ].join("\n");
+  const s = summarizePatch(patch);
+  assert.equal(s.filesChanged, 1);
+  assert.equal(s.insertions, 3);
+  assert.equal(s.deletions, 1);
+});
+
+test("summarizePatch: 多文件 + 头/尾元数据行不计入 +/-", () => {
+  const patch = [
+    "diff --git a/a.ts b/a.ts",
+    "--- a/a.ts",
+    "+++ b/a.ts",
+    "@@ -1 +1 @@",
+    "+a",
+    "diff --git a/b.ts b/b.ts",
+    "--- a/b.ts",
+    "+++ b/b.ts",
+    "@@ -1 +1 @@",
+    "-b",
+  ].join("\n");
+  const s = summarizePatch(patch);
+  assert.equal(s.filesChanged, 2);
+  assert.equal(s.insertions, 1);
+  assert.equal(s.deletions, 1);
+});
+
+// ---------- renderExport 完整链路 ----------
+test("renderExport text: 含 test/review/patch 摘要与 Elapsed", () => {
+  const state = makeJob({
+    status: "done",
+    createdAt: new Date(Date.now() - 90_000).toISOString(),
+    updatedAt: new Date().toISOString(),
+    reviewVerdict: "PASS",
+  });
+  const result = {
+    stages: [
+      { name: "build", executor: "codebuddy", exitCode: 0, reviewVerdict: "PASS" },
+    ],
+    acceptanceEvidence: [{ criterion: "covers X", status: "evidence_available" }],
+    handback: "# Done\n\nAll green.",
+    testLog: "  5 passing (1s)\n  0 failing\n",
+    review: "# Review\n\nLGTM.",
+    completePatch: [
+      "diff --git a/src/a.ts b/src/a.ts",
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+    ].join("\n"),
+  };
+  const out = renderExport(state, result, "text");
+  const plain = stripAnsi(out);
+  assert.match(plain, /Elapsed:\s+\d+m\s+\d+s/);
+  assert.match(plain, /Stages:/);
+  assert.match(plain, /Acceptance:/);
+  assert.match(plain, /Handback:/);
+  assert.match(plain, /Test:/);
+  assert.match(plain, /5 passing/);
+  assert.match(plain, /Review notes:/);
+  assert.match(plain, /Patch:/);
+  assert.match(plain, /1 files/);
+  assert.match(plain, /\+1/);
+  assert.match(plain, /-1/);
+});
+
+test("renderExport text: result=null 时仅任务状态 + 无 test/review/patch 段", () => {
+  const out = renderExport(makeJob({ status: "running" }), null, "text");
+  const plain = stripAnsi(out);
+  assert.match(plain, /无 result.json/);
+  assert.ok(!plain.includes("Test:"));
+  assert.ok(!plain.includes("Review notes:"));
+  assert.ok(!plain.includes("Patch:"));
+});
+
+test("renderExport text: 工件缺失时不渲染对应段", () => {
+  const out = renderExport(
+    makeJob({ status: "done" }),
+    { stages: [{ name: "s", executor: "x", exitCode: 0 }] },
+    "text",
+  );
+  const plain = stripAnsi(out);
+  assert.ok(!plain.includes("Test:"));
+  assert.ok(!plain.includes("Review notes:"));
+  assert.ok(!plain.includes("Patch:"));
+  assert.ok(!plain.includes("Handback:")); // 也没 handback
+  // Stages 还在
+  assert.match(plain, /Stages:/);
+});
+
+test("renderExport markdown: 含 Elapsed 字段 + Test/Review notes/Patch 段", () => {
+  const state = makeJob({
+    status: "done",
+    createdAt: new Date(Date.now() - 60_000).toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  const result = {
+    testLog: "  2 passing\n  1 failing\n",
+    review: "# R\nOK",
+    completePatch: "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new",
+  };
+  const out = renderExport(state, result, "markdown");
+  assert.match(out, /^- 耗时：/m);
+  assert.match(out, /^## Test$/m);
+  assert.match(out, /通过：2/);
+  assert.match(out, /失败：1/);
+  assert.match(out, /^## Review notes$/m);
+  assert.match(out, /^## Patch$/m);
+  assert.match(out, /变更文件：1/);
+  assert.match(out, /新增：\+1/);
+  assert.match(out, /删除：-1/);
+});
+
+test("renderExport: 终态 Elapsed 在两次调用间稳定", () => {
+  const start = new Date(Date.now() - 120_000).toISOString();
+  const end = new Date(Date.now() - 30_000).toISOString(); // 90s 前固化的 updatedAt
+  const state = makeJob({ status: "done", createdAt: start, updatedAt: end });
+  const first = renderExport(state, null, "text");
+  // 等 50ms 再调一次：终态应当保持原值，不应继续累加
+  const wait = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
+  return wait(50).then(() => {
+    const second = renderExport(state, null, "text");
+    const a = first.match(/Elapsed:\s+(\S+)/)?.[1];
+    const b = second.match(/Elapsed:\s+(\S+)/)?.[1];
+    assert.equal(a, b, `终态 Elapsed 应稳定：${a} vs ${b}`);
+  });
 });

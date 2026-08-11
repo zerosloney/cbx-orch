@@ -39,7 +39,12 @@ function padDisplayEnd(s: string, width: number): string {
 export function fmtElapsed(iso: string | undefined | null): string {
   if (!iso) return "—";
   const ms = Date.now() - Date.parse(iso);
-  if (!Number.isFinite(ms) || ms < 0) return "—";
+  return fmtDuration(ms);
+}
+
+/** 把毫秒数格式化为 12s / 1m 30s / 1h 2m 形式；非法或负值返回 "—"。 */
+export function fmtDuration(ms: number | undefined | null): string {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";
   if (ms < 60_000) return Math.floor(ms / 1000) + "s";
   if (ms < 3600_000)
     return (
@@ -51,6 +56,17 @@ export function fmtElapsed(iso: string | undefined | null): string {
     Math.floor((ms % 3600_000) / 60_000) +
     "m"
   );
+}
+
+/** 根据 createdAt/updatedAt 计算任务总耗时（终态固定值，非终态当前值）。 */
+export function jobElapsedMs(state: { createdAt?: string; updatedAt?: string; status?: string }): number | null {
+  if (!state.createdAt) return null;
+  const start = Date.parse(state.createdAt);
+  if (!Number.isFinite(start)) return null;
+  const endIso = state.updatedAt;
+  const end = endIso ? Date.parse(endIso) : Date.now();
+  if (!Number.isFinite(end) || end < start) return null;
+  return end - start;
 }
 
 export function fmtTime(iso: string | undefined | null): string {
@@ -222,6 +238,12 @@ interface ExportResult {
   error?: string | null;
   handback?: string;
   updatedAt?: string;
+  /** 原始 test.log 内容（来自工件）— 渲染时解析为摘要 */
+  testLog?: string;
+  /** 原始 review.md 内容（来自工件）— 渲染时按 handback 风格截断 */
+  review?: string;
+  /** 原始 complete.patch 内容（来自工件）— 渲染时计算 files/insertions/deletions */
+  completePatch?: string;
 }
 
 /** 截断长文本到指定行数（保留完整行）。 */
@@ -232,6 +254,77 @@ function truncateLines(text: string | undefined, maxLines: number): string {
   return lines.slice(0, maxLines).join("\n") + "\n…（已截断）";
 }
 
+/**
+ * 测试日志摘要：行数 + 探测常见通过/失败计数（mocha "X passing"、jest "Tests: X passed"、
+ * 简单 "X failed" / "FAILED" / "OK"）+ 末尾若干行原文。返回的对象在 text/markdown
+ * 两种渲染路径上都会被消费，因此探测口径必须保持一致。
+ */
+export interface TestLogSummary {
+  lineCount: number;
+  /** mocha/jest 风格：分别给出通过/失败计数；探测不到时为 null */
+  passed: number | null;
+  failed: number | null;
+  /** 末尾 N 行原文（保留换行符），供终端一眼看出失败点 */
+  tail: string;
+}
+
+export function summarizeTestLog(text: string, tailLines = 20): TestLogSummary {
+  if (!text) return { lineCount: 0, passed: null, failed: null, tail: "" };
+  const allLines = text.split("\n");
+  const lineCount = allLines.length;
+  let passed: number | null = null;
+  let failed: number | null = null;
+  // mocha: "  42 passing (1s)" / "  3 failing"
+  for (const line of allLines) {
+    const m1 = line.match(/(\d+)\s+passing\b/i);
+    if (m1 && passed == null) passed = Number(m1[1]);
+    const m2 = line.match(/(\d+)\s+failing\b/i);
+    if (m2 && failed == null) failed = Number(m2[1]);
+  }
+  // jest: "Tests:       2 failed, 5 passed, 7 total"
+  const summaryLine = allLines.find((l) => /Tests:\s+\d/i.test(l));
+  if (summaryLine) {
+    const p = summaryLine.match(/(\d+)\s+passed/);
+    const f = summaryLine.match(/(\d+)\s+failed/);
+    if (p) passed = Number(p[1]);
+    if (f) failed = Number(f[1]);
+  }
+  // 兜底：未找到结构化计数时，如果存在 "FAILED" / "OK" 给出单值
+  if (passed == null && failed == null) {
+    if (/\bOK\b/.test(text) && !/FAILED|FAILURES|Errors?:/i.test(text)) {
+      passed = 0; // 至少表示"全部通过"——具体个数未知
+    } else if (/\bFAILED\b/.test(text) || /Tests failed/i.test(text)) {
+      failed = 1;
+    }
+  }
+  const tail = allLines.slice(Math.max(0, allLines.length - tailLines)).join("\n");
+  return { lineCount, passed, failed, tail };
+}
+
+/**
+ * complete.patch 统计：以 `git diff` 输出为输入，解析 `diff --git` 出现次数得到
+ * 变更文件数，并对 `+` / `-` 开头的行（排除 `+++` / `---` 文件头）求和得到
+ * 新增/删除行数。空 patch 返回全 0。
+ */
+export interface PatchStats {
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+}
+
+export function summarizePatch(text: string): PatchStats {
+  const result: PatchStats = { filesChanged: 0, insertions: 0, deletions: 0 };
+  if (!text) return result;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("diff --git ")) result.filesChanged += 1;
+    else if (line.startsWith("+++ ") || line.startsWith("--- ")) {
+      // 文件头标记行，不计入新增/删除
+    } else if (line.startsWith("+")) result.insertions += 1;
+    else if (line.startsWith("-")) result.deletions += 1;
+  }
+  return result;
+}
+
 export function renderExport(
   state: JobState,
   result: ExportResult | null,
@@ -239,6 +332,11 @@ export function renderExport(
 ): string {
   if (format === "text") {
     const lines: string[] = [renderJobDetail(state)];
+    // Elapsed: 终态用 createdAt..updatedAt 固定值，非终态用 createdAt..now。
+    const elapsed = jobElapsedMs(state);
+    if (elapsed != null) {
+      lines.push(`${chalk.bold("Elapsed:")}  ${fmtDuration(elapsed)}`);
+    }
     if (result) {
       if (result.stages && result.stages.length) {
         lines.push("");
@@ -262,6 +360,39 @@ export function renderExport(
         lines.push(chalk.bold("Handback:"));
         lines.push(handback);
       }
+      const test = result.testLog ? summarizeTestLog(result.testLog) : null;
+      if (test && test.lineCount > 0) {
+        lines.push("");
+        lines.push(chalk.bold("Test:"));
+        const passStr =
+          test.passed != null
+            ? `${chalk.green(String(test.passed) + " passed")}`
+            : chalk.gray("passed ?");
+        const failStr =
+          test.failed != null
+            ? `${test.failed > 0 ? chalk.red(String(test.failed) + " failed") : chalk.gray("0 failed")}`
+            : chalk.gray("failed ?");
+        lines.push(`  ${test.lineCount} lines · ${passStr} · ${failStr}`);
+        if (test.tail) {
+          lines.push("");
+          lines.push(test.tail);
+        }
+      }
+      const review = truncateLines(result.review, 15);
+      if (review) {
+        lines.push("");
+        // 段头加 "notes" 后缀以区分 renderJobDetail 里的 Review 裁决行。
+        lines.push(chalk.bold("Review notes:"));
+        lines.push(review);
+      }
+      const patch = result.completePatch ? summarizePatch(result.completePatch) : null;
+      if (patch && patch.filesChanged > 0) {
+        lines.push("");
+        lines.push(chalk.bold("Patch:"));
+        lines.push(
+          `  ${chalk.cyan(String(patch.filesChanged) + " files")} · ${chalk.green("+" + patch.insertions)} · ${chalk.red("-" + patch.deletions)}`,
+        );
+      }
     } else {
       lines.push("");
       lines.push(chalk.gray("（无 result.json，仅任务状态）"));
@@ -273,6 +404,8 @@ export function renderExport(
   md.push(`- 状态：\`${state.status}\``);
   md.push(`- 阶段：\`${state.phase ?? "—"}\``);
   md.push(`- 尝试次数：${state.attempt}`);
+  const elapsed = jobElapsedMs(state);
+  if (elapsed != null) md.push(`- 耗时：\`${fmtDuration(elapsed)}\``);
   if (state.reviewVerdict) md.push(`- 审查：\`${state.reviewVerdict}\``);
   if (state.error) md.push(`- 错误：\`${state.error}\``);
   if (result) {
@@ -296,6 +429,28 @@ export function renderExport(
     if (handback) {
       md.push("", "## Handback", "");
       md.push("```", handback, "```");
+    }
+    const test = result.testLog ? summarizeTestLog(result.testLog) : null;
+    if (test && test.lineCount > 0) {
+      md.push("", "## Test", "");
+      const passed = test.passed != null ? String(test.passed) : "?";
+      const failed = test.failed != null ? String(test.failed) : "?";
+      md.push(`- 行数：${test.lineCount}`);
+      md.push(`- 通过：${passed} · 失败：${failed}`);
+      if (test.tail) {
+        md.push("", "```", test.tail, "```");
+      }
+    }
+    const review = truncateLines(result.review, 15);
+    if (review) {
+      md.push("", "## Review notes", "");
+      md.push("```", review, "```");
+    }
+    const patch = result.completePatch ? summarizePatch(result.completePatch) : null;
+    if (patch && patch.filesChanged > 0) {
+      md.push("", "## Patch", "");
+      md.push(`- 变更文件：${patch.filesChanged}`);
+      md.push(`- 新增：+${patch.insertions} · 删除：-${patch.deletions}`);
     }
   } else {
     md.push("", "_（无 result.json，仅任务状态）_");
