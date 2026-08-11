@@ -282,8 +282,16 @@ function draw(state: TuiState): void {
   clearScreen();
   moveCursor(0, 0);
 
-  // 状态栏 1 行
-  console.log(renderStatusBar(state.queue, state.gitBranch));
+  // 状态栏 1 行（armed 时带 forget/purge 二次确认提示）
+  console.log(
+    renderStatusBar(
+      state.queue,
+      state.gitBranch,
+      state.armedAction && state.armedJobId
+        ? { action: state.armedAction, jobId: state.armedJobId }
+        : null,
+    ),
+  );
 
   // 详情面板：先算行数（无选中1行；选中4行；含error/stage链/时间线更多），动态决定表格高度避免小屏溢出。
   const selectedJob = state.jobs[state.selectedIndex];

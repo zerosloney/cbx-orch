@@ -6,6 +6,7 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Fix: TUI forget/purge 二次确认提示。按下 `d`/`D` 进入 armed 后状态栏显示「再按 d/D 确认 <job>（3s）」黄色提示，超时或按其他键自动取消；此前 armed 状态对用户不可见。
 - Refactor: workspace 发现收敛为单一共享入口。`discoverWorkspaces` / `dedupWorkspaces` / `listJobsAcrossWorkspaces` 从 CLI 本地副本移入 `src/artifacts.ts` 并经 `core.ts` re-export；CLI（`cbx ws --workspaces-dir`、`ui` 命令）改走共享实现，删除 `cli.ts` 本地重复。Web UI 不改（消费 CLI 已解析的 workspace 列表，发现是 CLI 层职责）。
 - Feature: MCP 新增 `cbx_list_workspaces` 工具（扫描 `root` 下含 `.cbx/` 的 workspace 并列出各自任务，`root` 缺省 cwd），复用 `listJobsAcrossWorkspaces`，输出 `{ workspaces: Array<{ workspace, jobs }> }`。
 - Test: `tests/mcp-migration.test.ts` 增补 `cbx_list_workspaces` 工具清单断言 + 双 workspace 功能用例。总计 462 个测试全过。

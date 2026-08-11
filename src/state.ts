@@ -123,8 +123,11 @@ export async function forgetJob(
     throw new Error(
       `任务 ${jobId} 当前状态为 ${state.status}；请先 cancel（运行中或排队）或 approve（等待审批），再 forget/purge。`,
     );
-  // 事件先于删除落盘：appendFileSync 写 events.ndjson 不依赖 jobs 表行，
-  // 即便后续 SQLite 行 + 目录都删了，审计链仍可查。
+  // 事件先于删除落盘：appendFileSync 写 events.ndjson 不依赖 jobs 表行。
+  // 注意：成功 forget 时 jobDir 连同 events.ndjson 会被下方 rm 一起擦除，故本事件
+  // 是"删除前审计记录"，仅在目录 rm 失败时随 events.ndjson 保留。持久的删除审计
+  // 靠 metadata tombstone（forgotten:<jobId>）+ webhook job.deleted（workspace 级 outbox），
+  // 二者都不随 jobDir 删除。
   logJobEvent(workspace, jobId, "lifecycle/deleted", {
     fromStatus: state.status,
     purgeWorktree: options.purgeWorktree,
@@ -150,8 +153,9 @@ export async function forgetJob(
   try {
     await setMetadata(workspace, `forgotten:${jobId}`, tombstonedAt);
   } catch {
-    /* tombstone 失败不影响 forget 主流程——目录与 SQLite 行已删，下次同名 jobId
-       重建时 state 缺失即报错，与现有 importLegacyData 路径行为一致。 */
+    /* tombstone 失败不影响 forget 主流程。tombstone 是 metadata 表的持久审计记录
+       （可经 getMetadata 查询），不参与"防同 id 重建"——那由 SQLite 行缺失在 createJob
+       时报错承担（jobDir 已删 + 行已删，state 缺失即报错），与 importLegacyData 一致。 */
   }
   try {
     await publishEvent(workspace, "job.deleted", {

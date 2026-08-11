@@ -112,6 +112,33 @@ test("renderStatusBar: paused 态显示 [PAUSED]，无分支时不追加", () =>
   assert.ok(!out.includes(" · main"));
 });
 
+test("renderStatusBar: armed 时显示 forget/purge 二次确认提示，未 armed 不显示", () => {
+  const queue: QueueFile = {
+    maxConcurrent: 2,
+    paused: false,
+    entries: [],
+    updatedAt: "",
+  };
+  // forget → 键位 d（小写）
+  const forgetOut = renderStatusBar(queue, "main", {
+    action: "forget",
+    jobId: "job-1",
+  });
+  assert.match(forgetOut, /再按 d 确认 forget job-1/);
+  // purge → 键位 D（Shift+d）
+  const purgeOut = renderStatusBar(queue, "main", {
+    action: "purge",
+    jobId: "job-2",
+  });
+  assert.match(purgeOut, /再按 D 确认 purge job-2/);
+  // 未 armed / null / 省略参数均不显示提示
+  const bareOut = renderStatusBar(queue, "main");
+  const nullOut = renderStatusBar(queue, "main", null);
+  assert.ok(!bareOut.includes("再按"));
+  assert.ok(!nullOut.includes("再按"));
+  assert.ok(!bareOut.includes("⚠"));
+});
+
 // ---------- detail-pane.ts ----------
 test("renderDetailPane: 无选中任务显示占位提示", () => {
   const out = renderDetailPane(undefined);
