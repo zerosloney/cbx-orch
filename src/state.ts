@@ -1,19 +1,23 @@
 import { appendFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import { publishEvent } from "./observability.js";
 import {
   loadRuntimeConfig,
   loadPersistedState,
+  forgetPersistedJob,
   prunePersistedData,
   savePersistedState,
   savePersistedStateAndFinishQueue,
   savePersistedStateAndResolveApprovalQueue,
+  setMetadata,
   saveJson,
   now,
   withQueueLock,
   type RuntimeConfig,
 } from "./storage.js";
 import { assertJobId } from "./validation.js";
+import { cleanupWorktree } from "./worktree.js";
 import { normalizeAdaptiveOptions } from "./adaptive-manager.js";
 import type { JobState, CbxConfig, Json } from "./types.js";
 
@@ -70,6 +74,120 @@ export async function loadConfig(workspaceInput: string): Promise<CbxConfig> {
 export async function pruneAfterTerminal(workspace: string): Promise<number> {
   const retentionDays = (await loadConfig(workspace)).governance?.retentionDays;
   return prunePersistedData(workspace, retentionDays);
+}
+
+/** 禁止直接 forget/purge 的活跃状态——必须先 cancel / approve。 */
+const FORBIDDEN_FORGET_STATUSES: ReadonlySet<string> = new Set([
+  "running",
+  "queued",
+  "awaiting_approval",
+]);
+
+export interface ForgetOptions {
+  /** 是否连带删 worktree（cbx purge 走 true，cbx forget 走 false）。 */
+  purgeWorktree: boolean;
+  /** 写 lifecycle/deleted 事件时附带的元数据（调用方来源、reason 等）。 */
+  reason?: string;
+}
+
+export interface ForgetResult {
+  jobId: string;
+  status: string;
+  deletedDirectory: boolean;
+  worktreeCleaned: boolean;
+  remainingQueueEntries: number;
+  tombstonedAt: string;
+}
+
+/**
+ * 删除一个 job 的全部持久化记录：state.json / events.ndjson / 产物文件、SQLite jobs 表行、
+ * queue_state 中该 jobId 的全部 entries。默认**不**删 worktree——`cbx forget` 留给
+ * `--keep-worktree` 用户的轻量入口，`cbx purge` 走 `purgeWorktree: true` 删 worktree。
+ *
+ * 状态守卫：running / queued / awaiting_approval 必须先 cancel / approve，否则抛错。
+ * rationale：删正在跑的 job 留存的 .cbx/jobs/<id>/active.pid 与 worktree 状态会进入
+ * 撕裂态（worker 还活着但 state 没了），且无审计痕迹。
+ *
+ * 顺序：先写 lifecycle/deleted 事件（依赖 appendFileSync、不依赖 jobs 表）→ 删 SQLite 行
+ * 与 queue entries（单事务，forgetPersistedJob）→ 删目录（异步 rm）→ 写 tombstone。
+ * tombstone 写到 metadata 表而非 events 流，避免被 events.ndjson 跟着一起 rm 掉。
+ */
+export async function forgetJob(
+  workspace: string,
+  jobId: string,
+  options: ForgetOptions,
+): Promise<ForgetResult> {
+  assertJobId(jobId);
+  const state = await loadState(workspace, jobId);
+  if (FORBIDDEN_FORGET_STATUSES.has(state.status))
+    throw new Error(
+      `任务 ${jobId} 当前状态为 ${state.status}；请先 cancel（运行中或排队）或 approve（等待审批），再 forget/purge。`,
+    );
+  // 事件先于删除落盘：appendFileSync 写 events.ndjson 不依赖 jobs 表行，
+  // 即便后续 SQLite 行 + 目录都删了，审计链仍可查。
+  logJobEvent(workspace, jobId, "lifecycle/deleted", {
+    fromStatus: state.status,
+    purgeWorktree: options.purgeWorktree,
+    reason: options.reason ?? null,
+  });
+  const { remainingEntries } = await forgetPersistedJob(workspace, jobId);
+  // 目录删除是 IO 重活，独立 try/catch：失败要明确报，不要静默吞。
+  const directory = jobDir(workspace, jobId);
+  let deletedDirectory = false;
+  try {
+    await rm(directory, { recursive: true, force: true });
+    deletedDirectory = true;
+  } catch (error) {
+    throw new Error(
+      `已删除 SQLite 记录但清理目录失败：${directory}（${(error as Error).message}）。请手动删除后重试 forget。`,
+    );
+  }
+  // worktree 在 forget 路径上**保留**；purge 才删。
+  const worktreeCleaned = options.purgeWorktree
+    ? await cleanupWorktree(workspace, jobId)
+    : false;
+  const tombstonedAt = now();
+  try {
+    await setMetadata(workspace, `forgotten:${jobId}`, tombstonedAt);
+  } catch {
+    /* tombstone 失败不影响 forget 主流程——目录与 SQLite 行已删，下次同名 jobId
+       重建时 state 缺失即报错，与现有 importLegacyData 路径行为一致。 */
+  }
+  try {
+    await publishEvent(workspace, "job.deleted", {
+      jobId,
+      fromStatus: state.status,
+      purgeWorktree: options.purgeWorktree,
+    });
+  } catch {
+    /* webhook 投递失败不应阻塞 forget 主流程 */
+  }
+  return {
+    jobId,
+    status: state.status,
+    deletedDirectory,
+    worktreeCleaned,
+    remainingQueueEntries: remainingEntries,
+    tombstonedAt,
+  };
+}
+
+/** 便捷入口：保留 worktree 的 forget（cbx forget）。 */
+export function forgetJobKeepWorktree(
+  workspace: string,
+  jobId: string,
+  reason?: string,
+): Promise<ForgetResult> {
+  return forgetJob(workspace, jobId, { purgeWorktree: false, reason });
+}
+
+/** 便捷入口：连 worktree 一起删的 purge（cbx purge）。 */
+export function purgeJob(
+  workspace: string,
+  jobId: string,
+  reason?: string,
+): Promise<ForgetResult> {
+  return forgetJob(workspace, jobId, { purgeWorktree: true, reason });
 }
 
 export function mergeConfig(

@@ -613,6 +613,54 @@ export async function listPersistedStates<T>(workspace: string): Promise<T[]> {
       .all() as Array<{ state_json: string }>
   ).map((row) => JSON.parse(row.state_json) as T);
 }
+
+/**
+ * 单事务删除 jobId 在持久化层（jobs 表 + queue_state entries）的全部记录。
+ *
+ * 与 `queue.cancelQueueEntries` 不同：cancel 是把 active entries 标 cancelled（审计可见），
+ * forget 是把同 jobId 的所有 entries 物理过滤掉。两者串联——上层先 cancel 杀活 worker
+ * 并持久化 cancelled 状态，再 forget 清掉 entries 残留，**单事务**确保 jobs 行删和
+ * queue entries 删要么都成功要么都回滚，避免 listJobs 看不见但 queue 还残留的撕裂状态。
+ *
+ * 返回剩余 queue 长度供上层做断言与日志。
+ */
+export async function forgetPersistedJob(
+  workspaceInput: string,
+  jobId: string,
+): Promise<{ deletedJob: boolean; remainingEntries: number }> {
+  const workspace = path.resolve(workspaceInput);
+  const db = await database(workspace);
+  return withQueueLock(workspace, async () => {
+    let deletedJob = false;
+    let remainingEntries = 0;
+    db.transaction(() => {
+      const result = db
+        .prepare("DELETE FROM jobs WHERE job_id = ?")
+        .run(jobId);
+      deletedJob = result.changes > 0;
+      const row = db
+        .prepare("SELECT state_json FROM queue_state WHERE singleton = 1")
+        .get() as { state_json: string } | undefined;
+      if (row) {
+        const queue = JSON.parse(row.state_json) as {
+          entries?: Array<{ jobId?: string; [k: string]: unknown }>;
+        };
+        const before = queue.entries?.length ?? 0;
+        const filtered = (queue.entries ?? []).filter(
+          (entry) => entry.jobId !== jobId,
+        );
+        remainingEntries = filtered.length;
+        if (before !== filtered.length) {
+          db.prepare(
+            "UPDATE queue_state SET state_json = ?, updated_at = ? WHERE singleton = 1",
+          ).run(JSON.stringify({ ...queue, entries: filtered }), now());
+        }
+      }
+    })();
+    return { deletedJob, remainingEntries };
+  });
+}
+
 export async function loadPersistedQueue<T>(
   workspace: string,
   fallback: T,

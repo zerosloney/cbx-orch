@@ -12,7 +12,8 @@ export { CbxError, isCbxError } from "./errors.js";
 export type { CbxErrorCode } from "./errors.js";
 
 // State management
-export { jobDir, loadState, loadConfig, mergeConfig, writeState, writeApprovalState, logJobEvent } from "./state.js";
+export { jobDir, loadState, loadConfig, mergeConfig, writeState, writeApprovalState, logJobEvent, forgetJob, forgetJobKeepWorktree, purgeJob } from "./state.js";
+export type { ForgetOptions, ForgetResult } from "./state.js";
 
 // Job creation
 export { createJob } from "./jobs.js";
