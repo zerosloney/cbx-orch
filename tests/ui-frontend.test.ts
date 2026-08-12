@@ -247,7 +247,7 @@ test("app.js updateCards reflects running/failed/paused states", async () => {
 
   // paused 状态：队列卡显示暂停标记，健康卡显示"暂停"
   updateCards([], { maxConcurrent: 2, paused: true, entries: [] });
-  assert.equal(String(els.get("#c-queue")!.textContent), "0 (暂停)");
+  assert.equal(String(els.get("#c-queued")!.textContent), "0 (暂停)");
   assert.equal(String(els.get("#c-health")!.textContent), "暂停");
-  assert.ok(els.get("#c-queue")!.className.includes("s-running"));
+  assert.ok(els.get("#c-queued")!.className.includes("s-running"));
 });

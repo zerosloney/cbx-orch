@@ -2,10 +2,24 @@ console.log('cbx-ui: script start, page loaded at', new Date().toISOString());
 var allWorkspaces=[];
 var currentWorkspace=null;
 var selected=null;
+var filterStatus='';
 function rowAttr(id){return window.CSS&&CSS.escape?CSS.escape(String(id)):String(id).replace(/[^\w-]/g,function(c){return'\\'+c})}
 function totalJobs(w){return Object.values(w.jobsByStatus||{}).reduce(function(a,b){return a+b;},0)}
 function fmt(iso){try{return new Date(iso).toLocaleTimeString()}catch(e){return iso}}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+// 状态分组：把粒度状态归并到分布条/过滤用的分组。key 决定颜色与过滤集合。
+var STATUS_GROUPS=[
+  {key:'done',label:'完成',color:'#70e090',match:['done']},
+  {key:'running',label:'运行中',color:'#ffd166',match:['running']},
+  {key:'queued',label:'排队',color:'#9ecbff',match:['queued']},
+  {key:'awaiting_approval',label:'待审批',color:'#ff9f4a',match:['awaiting_approval']},
+  {key:'failed',label:'失败',color:'#ff5d5d',match:['failed']},
+  {key:'needs_fix',label:'返工',color:'#ff8d8d',match:['needs_fix','review_failed']},
+  {key:'cancelled',label:'已取消',color:'#888888',match:['cancelled']},
+];
+function statusGroupKey(s){for(var i=0;i<STATUS_GROUPS.length;i++){if(STATUS_GROUPS[i].match.indexOf(s)>=0)return STATUS_GROUPS[i].key;}return '';}
+function matchesFilter(j){if(!filterStatus)return true;return statusGroupKey(j.status)===filterStatus;}
+function cardEnableFilter(){document.querySelectorAll('#cards .card').forEach(function(c){c.classList.toggle('clickable',!!c.dataset.filter);c.classList.toggle('filter-active',!!c.dataset.filter&&c.dataset.filter===filterStatus);});}
 function cbxFetch(url,opts){
   opts=opts||{};
   opts.headers=Object.assign({},opts.headers||{});
@@ -22,29 +36,72 @@ async function refresh(){
   var jobs=await cbxFetch('/api/jobs?workspace='+ws).then(function(r){return r.json()});
   var q=await cbxFetch('/api/queue?workspace='+ws).then(function(r){return r.json()});
   updateCards(jobs,q);
-  document.querySelector('#jobs').innerHTML=jobs.map(rowHtml).join('');
+  var filtered=filterStatus?jobs.filter(matchesFilter):jobs;
+  document.querySelector('#jobs').innerHTML=filtered.map(rowHtml).join('');
+  if(filtered.length===0)document.querySelector('#jobs').innerHTML='<tr><td colspan="7" style="text-align:center;color:#555;padding:16px;font-size:13px">没有匹配的'+(filterStatus?'':(jobs.length===0?'任务：创建第一个任务吧。':'任务。'))+'</td></tr>';
   if(selected){var row=document.querySelector('tr.job[data-id="'+rowAttr(selected)+'"]');if(row)row.classList.add('selected');}
 }
 function updateCards(jobs,q){
   var total=jobs.length;
   var running=jobs.filter(function(j){return j.status==='running';}).length;
-  var failed=jobs.filter(function(j){return['failed','review_failed','needs_fix'].indexOf(j.status)>=0;}).length;
+  var failed=jobs.filter(function(j){return j.status==='failed';}).length;
+  var needsFix=jobs.filter(function(j){return j.status==='needs_fix'||j.status==='review_failed';}).length;
+  var approval=jobs.filter(function(j){return j.status==='awaiting_approval';}).length;
+  var done=jobs.filter(function(j){return j.status==='done';}).length;
+  var queued=jobs.filter(function(j){return j.status==='queued';}).length;
+  var cancelled=jobs.filter(function(j){return j.status==='cancelled';}).length;
   var active=(q.entries||[]).filter(function(e){return e.status==='running';}).length;
   var depth=(q.entries||[]).filter(function(e){return['queued','running','awaiting_approval'].indexOf(e.status)>=0;}).length;
   var last=jobs.reduce(function(m,j){return j.updatedAt>m?j.updatedAt:m;},'');
-  var cTotal=document.querySelector('#c-total');cTotal.textContent=total;cTotal.className='card-value';
-  var cRun=document.querySelector('#c-running');cRun.textContent=running+' / '+(q.maxConcurrent||'\u2014');cRun.className='card-value'+(running>0?' s-running':'');
-  var cFail=document.querySelector('#c-failed');cFail.textContent=failed;cFail.className='card-value'+(failed>0?' s-failed':'');
-  var cQ=document.querySelector('#c-queue');cQ.textContent=depth+(q.paused?' (\u6682\u505c)':'');cQ.className='card-value'+(q.paused?' s-running':'');
+  // 更新卡片
+  setCard('c-total',total);
+  setCard('c-running',running+' / '+(q.maxConcurrent||'\u2014'),running>0?'s-running':'');
+  setCard('c-queued',depth+(q.paused?' (\u6682\u505c)':''),q.paused?'s-running':'');
+  setCard('c-approval',approval,approval>0?'s-awaiting_approval':'');
+  setCard('c-failed',failed,failed>0?'s-failed':'');
+  setCard('c-needs-fix',needsFix,needsFix>0?'s-needs_fix':'');
+  setCard('c-done',done,done>0?'s-done':'');
   document.querySelector('#c-last').textContent=last?fmt(last):'\u2014';
-  // 队列控制按钮：暂停时显示「恢复队列」，反之显示「暂停队列」。
+  // 健康卡
+  setCard('c-health',q.paused?'\u6682\u505c':failed>0?failed+'\u4e2a\u5931\u8d25':active>0?'\u8fd0\u884c\u4e2d':'\u7a7a\u95f2',q.paused?'s-running':failed>0?'s-failed':active>0?'s-running':'s-done');
+  // 队列控制按钮
   var pauseBtn=document.querySelector('#btn-pause');
   var resumeBtn=document.querySelector('#btn-resume');
   if(pauseBtn)pauseBtn.hidden=q.paused;
   if(resumeBtn)resumeBtn.hidden=!q.paused;
-  var health=document.querySelector('#c-health');
-  health.textContent=(q.paused?'\u6682\u505c':failed>0?failed+'\u4e2a\u5931\u8d25':active>0?'\u8fd0\u884c\u4e2d':'\u7a7a\u95f2');
-  health.className='card-value'+(q.paused?' s-running':failed>0?' s-failed':active>0?' s-running':' s-done');
+  // 分布条
+  renderDistBar(jobs);
+  // 卡片点击过滤
+  cardEnableFilter();
+  // 过滤指示
+  var fb=document.querySelector('#filter-bar');
+  if(filterStatus){
+    fb.hidden=false;
+    document.querySelector('#filter-label').textContent='\u7b5b\u9009\uFF1A'+(STATUS_GROUPS.find(function(g){return g.key===filterStatus})||{}).label||filterStatus;
+  } else { fb.hidden=true; }
+}
+function setCard(id,value,cls){
+  var el=document.querySelector('#'+id);
+  if(!el)return;
+  el.textContent=value;
+  el.className='card-value'+(cls?' '+cls:'');
+}
+function renderDistBar(jobs){
+  var bar=document.querySelector('#dist-bar');
+  if(!jobs.length){bar.hidden=true;return;}
+  var counts={};
+  STATUS_GROUPS.forEach(function(g){counts[g.key]=0;});
+  jobs.forEach(function(j){var k=statusGroupKey(j.status);if(k)counts[k]++;});
+  var total=jobs.length;
+  var html='';
+  STATUS_GROUPS.forEach(function(g){
+    var c=counts[g.key];
+    if(!c)return;
+    var pct=Math.round(c/total*100);
+    html+='<div class="dist-seg" style="flex:'+c+';background:'+g.color+'" title="'+g.label+': '+c+' ('+pct+'%)"></div>';
+  });
+  bar.innerHTML=html;
+  bar.hidden=false;
 }
 async function loadWorkspaces(){
   console.log('cbx-ui: loadWorkspaces called');
@@ -267,6 +324,19 @@ async function loadTab(id,tab,panelsEl,result){
 }
 document.querySelector('#jobs').addEventListener('click',function(e){
   var row=e.target.closest('tr.job');if(row)selectJob(row.dataset.id);
+});
+// 卡片点击过滤：data-filter 非空的卡片切换表过滤；空的卡片（总任务/最后活动/健康）清除过滤。
+document.querySelector('#cards').addEventListener('click',function(e){
+  var card=e.target.closest('.card');if(!card)return;
+  var f=card.dataset.filter||'';
+  if(!f){filterStatus='';selected=null;refresh();return;}
+  filterStatus=(filterStatus===f)?'':f;
+  selected=null;
+  refresh();
+  document.querySelector('#detail-body').innerHTML='<p class="hint">点击上方任务行查看详情</p>';
+});
+document.querySelector('#btn-clear-filter')&&document.querySelector('#btn-clear-filter').addEventListener('click',function(){
+  filterStatus='';selected=null;refresh();
 });
 document.querySelector('#btn-pause').addEventListener('click',async function(){
   var btn=this;btn.disabled=true;
