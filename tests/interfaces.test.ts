@@ -950,7 +950,11 @@ test("runtime and plugin manifests share the package patch version", async () =>
       : String(value.version);
   };
   const packageVersion = await readVersion("package.json");
-  assert.equal(packageVersion, "0.11.0");
+  assert.match(
+    packageVersion,
+    /^\d+\.\d+\.\d+(?:[-+].+)?$/,
+    "package.json version 必须是 semver",
+  );
   const lock = JSON.parse(
     await readFile(path.join(root, "package-lock.json"), "utf8"),
   ) as {
