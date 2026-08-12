@@ -872,11 +872,26 @@ export async function runMcpHttpServer(opts: {
     }
   };
 
+  // uri → {workspace, jobId}：onSubscribe/onUnsubscribe 共用，避免两处 regex 漂移。
+  const parseEventsUri = (
+    uri: string,
+  ): { workspace: string; jobId: string } | null => {
+    const m = /^cbx:\/\/job\/([^/]+)\/events(?:\?workspace=(.*))?$/.exec(uri);
+    if (!m) return null;
+    return {
+      workspace: m[2] ? decodeURIComponent(m[2]) : process.cwd(),
+      jobId: m[1],
+    };
+  };
+
   // 订阅某个 job 的事件资源时，轮询该 job 的 events.ndjson 行数增量，变化则推送 updated。
   // 基线在订阅时读取（await），此后行数增长才推送——保证订阅前已存在的事件不算增量。
   const ensureTailer = async (workspace: string, jobId: string): Promise<void> => {
     const key = `${workspace}\u0000${jobId}`;
     if (tailers.has(key)) return;
+    // 同步占位：async 基线读取期间若并发 subscribe 同一 job，第二个命中 has(key) 直接 return，
+    // 避免创建第二个 interval 后 tailers.set 覆盖、首个 interval 引用丢失而泄漏。
+    tailers.set(key, () => {});
     let lastLen = 0;
     try {
       lastLen = (await readEventsIncremental(workspace, jobId, 0)).events.length;
@@ -899,6 +914,16 @@ export async function runMcpHttpServer(opts: {
     tailers.set(key, () => clearInterval(timer));
   };
 
+  // unsubscribe 时停掉对应 tailer：否则订阅过的 job 的 500ms 轮询 interval 永久泄漏，
+  // 仅 server.close() 才清理（长生命周期 MCP server + 多 job 订阅累积磁盘读）。
+  const stopTailer = (uri: string): void => {
+    const parsed = parseEventsUri(uri);
+    if (!parsed) return;
+    const key = `${parsed.workspace}\u0000${parsed.jobId}`;
+    tailers.get(key)?.();
+    tailers.delete(key);
+  };
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${host}`);
     if (token) {
@@ -916,11 +941,26 @@ export async function runMcpHttpServer(opts: {
       }
     }
     if (req.method === "POST" && url.pathname === "/mcp") {
+      // MCP JSON-RPC 请求远小于 1MB；超限按异常/恶意客户端拒，避免无界累积撑爆进程内存
+      // （与 captureAsync 的 BoundedOutput 同一动机——D10 加固的对偶面）。
+      const maxBodyBytes = 1 * 1024 * 1024;
       let raw = "";
+      let tooLarge = false;
       try {
-        for await (const chunk of req) raw += chunk;
+        for await (const chunk of req) {
+          raw += chunk;
+          if (Buffer.byteLength(raw, "utf8") > maxBodyBytes) {
+            tooLarge = true;
+            break;
+          }
+        }
       } catch {
         /* body 读取失败 */
+      }
+      if (tooLarge) {
+        res.writeHead(413, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "请求体超过上限。" }));
+        return;
       }
       let request: { id?: unknown; method?: string; params?: Record<string, unknown> };
       try {
@@ -937,19 +977,24 @@ export async function runMcpHttpServer(opts: {
         subscribeCapable: true,
         onSubscribe: async (uri) => {
           uris.add(uri);
-          const m =
-            /^cbx:\/\/job\/([^/]+)\/events(?:\?workspace=(.*))?$/.exec(uri);
-          if (m)
-            await ensureTailer(
-              m[2] ? decodeURIComponent(m[2]) : process.cwd(),
-              m[1],
-            );
+          const parsed = parseEventsUri(uri);
+          if (parsed) await ensureTailer(parsed.workspace, parsed.jobId);
         },
         onUnsubscribe: (uri) => {
           uris.delete(uri);
+          stopTailer(uri);
         },
       };
       const { result, error } = await dispatch(request, ctx);
+      // JSON-RPC 2.0：无 id 的 notification 不返回响应（与 stdio transport 的 isNotification
+      // 守卫一致）。标准 MCP 客户端握手会发 notifications/initialized，若此处仍回 error body
+      // 会被严格客户端判定握手失败。
+      const isNotification = request.id === undefined || request.id === null;
+      if (isNotification) {
+        res.writeHead(202, { "cache-control": "no-store" });
+        res.end();
+        return;
+      }
       const payload =
         error !== undefined
           ? { jsonrpc: "2.0", id: request.id ?? null, error }

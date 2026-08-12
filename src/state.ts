@@ -137,8 +137,9 @@ export async function forgetJob(
     purgeWorktree: options.purgeWorktree,
     reason: options.reason ?? null,
   });
-  const { remainingEntries } = await forgetPersistedJob(workspace, jobId);
-  // 目录删除是 IO 重活，独立 try/catch：失败要明确报，不要静默吞。
+  // 目录删除放在 SQLite 事务之前：rm 失败时 jobs 行未动，loadState 仍能读到，
+  // 用户可重试 forget（或手动 rm 目录后再 forget）。若反之（先删行再 rm），rm 失败后
+  // 重试会因 jobs 行已删 → loadState 抛 E_NOT_FOUND 而死锁，无法自愈。
   const directory = jobDir(workspace, jobId);
   let deletedDirectory = false;
   try {
@@ -146,9 +147,10 @@ export async function forgetJob(
     deletedDirectory = true;
   } catch (error) {
     throw new Error(
-      `已删除 SQLite 记录但清理目录失败：${directory}（${(error as Error).message}）。请手动删除后重试 forget。`,
+      `清理目录失败：${directory}（${(error as Error).message}）。SQLite 记录未动，可重试 forget 或手动删除该目录。`,
     );
   }
+  const { remainingEntries } = await forgetPersistedJob(workspace, jobId);
   // worktree 在 forget 路径上**保留**；purge 才删。
   const worktreeCleaned = options.purgeWorktree
     ? await cleanupWorktree(workspace, jobId)

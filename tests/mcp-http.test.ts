@@ -282,3 +282,74 @@ test("MCP HTTP: 配置 token 后未鉴权 401，鉴权后 200", async () => {
     await server.close();
   }
 });
+
+// 原始 POST：返回 status + text，不强制 JSON 解析；容忍 server 提前响应（413）后关闭连接
+// 导致的写入重置——已拿到响应即视为成功。
+function requestRaw(
+  port: number,
+  body: string,
+  token?: string,
+): Promise<{ status: number; text: string }> {
+  const { promise, resolve } = Promise.withResolvers<{
+    status: number;
+    text: string;
+  }>();
+  const req = request(
+    {
+      host: "127.0.0.1",
+      port,
+      path: "/mcp",
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+    },
+    (res) => {
+      let raw = "";
+      res.on("data", (c: Buffer) => (raw += c.toString("utf8")));
+      res.on("end", () =>
+        resolve({ status: res.statusCode ?? 0, text: raw }),
+      );
+    },
+  );
+  req.on("error", () => resolve({ status: 0, text: "" }));
+  req.end(body);
+  return promise;
+}
+
+test("MCP HTTP: 无 id 的 notification 不返回 JSON-RPC 响应（JSON-RPC 2.0 守卫）", async () => {
+  const server = await runMcpHttpServer({ port: 0, host: "127.0.0.1" });
+  try {
+    // 标准 MCP 客户端握手发 notifications/initialized（无 id）。修复前 dispatch 落到
+    // "未知方法" 分支并回 error body，违反 JSON-RPC 2.0 且可能让客户端判定握手失败。
+    const res = await requestRaw(
+      server.port,
+      JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    );
+    assert.ok(
+      res.status === 202,
+      `notification 应回 202 无 body，got status=${res.status}`,
+    );
+    assert.equal(res.text, "", "notification 不应返回任何 body");
+  } finally {
+    await server.close();
+  }
+});
+
+test("MCP HTTP: 超过 1MB 的请求体返回 413", async () => {
+  const server = await runMcpHttpServer({ port: 0, host: "127.0.0.1" });
+  try {
+    // 2MB body：远超 1MB 上限，服务端累计字节超限后中断读取并回 413。
+    const big = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 99,
+      method: "ping",
+      padding: "x".repeat(2 * 1024 * 1024),
+    });
+    const res = await requestRaw(server.port, big);
+    assert.equal(res.status, 413, `超限 body 应 413，got ${res.status}`);
+  } finally {
+    await server.close();
+  }
+});
