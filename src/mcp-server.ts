@@ -579,8 +579,19 @@ async function callTool(
     return retryQueueJob(root, id, Number(args.priority ?? 0));
   if (name === "cbx_status") return loadState(root, id);
   if (name === "cbx_review") {
-    // 与 cbx_artifact / cbx_result 一致：缺文件走 JSON-RPC error，不吞异常。
-    return { job_id: id, review: await readArtifact(root, id, "review.md") };
+    // 先确认 job 存在（job 不存在会抛 CbxError(E_NOT_FOUND)，dispatch catch 转 JSON-RPC error，
+    // 消息已是"任务不存在或状态文件损坏"——明确）；再读 review.md，若不存在则抛明确错误
+    // "任务 <id> 尚无 review.md（审查阶段未产出）"，区分 job 不存在与审查未产出两种情况。
+    await loadState(root, id);
+    let review: string;
+    try {
+      review = await readArtifact(root, id, "review.md");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT")
+        throw new Error(`任务 ${id} 尚无 review.md（审查阶段未产出）。`);
+      throw error;
+    }
+    return { job_id: id, review };
   }
   if (name === "cbx_continue") {
     // 未传 extra_rounds 默认 0 = 不追加轮次；仅 max_rounds gate 下 extraRounds>0 才扩展轮次。
@@ -889,9 +900,11 @@ export async function runMcpHttpServer(opts: {
   const uris = new Set<string>();
   const connections = new Set<SseConnection>();
   const tailers = new Map<string, () => void>();
+  let eventSeq = 0;
 
   const pushUpdated = (uri: string): void => {
-    const frame = `data: ${JSON.stringify({
+    const seq = ++eventSeq;
+    const frame = `id: ${seq}\nretry: 3000\ndata: ${JSON.stringify({
       jsonrpc: "2.0",
       method: "notifications/resources/updated",
       params: { uri },
