@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import chalk from "chalk";
 import {
   colorizeStatus,
+  displayWidth,
   fmtDuration,
   fmtElapsed,
   isInteractive,
@@ -561,4 +562,27 @@ test("renderExport: 终态 Elapsed 在两次调用间稳定", () => {
     const b = second.match(/Elapsed:\s+(\S+)/)?.[1];
     assert.equal(a, b, `终态 Elapsed 应稳定：${a} vs ${b}`);
   });
+});
+
+// ---------- displayWidth: CJK 宽字符列宽 ----------
+test("displayWidth: ASCII 每字符 1 列", () => {
+  assert.equal(displayWidth("hello"), 5);
+});
+
+test("displayWidth: CJK 表意文字每字符 2 列", () => {
+  assert.equal(displayWidth("任务"), 4); // 2 字 × 2 列
+  assert.equal(displayWidth("测试"), 4);
+});
+
+test("displayWidth: 中英混排累加实际列宽", () => {
+  assert.equal(displayWidth("job任务"), 7); // job(3) + 任务(4)
+});
+
+test("displayWidth: 全角符号与假名按 2 列计", () => {
+  assert.equal(displayWidth("ＡＢ"), 4); // 全角拉丁
+  assert.equal(displayWidth("カタ"), 4); // 片假名
+});
+
+test("displayWidth: ANSI 转义序列不计宽度", () => {
+  assert.equal(displayWidth("\x1b[31mred\x1b[0m"), 3);
 });

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createJob, dispatchQueue, executeJob, health, listJobs, listQueue, loadState, retryQueueJob, validateTestCommand, writeState } from "../src/core.js";
-import { loadPersistedQueue, savePersistedQueue } from "../src/storage.js";
+import { loadPersistedQueue, savePersistedQueue, savePersistedStateAndQueue } from "../src/storage.js";
 
 // ---- validateTestCommand：注入向量与破坏性命令拦截矩阵 ----
 
@@ -82,6 +83,39 @@ test("reclaim of a worker that produced a heartbeat decays reclaimCount to zero"
   const entry = (await listQueue(workspace)).entries[0];
   assert.equal(entry.status, "queued");
   assert.equal(entry.reclaimCount, 0);
+});
+
+test("dispatchQueue reclaims a running entry whose worker never started (no heartbeat, past grace)", async () => {
+  // 活 PID（当前进程）但无 heartbeat 文件且 startedAt 远超 grace：回收判定为 stale，
+  // paused 阻止重 spawn，entry 落回 queued（与死 PID 回收互补的活 PID stale 场景）。
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-reclaim-no-hb-"));
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ maxConcurrent: 1 }), "utf8");
+  const job = await createJob({ workspace, task: "僵尸 worker", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "zombie" });
+  const fakeOldStartedAt = new Date(Date.now() - 120_000).toISOString();
+  await savePersistedStateAndQueue(workspace, job.jobId, { ...(await loadState(workspace, job.jobId)), status: "running" }, {
+    maxConcurrent: 1, paused: true, updatedAt: new Date().toISOString(),
+    entries: [{ queueId: "zombie-entry", jobId: job.jobId, workspace, extra: "", status: "running", createdAt: fakeOldStartedAt, startedAt: fakeOldStartedAt, pid: process.pid, priority: 0 }],
+  });
+  assert.equal(existsSync(path.join(job.directory, "worker.heartbeat")), false);
+  await dispatchQueue(workspace);
+  assert.equal((await listQueue(workspace)).entries.find((e) => e.queueId === "zombie-entry")?.status, "queued");
+});
+
+test("dispatchQueue reclaims a live pid whose heartbeat stopped advancing", async () => {
+  // 活 PID 但 heartbeat mtime 停止推进（超 grace）：回收而非误判健康。
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-reclaim-stale-hb-"));
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ maxConcurrent: 1 }), "utf8");
+  const job = await createJob({ workspace, task: "停止心跳", review: false, isolated: false, permissionMode: "auto", maxTurns: 10, timeoutMs: 2_000, maxRetries: 0, jobId: "stale-heartbeat" });
+  const staleAt = new Date(Date.now() - 120_000);
+  const heartbeat = path.join(job.directory, "worker.heartbeat");
+  await writeFile(heartbeat, staleAt.toISOString(), "utf8");
+  await utimes(heartbeat, staleAt, staleAt);
+  await savePersistedStateAndQueue(workspace, job.jobId, { ...(await loadState(workspace, job.jobId)), status: "running" }, {
+    maxConcurrent: 1, paused: true, updatedAt: new Date().toISOString(),
+    entries: [{ queueId: "stale-heartbeat-entry", jobId: job.jobId, workspace, extra: "", status: "running", createdAt: staleAt.toISOString(), startedAt: staleAt.toISOString(), pid: process.pid, priority: 0 }],
+  });
+  await dispatchQueue(workspace);
+  assert.equal((await listQueue(workspace)).entries.find((entry) => entry.queueId === "stale-heartbeat-entry")?.status, "queued");
 });
 
 // ---- 终态双写与调度器的队列锁序列化 ----

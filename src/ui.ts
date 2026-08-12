@@ -425,7 +425,11 @@ function text(
   value: string,
   contentType = "text/plain; charset=utf-8",
 ): void {
-  res.writeHead(200, { "content-type": contentType });
+  res.writeHead(200, {
+    "content-type": contentType,
+    "x-content-type-options": "nosniff",
+    "cache-control": "no-store",
+  });
   res.end(value);
 }
 

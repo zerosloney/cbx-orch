@@ -1,158 +1,121 @@
+// governance 子系统测试：脱敏（redactText / redactSensitive）、.cbx.json governance 块校验、
+// 保留期清理（prunePersistedData）。此前本文件误放 dispatch reclaim 测试，那些已归并到
+// reliability.test.ts 的 reclaim 簇；此处聚焦 governance 存储逻辑的唯一覆盖。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import {
-  fakeAgent,
-  setupFake,
-  createAdaptiveJob,
-  initializeGitWorkspace,
-  approveJob,
-  cancelJob,
-  createJob,
-  executeJob,
-  health,
-  listJobs,
-  listQueue,
-  loadConfig,
-  loadState,
-  mergeConfig,
-  pauseQueue,
-  readArtifact,
-  readEventsIncremental,
-  resumeQueue,
-  retryQueueJob,
-  serveQueue,
-  startBackground,
-  runReviewGate,
-  stopReviewGateHook,
-  acquireServiceLease,
-  loadPersistedQueue,
-  loadPersistedState,
-  savePersistedStateAndQueue,
-  BUILTIN_EXECUTORS,
-  resolveExecutor,
-  parseNextAction,
-  CONTEXT_PACK_MAX_CHARS,
-  parseContextPack,
-  createHumanGate,
-  extendRoundLimit,
-  parseHumanGate,
-  resolveHumanGate,
-  type JobState,
-} from "./helpers.js";
+  redactText,
+  redactSensitive,
+  loadRuntimeConfig,
+  prunePersistedData,
+} from "../src/storage.js";
 
-test("dispatchQueue reclaims a running entry whose worker never started (no heartbeat, past grace)", async () => {
-  const { workspace } = await setupFake();
-  await writeFile(
-    path.join(workspace, ".cbx.json"),
-    JSON.stringify({ maxConcurrent: 1 }),
-    "utf8",
-  );
-  const job = await createJob({
-    workspace,
-    task: "僵尸 worker",
-    review: false,
-    isolated: false,
-    permissionMode: "auto",
-    maxTurns: 10,
-    timeoutMs: 2_000,
-    maxRetries: 0,
-    jobId: "zombie",
-  });
-  // 手工注入一个 running entry，pid 指向当前进程（processAlive=true）但无 heartbeat 且 startedAt 远超 grace
-  const fakeOldStartedAt = new Date(Date.now() - 120_000).toISOString();
-  await savePersistedStateAndQueue(
-    workspace,
-    job.jobId,
-    { ...(await loadState(workspace, job.jobId)), status: "running" },
-    {
-      maxConcurrent: 1,
-      paused: true,
-      updatedAt: new Date().toISOString(),
-      entries: [
-        {
-          queueId: "zombie-entry",
-          jobId: job.jobId,
-          workspace,
-          extra: "",
-          status: "running",
-          createdAt: fakeOldStartedAt,
-          startedAt: fakeOldStartedAt,
-          pid: process.pid,
-          priority: 0,
-        },
-      ],
-    },
-  );
-  // 确认无 heartbeat 文件
-  assert.equal(existsSync(path.join(job.directory, "worker.heartbeat")), false);
-  await (await import("../src/core.js")).dispatchQueue(workspace);
-  const after = (await listQueue(workspace)).entries.find(
-    (e) => e.queueId === "zombie-entry",
-  );
-  // 进程虽活但无 heartbeat 且超 grace → 应回收（paused 阻止重 spawn，entry 应落到 queued）
+// ---- redactText: 行级字段名脱敏 + 全文 pattern 兜底 ----
+
+test("redactText masks values of listed field names (key: v form)", () => {
+  const out = redactText("token: abc123\nname: foo", ["token"], []);
+  assert.equal(out, "token: [REDACTED]\nname: foo");
+});
+
+test("redactText recognizes `- key: v` list-item form", () => {
+  const out = redactText("- password: secret", ["password"], []);
+  assert.equal(out, "- password: [REDACTED]");
+});
+
+test("redactText normalizes `key = v` form to `key: [REDACTED]", () => {
+  const out = redactText("api_key = k_123", ["api_key"], []);
+  assert.equal(out, "api_key: [REDACTED]");
+});
+
+test("redactText leaves lines without a key:value structure intact", () => {
   assert.equal(
-    after?.status,
-    "queued",
-    "stale entry should be reclaimed to queued despite live pid",
+    redactText("hello world\nno key here", ["token"], []),
+    "hello world\nno key here",
   );
 });
 
-test("dispatchQueue reclaims a live pid whose heartbeat stopped advancing", async () => {
-  const { workspace } = await setupFake();
-  await writeFile(
-    path.join(workspace, ".cbx.json"),
-    JSON.stringify({ maxConcurrent: 1 }),
-    "utf8",
+test("redactText applies full-text regex patterns globally", () => {
+  const out = redactText("use sk-live-1234 and sk_test_5678", [], ["sk[\\w-]+"]);
+  assert.equal(out, "use [REDACTED] and [REDACTED]");
+});
+
+test("redactText combines field-name and pattern redaction", () => {
+  const out = redactText("token: abc\nsee sk-1234", ["token"], ["sk-\\w+"]);
+  assert.equal(out, "token: [REDACTED]\nsee [REDACTED]");
+});
+
+// ---- redactSensitive: JSON 对象递归脱敏（大小写不敏感）----
+
+test("redactSensitive recurses nested objects case-insensitively", () => {
+  const out = redactSensitive(
+    { Token: "x", nested: { password: "y", safe: "z" } },
+    ["token", "password"],
   );
-  const job = await createJob({
-    workspace,
-    task: "停止心跳",
-    review: false,
-    isolated: false,
-    permissionMode: "auto",
-    maxTurns: 10,
-    timeoutMs: 2_000,
-    maxRetries: 0,
-    jobId: "stale-heartbeat",
+  assert.deepEqual(out, {
+    Token: "[REDACTED]",
+    nested: { password: "[REDACTED]", safe: "z" },
   });
-  const staleAt = new Date(Date.now() - 120_000);
-  const heartbeat = path.join(job.directory, "worker.heartbeat");
-  await writeFile(heartbeat, staleAt.toISOString(), "utf8");
-  await utimes(heartbeat, staleAt, staleAt);
-  await savePersistedStateAndQueue(
-    workspace,
-    job.jobId,
-    { ...(await loadState(workspace, job.jobId)), status: "running" },
-    {
-      maxConcurrent: 1,
-      paused: true,
-      updatedAt: new Date().toISOString(),
-      entries: [
-        {
-          queueId: "stale-heartbeat-entry",
-          jobId: job.jobId,
-          workspace,
-          extra: "",
-          status: "running",
-          createdAt: staleAt.toISOString(),
-          startedAt: staleAt.toISOString(),
-          pid: process.pid,
-          priority: 0,
-        },
-      ],
+});
+
+test("redactSensitive redacts array elements", () => {
+  const out = redactSensitive([{ secret: "a" }, { ok: "b" }], ["secret"]);
+  assert.deepEqual(out, [{ secret: "[REDACTED]" }, { ok: "b" }]);
+});
+
+test("redactSensitive passes through primitives untouched", () => {
+  assert.equal(redactSensitive("plain", ["x"]), "plain");
+  assert.equal(redactSensitive(42, ["x"]), 42);
+  assert.equal(redactSensitive(null, ["x"]), null);
+});
+
+// ---- loadRuntimeConfig: governance 块严格校验（未知字段/非法正则/越界值均拒绝）----
+
+async function workspaceWith(config: unknown): Promise<string> {
+  const ws = await mkdtemp(path.join(os.tmpdir(), "cbx-gov-"));
+  await writeFile(path.join(ws, ".cbx.json"), JSON.stringify(config), "utf8");
+  return ws;
+}
+
+test("loadRuntimeConfig accepts a valid governance block", async () => {
+  const ws = await workspaceWith({
+    governance: {
+      retentionDays: 7,
+      redactFields: ["token"],
+      redactPatterns: ["sk-\\w+"],
     },
-  );
-  await (await import("../src/core.js")).dispatchQueue(workspace);
-  assert.equal(
-    (await listQueue(workspace)).entries.find(
-      (entry) => entry.queueId === "stale-heartbeat-entry",
-    )?.status,
-    "queued",
-  );
+  });
+  const cfg = await loadRuntimeConfig(ws);
+  assert.equal(cfg.governance?.retentionDays, 7);
+  assert.deepEqual(cfg.governance?.redactFields, ["token"]);
+  assert.deepEqual(cfg.governance?.redactPatterns, ["sk-\\w+"]);
+});
+
+test("loadRuntimeConfig rejects invalid regex in redactPatterns", async () => {
+  const ws = await workspaceWith({ governance: { redactPatterns: ["("] } });
+  await assert.rejects(() => loadRuntimeConfig(ws));
+});
+
+test("loadRuntimeConfig rejects out-of-range retentionDays", async () => {
+  const ws = await workspaceWith({ governance: { retentionDays: 99999 } });
+  await assert.rejects(() => loadRuntimeConfig(ws));
+});
+
+test("loadRuntimeConfig rejects non-array redactFields", async () => {
+  const ws = await workspaceWith({ governance: { redactFields: "token" } });
+  await assert.rejects(() => loadRuntimeConfig(ws));
+});
+
+test("loadRuntimeConfig rejects unknown governance keys", async () => {
+  const ws = await workspaceWith({ governance: { bogus: true } });
+  await assert.rejects(() => loadRuntimeConfig(ws));
+});
+
+// ---- prunePersistedData: 保留期清理 ----
+
+test("prunePersistedData is a no-op when retentionDays is unset", async () => {
+  const ws = await mkdtemp(path.join(os.tmpdir(), "cbx-gov-prune-"));
+  assert.equal(await prunePersistedData(ws), 0);
 });

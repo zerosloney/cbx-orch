@@ -1,15 +1,7 @@
 import chalk from "chalk";
 import type { JobState } from "../../types.js";
 import { colorizeStatus } from "../theme.js";
-import { fmtElapsed } from "../../formatting.js";
-
-function stripAnsi(s: string): string {
-  return s.replace(/\u001b\[[0-9;]*m/g, "");
-}
-
-function displayWidth(s: string): number {
-  return stripAnsi(s).length;
-}
+import { fmtElapsed, displayWidth } from "../../formatting.js";
 
 function padDisplayEnd(s: string, width: number): string {
   const len = displayWidth(s);
@@ -38,7 +30,7 @@ export function truncateDisplay(s: string, width: number): string {
     }
     if (w >= limit) break;
     result += tok;
-    w += tok.length;
+    w += displayWidth(tok);
   }
   return result + "…";
 }

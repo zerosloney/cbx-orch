@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, writeSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import { publishEvent } from "./observability.js";
@@ -30,11 +30,16 @@ export function logJobEvent(
   detail: Record<string, unknown> = {},
 ): void {
   try {
-    appendFileSync(
-      path.join(jobDir(workspace, jobId), "events.ndjson"),
-      JSON.stringify({ event, jobId, ...detail, at: now() }) + "\n",
-      "utf8",
-    );
+    const file = path.join(jobDir(workspace, jobId), "events.ndjson");
+    // fsync 保证审计事件在系统级崩溃（断电）后仍可恢复：appendFileSync 仅落 OS page cache，
+    // 进程崩溃安全但系统崩溃可能丢尾部。事件流是 job 审计的唯一来源（无 SQLite 副本），值得 fsync。
+    const fd = openSync(file, "a");
+    try {
+      writeSync(fd, JSON.stringify({ event, jobId, ...detail, at: now() }) + "\n");
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     /* events file itself unreachable — nothing more we can do */
   }

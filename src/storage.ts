@@ -607,11 +607,20 @@ export async function savePersistedState(
 }
 export async function listPersistedStates<T>(workspace: string): Promise<T[]> {
   const db = await database(workspace);
-  return (
-    db
-      .prepare("SELECT state_json FROM jobs ORDER BY updated_at DESC")
-      .all() as Array<{ state_json: string }>
-  ).map((row) => JSON.parse(row.state_json) as T);
+  const rows = db
+    .prepare("SELECT state_json FROM jobs ORDER BY updated_at DESC")
+    .all() as Array<{ state_json: string }>;
+  // 单条损坏的 state_json 不应拖垮整个 listJobs/health：跳过坏行保持其他 job 可见，
+  // 与 importLegacyData 的损坏行跳过策略一致；恢复需 cbx forget 后重建。
+  const out: T[] = [];
+  for (const row of rows) {
+    try {
+      out.push(JSON.parse(row.state_json) as T);
+    } catch {
+      /* skip corrupt row */
+    }
+  }
+  return out;
 }
 
 /**
@@ -1179,12 +1188,28 @@ async function reclaimLock(file: string): Promise<boolean> {
   const staleName = `${file}.stale.${process.pid}.${randomBytes(5).toString("hex")}`;
   try {
     await rename(file, staleName);
-    await unlink(staleName);
-    return true;
   } catch (error) {
-    if (isMissing(error)) return true;
+    if (isMissing(error)) return true; // file 已被他人回收，外层立即重试 open(wx)
     return false;
   }
+  // 防双持有：rename 后重新校验锁内容——若显示活 pid（staleLock→reclaim 间被他人重新 acquire），
+  // 放回原位放弃回收。把双持有窗口从含 await 的 staleLock→reclaim 缩小到本地 read+pid 探测。
+  // 最坏情况是 lockfile 内容短暂错乱（被旧死锁记录覆盖），后续 staleLock 自愈，不导致双持有。
+  try {
+    const record = JSON.parse(await readFile(staleName, "utf8")) as LockRecord;
+    if (processAlive(record.pid)) {
+      try {
+        await rename(staleName, file);
+      } catch {
+        await unlink(staleName).catch(() => undefined);
+      }
+      return false;
+    }
+  } catch {
+    /* 内容缺失/损坏：按可回收处理 */
+  }
+  await unlink(staleName).catch(() => undefined);
+  return true;
 }
 
 export async function withFileLock<T>(

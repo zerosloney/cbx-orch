@@ -9,8 +9,9 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // 门槛作为覆盖率 floor（见 issue #6）：feat visualization 新代码已实质覆盖（formatting 98%、TUI ~95%、ui 83%），
-// 整体数字受预先存在的 cli.js 历史欠债拖累；后续补测应同步上调本阈值。
-const thresholds = { lines: 66, branch: 43, functions: 67 };
+// 整体数字受预先存在的 cli.js 历史欠债拖累。本次随 governance/CJK 等测试补充，实测 lines 70.4% / branch 48.8% /
+// functions 71.9%，按 ~2% 余量上调 floor 防 flaky；后续补测应继续同步上调。
+const thresholds = { lines: 68, branch: 46, functions: 70 };
 
 const testsDirectory = path.join(root, "dist", "tests");
 let testFiles;

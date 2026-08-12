@@ -686,16 +686,26 @@ interface RpcResult {
   error?: { code: number; message: string };
 }
 
+/** 服务端支持的 MCP 协议版本集合。initialize 协商时若客户端请求版本在此集合内则采纳。 */
+const SUPPORTED_PROTOCOL_VERSIONS = new Set(["2025-06-18"]);
+
 async function dispatch(
   request: { method?: string; params?: Record<string, unknown> },
   ctx: DispatchContext,
 ): Promise<RpcResult> {
   try {
     const method = request.method;
-    if (method === "initialize")
+    if (method === "initialize") {
+      // 协议版本协商（MCP 2025-06-18）：客户端在 params.protocolVersion 声明其支持版本，
+      // 服务端若也支持则采纳，否则返回本端最新版本（声明式，客户端决定是否继续）。
+      // 当前 cbx 单版本实现——协商结果恒为 2025-06-18，但保留协商入口供未来多版本扩展。
+      const requested = String((request.params ?? {}).protocolVersion ?? "");
+      const negotiated = SUPPORTED_PROTOCOL_VERSIONS.has(requested)
+        ? requested
+        : ctx.protocolVersion;
       return {
         result: {
-          protocolVersion: ctx.protocolVersion,
+          protocolVersion: negotiated,
           capabilities: {
             tools: {},
             resources: { subscribe: ctx.subscribeCapable, listChanged: false },
@@ -703,6 +713,7 @@ async function dispatch(
           serverInfo,
         },
       };
+    }
     if (method === "ping") return { result: {} };
     if (method === "tools/list") return { result: { tools } };
     if (method === "resources/list") {
@@ -940,7 +951,18 @@ export async function runMcpHttpServer(opts: {
   };
 
   const server = createServer(async (req, res) => {
+    // CORS：MCP HTTP 强制 loopback，允许浏览器 MCP 客户端跨域访问。
+    // Bearer token 在 Authorization header（非 cookie 凭证），Access-Control-Allow-Origin: * 可用。
+    res.setHeader("access-control-allow-origin", "*");
+    res.setHeader("access-control-allow-headers", "authorization, content-type");
+    res.setHeader("access-control-allow-methods", "POST, GET, OPTIONS");
     const url = new URL(req.url ?? "/", `http://${host}`);
+    // OPTIONS 预检在 token 校验前返回：浏览器带 Authorization 的跨域请求会先发无凭证预检。
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, { "access-control-max-age": "86400" });
+      res.end();
+      return;
+    }
     if (token) {
       // 与 cbx ui 同源：token 校验用 SHA-256 + timingSafeEqual 常量时间比较，
       // 避免 `===` 逐字节短路的时序侧信道（CHANGELOG 0.10.2 加固项对新增 HTTP 路径同样适用）。
@@ -1031,7 +1053,17 @@ export async function runMcpHttpServer(opts: {
       res.write(": connected\n\n");
       const conn: SseConnection = { res };
       connections.add(conn);
-      req.on("close", () => connections.delete(conn));
+      req.on("close", () => {
+        connections.delete(conn);
+        // 无状态广播架构下订阅与连接不绑定；所有 SSE 连接断开后已启动的 tailer 无人消费，
+        // 停掉它们避免 500ms 轮询 interval 永久泄漏（此前仅 server.close 才清理）。
+        // 客户端重连后会重新 initialize + resources/subscribe，ensureTailer 按需重建。
+        if (connections.size === 0) {
+          for (const stop of tailers.values()) stop();
+          tailers.clear();
+          uris.clear();
+        }
+      });
       return;
     }
     if (url.pathname !== "/mcp") {

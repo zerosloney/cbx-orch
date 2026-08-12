@@ -6,7 +6,7 @@ var filterStatus='';
 function rowAttr(id){return window.CSS&&CSS.escape?CSS.escape(String(id)):String(id).replace(/[^\w-]/g,function(c){return'\\'+c})}
 function totalJobs(w){return Object.values(w.jobsByStatus||{}).reduce(function(a,b){return a+b;},0)}
 function fmt(iso){try{return new Date(iso).toLocaleTimeString()}catch(e){return iso}}
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;')}
 // 状态分组：把粒度状态归并到分布条/过滤用的分组。key 决定颜色与过滤集合。
 var STATUS_GROUPS=[
   {key:'done',label:'完成',color:'#70e090',match:['done']},
@@ -390,10 +390,12 @@ es.onmessage=function(e){
   var status=p.status||'';
   var div=document.createElement('div');
   div.className='evt';
+  // status 来自 SSE payload，进 class 属性与文本前先 esc，防非常枚举值逃逸属性/标签。
+  var sStatus=esc(status);
   var txt='<span class="t">'+fmt(d.at)+'</span>';
-  if(p.jobId)txt+='<span class="s-'+status+'"><b>'+esc(p.jobId)+'</b></span> ';
-  if(p.previousStatus)txt+='<span class="s-'+p.previousStatus+'">'+p.previousStatus+'</span> → <span class="s-'+status+'">'+status+'</span>';
-  else if(status)txt+='<span class="s-'+status+'">'+status+'</span>';
+  if(p.jobId)txt+='<span class="s-'+sStatus+'"><b>'+esc(p.jobId)+'</b></span> ';
+  if(p.previousStatus)txt+='<span class="s-'+esc(p.previousStatus)+'">'+esc(p.previousStatus)+'</span> → <span class="s-'+sStatus+'">'+sStatus+'</span>';
+  else if(status)txt+='<span class="s-'+sStatus+'">'+sStatus+'</span>';
   if(p.phase)txt+=' · '+esc(p.phase);
   div.innerHTML=txt;
   stream.appendChild(div);

@@ -26,8 +26,29 @@ function stripAnsi(s: string): string {
   return s.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
-function displayWidth(s: string): number {
-  return stripAnsi(s).length;
+// East Asian Wide / Fullwidth 字符在等宽终端占 2 列。
+// intentional-simple: 只覆盖最常见 CJK 区块（中日韩统一表意文字、全角标点、假名、谚文等），
+// 不做完整 Unicode EastAsianWidth 表；对终端表格对齐足够，升级可换 string-width。
+function charWidth(code: number): number {
+  return (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0x303e) ||
+    (code >= 0x3040 && code <= 0x33bf) ||
+    (code >= 0x3400 && code <= 0x4dbf) ||
+    (code >= 0x4e00 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6)
+    ? 2
+    : 1;
+}
+
+export function displayWidth(s: string): number {
+  let width = 0;
+  for (const char of stripAnsi(s))
+    width += charWidth(char.codePointAt(0) ?? 0);
+  return width;
 }
 
 function padDisplayEnd(s: string, width: number): string {
