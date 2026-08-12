@@ -38,7 +38,11 @@ test("redactText leaves lines without a key:value structure intact", () => {
 });
 
 test("redactText applies full-text regex patterns globally", () => {
-  const out = redactText("use sk-live-1234 and sk_test_5678", [], ["sk[\\w-]+"]);
+  const out = redactText(
+    "use sk-live-1234 and sk_test_5678",
+    [],
+    ["sk[\\w-]+"],
+  );
   assert.equal(out, "use [REDACTED] and [REDACTED]");
 });
 

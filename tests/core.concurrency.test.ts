@@ -15,7 +15,9 @@ import { createJob, loadState, listJobs } from "../src/core.js";
  * 约束：纯单进程 async 并发（Promise.all），不 spawn 子进程，不用 sleep/wall-clock。
  */
 test("并发 createJob（同 workspace、不同 jobId）经 Promise.all 全部成功，验证 database Promise 缓存去重", async () => {
-  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-concurrent-createJob-"));
+  const workspace = await mkdtemp(
+    path.join(os.tmpdir(), "cbx-concurrent-createJob-"),
+  );
   const jobId1 = "concurrent-a";
   const jobId2 = "concurrent-b";
   const jobId3 = "concurrent-c";
@@ -88,7 +90,9 @@ test("并发 createJob（同 workspace、不同 jobId）经 Promise.all 全部�
 });
 
 test("并发 loadState（同 workspace、相同 jobId）多次并发读取，返回一致 state 且不抛错", async () => {
-  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-concurrent-loadState-"));
+  const workspace = await mkdtemp(
+    path.join(os.tmpdir(), "cbx-concurrent-loadState-"),
+  );
   const job = await createJob({
     workspace,
     task: "并发读取",

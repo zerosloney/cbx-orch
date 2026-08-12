@@ -194,7 +194,9 @@ test("concurrent execution of one job is rejected by the lock", async () => {
   });
   process.env.FAKE_JOB_DIR = job.directory;
   const first = executeJob(workspace, job.jobId);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  // 等待首个执行进入锁阶段。负载高时 first 可能仍在 Human Gate 更新阶段，
+  // 因此 second 可能撞上任意一个 withJobLock（任务锁或 Human Gate 锁）。
+  await new Promise((resolve) => setTimeout(resolve, 100));
   const second = executeJob(workspace, job.jobId);
   const results = await Promise.allSettled([first, second]);
   assert.equal(
@@ -207,7 +209,7 @@ test("concurrent execution of one job is rejected by the lock", async () => {
   );
   assert.match(
     String(results.find((result) => result.status === "rejected")?.reason),
-    /任务正在运行/,
+    /任务正在运行中|Human Gate 正在更新/,
   );
 });
 

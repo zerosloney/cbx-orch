@@ -29,7 +29,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test dist/tests/*.test.js",
+    "test": "npm run build && node --test --test-concurrency=2 dist/tests/*.test.js",
     "lint": "tsc --noEmit -p tsconfig.json",
     "format": "prettier --write --ignore-unknown package.json README.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/core.*.test.ts tests/helpers.ts",
     "format:check": "prettier --check --ignore-unknown package.json README.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/core.*.test.ts tests/helpers.ts",

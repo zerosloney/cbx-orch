@@ -108,8 +108,11 @@ function openSse(port: number, token?: string): Promise<SseChannel> {
       resolve({
         close: () => req.destroy(),
         waitFor: (marker: string, timeoutMs: number) => {
-          const { promise: p, resolve: r, reject: rj } =
-            Promise.withResolvers<string>();
+          const {
+            promise: p,
+            resolve: r,
+            reject: rj,
+          } = Promise.withResolvers<string>();
           if (text().includes(marker)) {
             r(text());
             return p;
@@ -118,7 +121,10 @@ function openSse(port: number, token?: string): Promise<SseChannel> {
             marker,
             resolve: r,
             reject: rj,
-            timer: setTimeout(() => rj(new Error(`SSE 超时未收到 ${marker}`)), timeoutMs),
+            timer: setTimeout(
+              () => rj(new Error(`SSE 超时未收到 ${marker}`)),
+              timeoutMs,
+            ),
           };
           waiters.push(w);
           return p;
@@ -186,9 +192,14 @@ test("MCP HTTP: resources/list 含 events 资源，resources/read 可读事件�
       method: "resources/list",
       params: { workspace },
     });
-    const resources = (listRes.body.result as { resources: Array<{ uri: string }> }).resources;
+    const resources = (
+      listRes.body.result as { resources: Array<{ uri: string }> }
+    ).resources;
     const eventsUri = `cbx://job/http-evt-1/events?workspace=${encodeURIComponent(workspace)}`;
-    assert.ok(resources.some((r) => r.uri === eventsUri), "缺少 events 资源");
+    assert.ok(
+      resources.some((r) => r.uri === eventsUri),
+      "缺少 events 资源",
+    );
 
     const readRes = await postJson(server.port, "/mcp", {
       jsonrpc: "2.0",
@@ -196,7 +207,9 @@ test("MCP HTTP: resources/list 含 events 资源，resources/read 可读事件�
       method: "resources/read",
       params: { uri: eventsUri },
     });
-    const contents = (readRes.body.result as { contents: Array<{ text: string }> }).contents;
+    const contents = (
+      readRes.body.result as { contents: Array<{ text: string }> }
+    ).contents;
     const parsed = JSON.parse(contents[0].text) as {
       events: unknown[];
       next_offset: number;
@@ -294,6 +307,12 @@ function requestRaw(
     status: number;
     text: string;
   }>();
+  // 兜底：极端情况下连接既不 end 也不报错时，避免测试永远 pending。
+  const guard = setTimeout(() => resolve({ status: 0, text: "" }), 10_000);
+  const done = (status: number, text: string) => {
+    clearTimeout(guard);
+    resolve({ status, text });
+  };
   const req = request(
     {
       host: "127.0.0.1",
@@ -308,12 +327,14 @@ function requestRaw(
     (res) => {
       let raw = "";
       res.on("data", (c: Buffer) => (raw += c.toString("utf8")));
-      res.on("end", () =>
-        resolve({ status: res.statusCode ?? 0, text: raw }),
-      );
+      res.on("end", () => done(res.statusCode ?? 0, raw));
+      // server 提前回 413 并断连时，客户端可能只触发 aborted/close 而不触发 end，
+      // 否则 promise 永不 settle（CI 上表现为 cancelledByParent）。
+      res.on("aborted", () => done(res.statusCode ?? 0, raw));
+      res.on("close", () => done(res.statusCode ?? 0, raw));
     },
   );
-  req.on("error", () => resolve({ status: 0, text: "" }));
+  req.on("error", () => done(0, ""));
   req.end(body);
   return promise;
 }
