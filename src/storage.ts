@@ -7,6 +7,7 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import path from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import Database from "better-sqlite3";
@@ -409,7 +410,9 @@ export function redactText(
 }
 
 type CbxDatabase = Database.Database;
-const databases = new Map<string, CbxDatabase>();
+// intentional-simple: Promise 缓存保证同 workspace 并发只创建一次连接；创建失败时 reject，
+// 不缓存坏 promise，允许下次调用重试。
+const databases = new Map<string, Promise<CbxDatabase>>();
 const SCHEMA_VERSION = 3;
 function databaseFile(workspace: string): string {
   return path.join(workspace, ".cbx", "state.sqlite");
@@ -460,21 +463,26 @@ function migrate(db: CbxDatabase): void {
 }
 async function database(workspaceInput: string): Promise<CbxDatabase> {
   const workspace = path.resolve(workspaceInput);
-  const cached = databases.get(workspace);
-  if (cached) return cached;
-  await mkdir(path.join(workspace, ".cbx"), { recursive: true });
-  const db = new Database(databaseFile(workspace));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  migrate(db);
-  const existing = databases.get(workspace);
-  if (existing) {
-    db.close();
-    return existing;
+  let promise = databases.get(workspace);
+  if (!promise) {
+    promise = (async (): Promise<CbxDatabase> => {
+      await mkdir(path.join(workspace, ".cbx"), { recursive: true });
+      const db = new Database(databaseFile(workspace));
+      db.pragma("journal_mode = WAL");
+      db.pragma("busy_timeout = 5000");
+      migrate(db);
+      await importLegacyData(workspace, db);
+      return db;
+    })();
+    databases.set(workspace, promise);
   }
-  databases.set(workspace, db);
-  await importLegacyData(workspace, db);
-  return db;
+  try {
+    return await promise;
+  } catch (error) {
+    // 创建失败时不缓存坏 promise，允许后续调用重试。
+    databases.delete(workspace);
+    throw error;
+  }
 }
 async function importLegacyData(
   workspace: string,
@@ -937,27 +945,41 @@ async function pruneDeliveryFailureArtifact(
   cutoff: number,
 ): Promise<number> {
   const file = path.join(workspace, ".cbx", "delivery-failures.ndjson");
-  let lines: string[];
+  const retained: string[] = [];
+  let removed = 0;
   try {
-    lines = (await readFile(file, "utf8")).split(/\r?\n/).filter(Boolean);
+    const readline = await import("node:readline");
+    const stream = createReadStream(file, { encoding: "utf8" });
+    try {
+      const reader = readline.createInterface({
+        input: stream,
+        crlfDelay: Infinity,
+      });
+      for await (const line of reader) {
+        if (!line) continue;
+        try {
+          const record = JSON.parse(line) as { at?: string; createdAt?: string };
+          const at = Date.parse(record.at ?? record.createdAt ?? "");
+          if (Number.isFinite(at) && at < cutoff) {
+            removed += 1;
+            continue;
+          }
+        } catch {
+          /* preserve malformed records for manual recovery */
+        }
+        retained.push(line);
+      }
+    } finally {
+      try {
+        stream.close();
+      } catch {
+        /* best effort */
+      }
+    }
   } catch (error) {
     if (isMissing(error)) return 0;
     throw error;
   }
-  let removed = 0;
-  const retained = lines.filter((line) => {
-    try {
-      const record = JSON.parse(line) as { at?: string; createdAt?: string };
-      const at = Date.parse(record.at ?? record.createdAt ?? "");
-      if (Number.isFinite(at) && at < cutoff) {
-        removed += 1;
-        return false;
-      }
-    } catch {
-      /* preserve malformed records for manual recovery */
-    }
-    return true;
-  });
   if (removed)
     await atomicWriteFile(
       file,
