@@ -280,6 +280,24 @@ document.querySelector('#btn-resume').addEventListener('click',async function(){
   catch(e){alert('恢复失败：'+(e instanceof Error?e.message:String(e)));}
   finally{btn.disabled=false;}
 });
+// 创建任务：POST /api/jobs（与 CLI `cbx start` 语义一致，后台执行）。
+document.querySelector('#btn-create').addEventListener('click',async function(){
+  var input=document.querySelector('#new-task');
+  var task=(input.value||'').trim();
+  if(!task){input.focus();return;}
+  var btn=this;btn.disabled=true;
+  try{
+    var ws=encodeURIComponent(currentWorkspace||'');
+    var res=await cbxPost('/api/jobs?workspace='+ws,{task:task});
+    if(!res.ok){var err=await res.json();throw new Error(err.error||('HTTP '+res.status));}
+    input.value='';
+    refresh();
+  }catch(e){alert('创建失败：'+(e instanceof Error?e.message:String(e)));}
+  finally{btn.disabled=false;}
+});
+document.querySelector('#new-task').addEventListener('keydown',function(e){
+  if(e.key==='Enter')document.querySelector('#btn-create').click();
+});
 loadWorkspaces().then(refresh);
 setInterval(refresh,1500);
 // 每秒刷新所有行耗时(不重新拉数据,仅前端算 elapsed)

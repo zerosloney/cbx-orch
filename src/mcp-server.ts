@@ -115,6 +115,12 @@ const tools = [
                   task: { type: "string" },
                   review_executor: { type: "string" },
                   skip_review: { type: "boolean" },
+                  depends_on: {
+                    type: "array",
+                    items: { type: "string" },
+                    description:
+                      "前置 stage name 数组（对应 CLI task_contract.stages.dependsOn）；前置失败时本 stage 标记 skipped",
+                  },
                 },
                 required: ["name", "executor", "task"],
               },
@@ -127,6 +133,13 @@ const tools = [
         isolated: { type: "boolean" },
         timeout_ms: { type: "number" },
         max_retries: { type: "number" },
+        max_turns: { type: "integer", minimum: 1 },
+        permission_mode: {
+          type: "string",
+          enum: ["default", "acceptEdits", "auto", "dontAsk"],
+        },
+        approval_before_run: { type: "boolean" },
+        dependency_guard: { type: "boolean" },
         keep_worktree: { type: "boolean" },
         approval_before_complete: { type: "boolean" },
         priority: { type: "number" },
@@ -391,12 +404,36 @@ async function callTool(
     // schema 声明 required，但 JSON-RPC 不强制 schema：缺 task 时 String(undefined) 会创建 "undefined" 垃圾任务。
     if (typeof args.task !== "string" || !args.task.trim())
       throw new Error("task 必须是非空字符串。");
-    const config = await loadConfig(root);
     if (
       args.approval_before_complete !== undefined &&
       typeof args.approval_before_complete !== "boolean"
     )
       throw new Error("approval_before_complete 必须是布尔值。");
+    if (
+      args.approval_before_run !== undefined &&
+      typeof args.approval_before_run !== "boolean"
+    )
+      throw new Error("approval_before_run 必须是布尔值。");
+    if (
+      args.dependency_guard !== undefined &&
+      typeof args.dependency_guard !== "boolean"
+    )
+      throw new Error("dependency_guard 必须是布尔值。");
+    if (
+      args.max_turns !== undefined &&
+      (!Number.isInteger(args.max_turns) || Number(args.max_turns) < 1)
+    )
+      throw new Error("max_turns 必须是正整数。");
+    if (
+      args.permission_mode !== undefined &&
+      !["default", "acceptEdits", "auto", "dontAsk"].includes(
+        String(args.permission_mode),
+      )
+    )
+      throw new Error(
+        "permission_mode 必须是 default/acceptEdits/auto/dontAsk 之一。",
+      );
+    const config = await loadConfig(root);
     const defaults = mergeConfig(config, {
       testCommand: args.test_command ? String(args.test_command) : undefined,
       review: typeof args.review === "boolean" ? args.review : undefined,
@@ -405,6 +442,19 @@ async function callTool(
         args.timeout_ms === undefined ? undefined : Number(args.timeout_ms),
       maxRetries:
         args.max_retries === undefined ? undefined : Number(args.max_retries),
+      maxTurns:
+        args.max_turns === undefined ? undefined : Number(args.max_turns),
+      permissionMode: args.permission_mode
+        ? String(args.permission_mode)
+        : undefined,
+      approvalBeforeRun:
+        typeof args.approval_before_run === "boolean"
+          ? args.approval_before_run
+          : undefined,
+      dependencyGuard:
+        typeof args.dependency_guard === "boolean"
+          ? args.dependency_guard
+          : undefined,
       keepWorktree:
         args.keep_worktree === undefined
           ? undefined
@@ -459,6 +509,9 @@ async function callTool(
                   task: value.task,
                   reviewExecutor: value.review_executor,
                   skipReview: value.skip_review,
+                  dependsOn: Array.isArray(value.depends_on)
+                    ? value.depends_on
+                    : undefined,
                 };
               })
             : rawContract.stages,
@@ -489,6 +542,7 @@ async function callTool(
       executor: defaults.executor,
       reviewExecutor: defaults.reviewExecutor,
       adaptive: defaults.adaptive,
+      dependencyGuard: defaults.dependencyGuard,
       allowUnsafePermissions: args.allow_unsafe_permissions === true,
     });
     await startBackground(root, job.jobId, "", Number(args.priority ?? 0));

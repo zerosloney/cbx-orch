@@ -1,6 +1,9 @@
 body{font:14px system-ui;margin:24px;background:#10131a;color:#e8edf5}
 h1{font-size:20px}h2{font-size:15px;margin:20px 0 8px;color:#9ecbff}
 .bar{padding:8px 12px;background:#171c26;border-radius:8px;margin-bottom:16px;font-size:13px}
+.bar .create{margin-left:16px;display:inline-flex;gap:6px;align-items:center}
+.bar .create input{flex:1;min-width:260px;padding:4px 8px;border-radius:4px;background:#0d1117;border:1px solid #2a3648;color:#e6edf3;font:inherit;font-size:12px}
+.bar .create input:focus{outline:none;border-color:#9ecbff}
 table{width:100%;border-collapse:collapse}
 td,th{padding:7px 8px;border-bottom:1px solid #2a3140;text-align:left;font-size:13px}
 tr.job{cursor:pointer}

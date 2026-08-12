@@ -232,6 +232,8 @@ node dist/src/cli.js retry JOB_ID --priority 10 --workspace .
 node dist/src/cli.js watch JOB_ID --ci --workspace .
 node dist/src/cli.js review-gate --workspace .          # 对工作区未提交改动跑独立审查（非零退出 = 有发现）
 node dist/src/cli.js stop-review-gate                   # Stop hook 入口（stdin 读 cwd，fail-open 契约）
+node dist/src/cli.js version                            # 输出版本号（等价 --version / -v）
+node dist/src/cli.js --help                             # 显示用法
 ```
 
 `cbx batch` 批量创建独立任务：`--task`/`--task-file` 可重复（可混用）；run 选项（`--executor`/`--review`/`--isolated` 等）透传到每个任务。`--max-batch N` 将批任务按 N 个一波分片入队（波间等上一波终态，不改变全局 `maxConcurrent`）；默认 0 = 一次全量入队。`--wait` 等待全部终态并输出成功/失败计数，超时（`--wait-timeout-ms`）返回未完成列表并以非零退出；批任务 job 与普通任务同构，可独立 `retry`/`continue`。
@@ -273,6 +275,10 @@ curl -X POST http://127.0.0.1:4173/api/jobs/<id>/approve # 批准等待中的任
 curl -X POST http://127.0.0.1:4173/api/jobs/<id>/continue # 续跑（body: {message, priority, refresh_baseline, extra_rounds}）
 curl -X POST http://127.0.0.1:4173/api/queue/pause # 暂停队列
 curl -X POST http://127.0.0.1:4173/api/queue/resume # 恢复队列
+
+# 创建任务（等价 CLI `cbx start`；body 支持 task 必填 + test_command/review/isolated/executor/max_turns/permission_mode/approval_before_run/dependency_guard 等 run 选项）
+
+curl -X POST http://127.0.0.1:4173/api/jobs -H "content-type: application/json" -d '{"task":"实现登录功能"}'
 
 # CI 模式：任务失败时返回非 0 退出码
 
@@ -391,7 +397,7 @@ MCP 还提供 `resources/list` 和 `resources/read`，可直接读取任务的 `
 
 非平凡任务可在 `cbx_start` 中传结构化 `task_contract`（目标、验收标准、非目标、约束、相关文件、决策与假设）。执行器会先生成 `understanding.json`；存在阻塞问题时任务以 `needs_fix / awaiting_clarification` 暂停。创建任务时还会记录 Git commit、branch、dirty 状态及 dirty 内容指纹。`isolated: true` 且创建基线包含未提交内容时，任务会在创建 worktree 前以 `needs_fix / dirty_baseline` 暂停，避免未提交内容被静默遗漏；请先提交或清理这些内容，确认当前基线符合预期后再以 `refresh_baseline: true` 继续。隔离 worktree 随后固定从确认过的 commit 创建。非隔离任务仅在 HEAD 或 dirty 内容指纹相对创建基线发生漂移时暂停，dirty 内容未变时可正常执行。`review_executor` 可指定独立审查 CLI，默认仍沿用 `executor`。
 
-`cbx_start` 还支持：`approval_before_complete`（测试+审查通过后，落 `done` 前再停一次审批门，对应 `.cbx.json` 的 `approval.beforeComplete`，批准入口同 `cbx approve`）；`adaptive`（对象，snake_case 字段 `enabled`/`max_rounds`/`manager_executor`，启用后由独立 manager executor 每轮决策跑哪个 stage，超出 `max_rounds` 触发 `needs_fix / adaptive_max_rounds` Human Gate，可用 `cbx_continue` 的 `extra_rounds` 续跑；`adaptive.enabled=true` 要求 `review=true`）。`cbx_continue` 支持 `extra_rounds`（1–100 整数，仅在 `max_rounds` Human Gate 等待时追加 adaptive 轮次）。
+`cbx_start` 还支持：`max_turns`（正整数）、`permission_mode`（`default`/`acceptEdits`/`auto`/`dontAsk`，`dontAsk` 需 `allow_unsafe_permissions: true`）、`approval_before_run`（执行前审批门，对应 `approval.beforeRun`）、`dependency_guard`（lockfile 哈希守卫）；`task_contract.stages[].depends_on`（前置 stage name 数组，对应 CLI 的 `dependsOn`）。`approval_before_complete`（测试+审查通过后，落 `done` 前再停一次审批门，对应 `.cbx.json` 的 `approval.beforeComplete`，批准入口同 `cbx approve`）；`adaptive`（对象，snake_case 字段 `enabled`/`max_rounds`/`manager_executor`，启用后由独立 manager executor 每轮决策跑哪个 stage，超出 `max_rounds` 触发 `needs_fix / adaptive_max_rounds` Human Gate，可用 `cbx_continue` 的 `extra_rounds` 续跑；`adaptive.enabled=true` 要求 `review=true`）。`cbx_continue` 支持 `extra_rounds`（1–100 整数，仅在 `max_rounds` Human Gate 等待时追加 adaptive 轮次）。
 
 `result.json` 包含 changed files、handback、`stages` 数组（每阶段 exit code 与 review verdict）、测试与验收摘要、基线信息、`humanGate`（人工等待状态）及 artifact SHA-256。最终交付仍应通过 `cbx_artifact` 或 MCP resources 读取并核对 `handback.md`、`complete.patch`、`test.log` 和 `review.md`，不要只根据状态元数据总结。
 

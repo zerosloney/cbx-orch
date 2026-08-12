@@ -32,6 +32,7 @@ import { runReviewGate, stopReviewGateHook } from "./review-gate.js";
 import { runTui, startWebUi, summarizeWorkspace } from "./ui.js";
 import { parseCliArgs, type CliArgs } from "./cli-args.js";
 import { runBatch } from "./batch.js";
+import { APP_VERSION } from "./version.js";
 import {
   isInteractive,
   renderExport,
@@ -63,8 +64,19 @@ function print(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
+const USAGE = `用法：cbx run|start|batch|ws|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|forget|purge|watch|ui|tui|review-gate|stop-review-gate ...
+选项：--help 显示本帮助；--version / -v 显示版本。`;
+
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
+  if (command === "help" || command === "--help" || command === "-h") {
+    console.log(USAGE);
+    return;
+  }
+  if (command === "version" || command === "--version" || command === "-v") {
+    console.log(APP_VERSION);
+    return;
+  }
   const parsed = parseCliArgs(rest);
   const workspace = parsed.option("--workspace", ".")!;
   if (["run", "start"].includes(command)) {
@@ -719,9 +731,7 @@ async function main(): Promise<void> {
     if (decision) process.stdout.write(JSON.stringify(decision) + "\n");
     return;
   }
-  console.log(
-    "用法：cbx run|start|batch|ws|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|forget|purge|watch|ui|tui|review-gate|stop-review-gate ...",
-  );
+  console.log(USAGE);
 }
 
 main().catch((error) => {

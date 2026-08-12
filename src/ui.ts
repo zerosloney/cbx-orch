@@ -10,13 +10,16 @@ import { fileURLToPath } from "node:url";
 import {
   approveJob,
   cancelJob,
+  createJob,
   forgetJobKeepWorktree,
   health,
   jobDir,
   listArtifacts,
   listJobs,
   listQueue,
+  loadConfig,
   loadState,
+  mergeConfig,
   pauseQueue,
   purgeJob,
   readArtifact,
@@ -738,7 +741,9 @@ export function createWebUiServer(
         return json(res, { workspaces: summaries, default: defaultWorkspace });
       }
       const ws = resolveWorkspace(url);
-      if (url.pathname === "/api/jobs") return json(res, await listJobs(ws));
+      // GET 才返回任务列表；POST 由下方写操作区块创建任务。
+      if (url.pathname === "/api/jobs" && req.method === "GET")
+        return json(res, await listJobs(ws));
       if (url.pathname === "/api/queue") return json(res, await listQueue(ws));
       if (url.pathname === "/healthz" || url.pathname === "/api/metrics")
         return json(res, await health(ws));
@@ -766,6 +771,94 @@ export function createWebUiServer(
       }
       // ---- 写操作（POST，需鉴权；SameSite=Strict cookie 阻止跨站携带，loopback 绑定 + HttpOnly 即够）----
       if (req.method === "POST") {
+        if (url.pathname === "/api/jobs") {
+          // 创建任务：与 CLI `cbx start` 语义一致（createJob + startBackground）。
+          const body = await readJsonBody(req);
+          if (typeof body.task !== "string" || !body.task.trim())
+            return json(res, { error: "task 必须是非空字符串。" }, 400);
+          const config = await loadConfig(ws);
+          const defaults = mergeConfig(config, {
+            testCommand:
+              typeof body.test_command === "string"
+                ? body.test_command
+                : undefined,
+            review: typeof body.review === "boolean" ? body.review : undefined,
+            isolated:
+              typeof body.isolated === "boolean" ? body.isolated : undefined,
+            timeoutMs:
+              body.timeout_ms === undefined
+                ? undefined
+                : Number(body.timeout_ms),
+            maxRetries:
+              body.max_retries === undefined ? undefined : Number(body.max_retries),
+            maxTurns:
+              body.max_turns === undefined ? undefined : Number(body.max_turns),
+            permissionMode:
+              typeof body.permission_mode === "string"
+                ? body.permission_mode
+                : undefined,
+            approvalBeforeRun:
+              typeof body.approval_before_run === "boolean"
+                ? body.approval_before_run
+                : undefined,
+            dependencyGuard:
+              typeof body.dependency_guard === "boolean"
+                ? body.dependency_guard
+                : undefined,
+            keepWorktree:
+              typeof body.keep_worktree === "boolean"
+                ? body.keep_worktree
+                : undefined,
+            executor:
+              typeof body.executor === "string" ? body.executor : undefined,
+            reviewExecutor:
+              typeof body.review_executor === "string"
+                ? body.review_executor
+                : undefined,
+            autoBranch:
+              typeof body.auto_branch === "boolean" ? body.auto_branch : undefined,
+            autoCommit:
+              typeof body.auto_commit === "boolean" ? body.auto_commit : undefined,
+            commitMessage:
+              typeof body.commit_message === "string"
+                ? body.commit_message
+                : undefined,
+          });
+          const created = await createJob({
+            workspace: ws,
+            task: body.task,
+            contextSnapshot:
+              typeof body.context_snapshot === "string"
+                ? body.context_snapshot
+                : undefined,
+            testCommand: defaults.testCommand,
+            review: defaults.review,
+            isolated: defaults.isolated,
+            permissionMode: defaults.permissionMode,
+            maxTurns: defaults.maxTurns,
+            timeoutMs: defaults.timeoutMs,
+            maxRetries: defaults.maxRetries,
+            keepWorktree: defaults.keepWorktree,
+            reviewRules: config.reviewRules,
+            approvalBeforeRun: defaults.approvalBeforeRun,
+            autoBranch: defaults.autoBranch,
+            autoCommit: defaults.autoCommit,
+            commitMessage: defaults.commitMessage,
+            executor: defaults.executor,
+            reviewExecutor: defaults.reviewExecutor,
+            adaptive: defaults.adaptive,
+            trustMode: defaults.trustMode,
+            dependencyGuard: defaults.dependencyGuard,
+            allowUnsafePermissions: body.allow_unsafe_permissions === true,
+          });
+          await startBackground(
+            ws,
+            created.jobId,
+            "",
+            body.priority === undefined ? 0 : Number(body.priority),
+          );
+          return json(res, { job_id: created.jobId, status: "queued" }, 201);
+        }
         if (url.pathname === "/api/queue/pause")
           return json(res, await pauseQueue(ws));
         if (url.pathname === "/api/queue/resume")

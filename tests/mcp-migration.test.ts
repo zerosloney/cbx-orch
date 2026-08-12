@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -319,6 +319,109 @@ test("MCP: cbx_continue rejects non-boolean refresh_baseline", async () => {
     message: string;
   };
   assert.match(err.message, /refresh_baseline 必须是布尔值/);
+});
+
+test("MCP: cbx_start 透传 max_turns/permission_mode/approval_before_run/dependency_guard 与 stage depends_on", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-start-"));
+  // 预置 paused 队列：cbx_start 入队后 dispatch 不会派生 worker，避免多进程并发写
+  // 同一 SQLite（Windows 上偶发 SQLITE_IOERR_TRUNCATE）。仅创建任务、验证 context 落盘。
+  await mkdir(path.join(workspace, ".cbx"), { recursive: true });
+  await writeFile(
+    path.join(workspace, ".cbx", "queue.json"),
+    JSON.stringify({
+      maxConcurrent: 1,
+      paused: true,
+      entries: [],
+      updatedAt: new Date().toISOString(),
+    }),
+    "utf8",
+  );
+  const responses = await mcpCall(
+    {
+      jsonrpc: "2.0",
+      id: 14,
+      method: "tools/call",
+      params: {
+        name: "cbx_start",
+        arguments: {
+          task: "G1 参数透传",
+          workspace,
+          max_turns: 12,
+          permission_mode: "auto",
+          approval_before_run: true,
+          dependency_guard: true,
+          task_contract: {
+            stages: [
+              { name: "api", executor: "codebuddy", task: "后端" },
+              {
+                name: "ui",
+                executor: "codebuddy",
+                task: "前端",
+                depends_on: ["api"],
+              },
+            ],
+          },
+        },
+      },
+    },
+    { workspace },
+  );
+  assert.equal(responses.length, 1);
+  const result = (responses[0] as Record<string, unknown>).result as {
+    content: Array<{ text: string }>;
+  };
+  const parsed = JSON.parse(result.content[0].text) as { job_id: string };
+  // 只读 context.json 文件断言参数落盘（不打开 SQLite，父进程不参与并发写）。
+  const ctx = JSON.parse(
+    await readFile(
+      path.join(workspace, ".cbx", "jobs", parsed.job_id, "context.json"),
+      "utf8",
+    ),
+  ) as {
+    maxTurns: number;
+    permissionMode: string;
+    approvalBeforeRun: boolean;
+    dependencyGuard: boolean;
+    taskContract?: {
+      stages?: Array<{ dependsOn?: string[] }>;
+    };
+  };
+  assert.equal(ctx.maxTurns, 12);
+  assert.equal(ctx.permissionMode, "auto");
+  assert.equal(ctx.approvalBeforeRun, true);
+  assert.equal(ctx.dependencyGuard, true);
+  // stage 依赖透传（CLI taskContract.stages[].dependsOn 等价字段）
+  assert.equal(ctx.taskContract?.stages?.[1]?.dependsOn?.join(","), "api");
+});
+
+test("MCP: cbx_start 拒绝非法新参数类型", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-start-bad-"));
+  const cases: Array<Record<string, unknown>> = [
+    { max_turns: 0 },
+    { max_turns: "12" },
+    { permission_mode: "bogus" },
+    { approval_before_run: "false" },
+    { dependency_guard: "false" },
+  ];
+  for (const extra of cases) {
+    const responses = await mcpCall(
+      {
+        jsonrpc: "2.0",
+        id: 15,
+        method: "tools/call",
+        params: {
+          name: "cbx_start",
+          arguments: { task: "非法参数", workspace, ...extra },
+        },
+      },
+      { workspace },
+    );
+    assert.equal(responses.length, 1, `非法参数 ${JSON.stringify(extra)} 应报错`);
+    const error = (responses[0] as Record<string, unknown>).error as
+      | { message: string }
+      | undefined;
+    assert.ok(error, `非法参数 ${JSON.stringify(extra)} 应返回 error`);
+  }
 });
 
 test("MCP: cbx_cancel on a non-existent job does not crash", async () => {

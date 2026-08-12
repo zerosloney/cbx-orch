@@ -684,6 +684,33 @@ test("HTTP: POST continue 携带 message 且非法 extra_rounds 报 400", async 
   });
 });
 
+test("HTTP: POST /api/jobs 创建任务并后台执行（缺 task → 400）", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-create-"));
+  await withServer(workspace, undefined, async (port) => {
+    // 缺 task → 400
+    const bad = await fetch(`http://127.0.0.1:${port}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(bad.status, 400);
+    const badBody = (await bad.json()) as { error: string };
+    assert.match(badBody.error, /task 必须是非空字符串/);
+    // 创建任务（携带可选 run 选项透传）
+    const res = await fetch(`http://127.0.0.1:${port}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task: "UI 创建任务", max_turns: 7, review: false }),
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { job_id: string; status: string };
+    assert.equal(body.status, "queued");
+    const state = await loadState(workspace, body.job_id);
+    assert.equal(state.jobId, body.job_id);
+    assert.equal(state.status, "queued");
+  });
+});
+
 test("HTTP: 配置 token 后正确 Bearer 凭证放行 API", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-authok-"));
   await withServer(workspace, "secret", async (port) => {

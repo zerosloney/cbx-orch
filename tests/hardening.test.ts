@@ -567,3 +567,24 @@ test("cbx files 列出任务的 artifact 清单而非 result.json 内容", async
     "cbx files 不应输出 result.json 正文（status 字段）",
   );
 });
+
+test("cbx version/--version 输出版本号，--help 输出用法", async () => {
+  const cliPath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "src",
+    "cli.js",
+  );
+  for (const arg of ["version", "--version", "-v"]) {
+    const out = spawnSync(process.execPath, [cliPath, arg], {
+      encoding: "utf8",
+    });
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(out.stdout.trim(), /^\d+\.\d+\.\d+/);
+  }
+  const help = spawnSync(process.execPath, [cliPath, "--help"], {
+    encoding: "utf8",
+  });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /用法：cbx/);
+});
