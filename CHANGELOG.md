@@ -4,6 +4,13 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## 0.11.0 — 2026-08-09
 
+## 0.12.1 — 2026-08-12
+
+- Fix: storage `database()` 改 Promise 缓存，并发调用 await 同一 promise 保证同 workspace 单连接（reject 清缓存允许重试），根治并发建重复连接；`pruneDeliveryFailureArtifact` 改 `createReadStream` + `readline` 逐行流式，避免大 outbox 整文件读内存 OOM，cutoff 前删后留语义不变。
+- Fix: MCP SSE `notifications/resources/updated` 帧加 `id`（闭包内 eventSeq 递增）+ `retry:3000`，支持 Last-Event-ID 恢复与重连间隔提示；`cbx_review` 先 `loadState` 确认 job 存在再读 review.md，区分 job 不存在（E_NOT_FOUND）vs review 未产出（ENOENT）。
+- Fix: Web UI EventSource 加 `onerror` 可见性提示 + `beforeunload` 关闭连接（防 SPA 卸载泄漏；ES 为全局单例，switchWorkspace 不重建）；`<html lang="zh-CN">`、`<th scope="col">`、全局 `:focus-visible` 焦点样式提升可访问性。
+- Fix: 修正 v0.12.0 release 版本同步遗漏（package-lock + 3 个 plugin manifest + `interfaces.test` 去 brittle 改 semver 格式校验），manifest 一致性测试恢复绿色。
+
 ## 0.12.0 — 2026-08-12
 
 - Security: Web UI `esc()` 补引号转义堵属性上下文 XSS；SSE 事件 status 进 class 前转义。MCP `cbx_start`/`cbx_continue` 的 `context_snapshot` 加 65536 字符上限防 prompt 膨胀。MCP HTTP 加 CORS/OPTIONS 预检，支持浏览器 MCP 客户端。Web UI 静态响应补 `nosniff`/`no-store`。
