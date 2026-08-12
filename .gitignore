@@ -22,3 +22,5 @@ sbom.cdx.json
 coverage.txt
 test-results.txt
 cbx-debug.mjs
+architecture-review/
+.trae-html-share-packages/
