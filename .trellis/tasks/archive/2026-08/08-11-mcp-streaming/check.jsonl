@@ -1,2 +1,0 @@
-{"file": ".trellis/spec/backend/mcp-server.md", "reason": "校验协议版本/HTTP 模式/subscribe 契约是否与实现一致、stdio 契约未被破坏"}
-{"file": ".trellis/spec/backend/index.md", "reason": "校验 backend 层 HTTP 服务安全约束（loopback/token）与事件推送边界"}

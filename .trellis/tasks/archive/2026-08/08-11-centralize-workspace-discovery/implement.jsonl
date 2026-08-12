@@ -1,2 +1,0 @@
-{"file": ".trellis/spec/backend/mcp-server.md", "reason": "MCP 工具清单与 cbx_list_workspaces 契约（tools/list 需追加、工具输入 root 语义）"}
-{"file": ".trellis/spec/backend/orchestration-architecture.md", "reason": "workspace 层职责划分：发现发生在 CLI 层，Web UI 消费已解析列表（支撑不改 ui.ts 的边界决策）"}

@@ -1,2 +1,0 @@
-{"file": ".trellis/spec/backend/mcp-server.md", "reason": "MCP 契约基础：工具形状、resources 约定、错误传播——HTTP 模式不得破坏"}
-{"file": ".trellis/spec/backend/orchestration-architecture.md", "reason": "事件源（events.ndjson + nextEventSeq）与 UI SSE 回放/订阅模式，供 HTTP 推送复用"}
