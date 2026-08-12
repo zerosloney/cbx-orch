@@ -7,6 +7,7 @@ import { jobDir } from "./state.js";
 import { listArtifacts } from "./artifacts.js";
 import { criterionDefinitions, reconcileVerifiedProgress, type StructuredAudit, type VerifiedProgress } from "./progress.js";
 import { structuredAuditRequested, evidenceHashes } from "./evidence.js";
+import { estimateTokens } from "./context-pack.js";
 import type { JobState } from "./types.js";
 
 export async function writeResult(workspace: string, jobId: string, state: JobState): Promise<void> {
@@ -18,6 +19,8 @@ export async function writeResult(workspace: string, jobId: string, state: JobSt
   const text = async (name: string): Promise<string | null> => existsSync(path.join(directory, name)) ? readFile(path.join(directory, name), "utf8") : null;
   const handback = await text("handback.md");
   const status = await text("git-status.txt");
+  const agentLog = await text("agent.log");
+  const estimatedTokens = agentLog !== null ? estimateTokens(agentLog) : null;
   const artifactHashes: Record<string, string> = {};
   const stableEvidence = new Set(["request.md", "context-snapshot.md", "context-contract.json", "understanding.json", "handback.md", "review.md", "audit.json", "verified-progress.json", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt"]);
   for (const file of files) {
@@ -38,6 +41,7 @@ export async function writeResult(workspace: string, jobId: string, state: JobSt
   });
   await saveJson(path.join(directory, "result.json"), {
     jobId, status: state.status, phase: state.phase, attempt: state.attempt,
+    estimatedTokens,
     error: state.error ?? null, executorExitCode: state.executorExitCode ?? null,
     testExitCode: state.testExitCode ?? null, reviewVerdict: state.reviewVerdict ?? null,
     baseCommit: context.baseCommit ?? null, baseBranch: context.baseBranch ?? null, baseDirty: context.baseDirty ?? null,

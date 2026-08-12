@@ -99,6 +99,7 @@ if (jobDir) {
     }
     if (process.env.FAKE_REVIEW_MUTATE === "1") await writeFile(process.cwd() + "/reviewer-change.txt", "untested reviewer change\\n");
   } else {
+    console.log("fake executor output");
     await writeFile(jobDir + "/handback.md", "fake handback\\n");
     if (process.env.FAKE_MUTATE_DEP === "1") await writeFile(process.cwd() + "/package.json", '{"name":"modified"}', "utf8");
     await writeFile(process.cwd() + "/fake-change.txt", "changed\\n");

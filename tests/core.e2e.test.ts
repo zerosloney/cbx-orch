@@ -100,6 +100,10 @@ test("end-to-end success runs fake agent, test, and review", async () => {
   assert.equal(result.status, "done");
   assert.ok(result.changedFiles.includes("fake-change.txt"));
   assert.equal(result.handback.trim(), "fake handback");
+  assert.ok(
+    typeof result.estimatedTokens === "number" && result.estimatedTokens > 0,
+    "result.json should include a positive estimatedTokens from agent.log",
+  );
   assert.match(result.artifactHashes["complete.patch"], /^[a-f0-9]{64}$/);
   assert.equal(result.acceptanceEvidence[0].status, "evidence_available");
   assert.equal(result.audit.completion, "complete");
