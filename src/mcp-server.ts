@@ -992,10 +992,13 @@ export async function runMcpHttpServer(opts: {
       let tooLarge = false;
       try {
         for await (const chunk of req) {
-          raw += chunk;
-          if (Buffer.byteLength(raw, "utf8") > maxBodyBytes) {
-            tooLarge = true;
-            break;
+          // 超限后停止累积但仍排空剩余 body：提前 break 会让连接滞留（服务器停止读取、
+          // 客户端仍在发送），server.close() 挂起；直接 destroy 则 RST 丢失已写出的 413 响应。
+          if (!tooLarge) {
+            raw += chunk;
+            if (Buffer.byteLength(raw, "utf8") > maxBodyBytes) {
+              tooLarge = true;
+            }
           }
         }
       } catch {
