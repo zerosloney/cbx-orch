@@ -369,6 +369,8 @@ document.querySelector('#new-task').addEventListener('keydown',function(e){
   if(e.key==='Enter')document.querySelector('#btn-create').click();
 });
 loadWorkspaces().then(refresh);
+// intentional-simple: 全量轮询 refresh 与 SSE 增量推送并存——SSE 写入 DOM 后 refresh 会重建，存在冗余渲染。
+// 单用户本地 UI 的带宽/CPU 可忽略；升级路径：SSE 只更新内存状态，由轻量定时器统一渲染。
 setInterval(refresh,1500);
 // 每秒刷新所有行耗时(不重新拉数据,仅前端算 elapsed)
 function refreshElapsedRows(){

@@ -298,6 +298,8 @@ export async function loadRuntimeConfig(
         ))
     )
       throw new Error("governance.redactFields 必须是最多 100 个非空字符串。");
+    // intentional-simple: redactPatterns 只做语法校验（new RegExp 不抛即过），无 catastrophic backtracking 检测；
+    // 配置来自工作区所有者（同信任域），ReDoS 风险低。升级路径：引入 safe-regex 类启发式检测。
     if (value.redactPatterns !== undefined) {
       if (
         !Array.isArray(value.redactPatterns) ||
@@ -688,6 +690,8 @@ export async function loadPersistedQueue<T>(
     fallback,
   )) as T;
 }
+// intentional-simple: queue_state 整 blob 读写（每次入队/状态变更全量反序列化+序列化+写回）。
+// 单 workspace 队列规模小（通常 <100 entry），开销可忽略；升级路径：queue 条目独立行存储 + 增量更新。
 export async function savePersistedQueue(
   workspace: string,
   value: unknown,
@@ -1234,6 +1238,8 @@ async function reclaimLock(file: string): Promise<boolean> {
   return true;
 }
 
+// intentional-simple: SIGKILL（不可捕获信号）后锁文件残留，依赖 staleAfterMs（默认 30s）回收——
+// 文件锁固有局限；完全消除需改用 flock 或 SQLite 事务（跨进程互斥由内核/DB 保证）。
 export async function withFileLock<T>(
   file: string,
   action: () => Promise<T>,

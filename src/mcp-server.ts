@@ -1001,6 +1001,8 @@ export async function runMcpHttpServer(opts: {
       // MCP JSON-RPC 请求远小于 1MB；超限按异常/恶意客户端拒，避免无界累积撑爆进程内存
       // （与 captureAsync 的 BoundedOutput 同一动机——D10 加固的对偶面）。
       const maxBodyBytes = 1 * 1024 * 1024;
+      // intentional-simple: 字符串拼接 raw += chunk 在大量小 chunk 时 O(n²)；1MB 上限下可接受。
+      // 升级路径：chunks: Buffer[] + Buffer.concat（与 ui.ts readJsonBody 一致）。
       let raw = "";
       let tooLarge = false;
       try {
