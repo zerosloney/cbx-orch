@@ -4,7 +4,15 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## 0.11.0 — 2026-08-09
 
-## Unreleased
+## 0.12.0 — 2026-08-12
+
+- Security: Web UI `esc()` 补引号转义堵属性上下文 XSS；SSE 事件 status 进 class 前转义。MCP `cbx_start`/`cbx_continue` 的 `context_snapshot` 加 65536 字符上限防 prompt 膨胀。MCP HTTP 加 CORS/OPTIONS 预检，支持浏览器 MCP 客户端。Web UI 静态响应补 `nosniff`/`no-store`。
+- Security: MCP `workspace` 参数加 `validateWorkspace` 边界校验（非根 + 存在），拒绝任意路径操作。
+- Fix: `logJobEvent` 补 fsync，job 审计事件流在系统级崩溃后可恢复（events.ndjson 无 SQLite 副本）。
+- Fix: `listPersistedStates` 单条坏 state 容错跳过，不拖垮 listJobs/health。`startEventTailer` 文件截断时清空 buffer 防事件流错位。MCP SSE 连接全断时停 tailer 防 interval 泄漏。
+- Fix: `withFileLock` 的 `reclaimLock` 在 rename 后重新校验 pid，缩小 TOCTOU 双持有窗口（活进程的锁放回，不误回收）。
+- Improvement: CLI/TUI 表格 `displayWidth` 改按码点 + East Asian Wide 区块计列宽，中文任务名/phase 不再对齐错位。MCP `initialize` 的 protocolVersion 按规范协商（客户端版本命中支持集合则采纳）。
+- Docs: governance 块（脱敏/retention/prune）补 15 例测试，原错位的 dispatch 测试归并 reliability。`mcp-server.md` 的 `extra_rounds` 文档对齐代码语义。覆盖率阈值 66/43/67 → 68/46/70（实测 70.4/48.8/72）。
 
 - Feature: MCP streamable HTTP 传输。新增 `cbx mcp --http [--port] [--host] [--token]` 模式,协议升级 2025-06-18,单 endpoint `POST /mcp` + `GET /mcp`(SSE 承载服务端推送),仅绑定 loopback、token 鉴权(与 `cbx ui` 同源)。启用 `resources/subscribe` + `notifications/resources/updated`:订阅 `cbx://job/<id>/events` 后,任务事件变化实时推送(通知为变更信号,数据经 `resources/read` 读增量 `{events, next_offset}`;订阅时建基线,此前事件不算增量)。stdio 模式保持默认与协议 2024-11-05,完全向后兼容;19 个工具与 resources 契约不变。零依赖(Node 原生 http + 手写 SSE,对齐 `cbx ui`)。
 - Test: 新增 `tests/mcp-http.test.ts`(6 例:initialize 2025-06-18+subscribe、tools/list 19 工具、events 资源 list/read、订阅→事件→updated 推送、非 loopback 拒绝、token 401/200)。总计 469 个测试全过。

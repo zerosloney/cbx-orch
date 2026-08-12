@@ -567,6 +567,7 @@ function startEventTailer(
       if (s.size === size) return;
       if (s.size < size) {
         size = s.size;
+        buffer = "";
         return;
       }
       const fd = await open(eventsFile, "r");

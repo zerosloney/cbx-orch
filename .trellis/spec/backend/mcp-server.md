@@ -42,7 +42,7 @@ Clients read `structuredContent`. Rules:
 |------|---------|-------------------------------|
 | `cbx_start` | `task` (required), `task_contract`, `test_command`, `review`, `isolated`, `timeout_ms`, `max_retries`, `approval_before_complete`, `executor`, `review_executor`, `adaptive` (snake_case: `max_rounds`/`manager_executor`), `allow_unsafe_permissions` | `{ job_id, status: "queued" }` |
 | `cbx_logs` | `job_id`, `since?` (0 = full) | `{ job_id, events, next_offset }` |
-| `cbx_continue` | `job_id`, `message?`, `context_snapshot?`, `refresh_baseline?`, `extra_rounds?` (1..100), `priority?` | `{ job_id, status: "queued" }` |
+| `cbx_continue` | `job_id`, `message?`, `context_snapshot?`, `refresh_baseline?`, `extra_rounds?` (可选，默认 0；仅 max_rounds Human Gate 时生效；传入时必须是 1..100), `priority?` | `{ job_id, status: "queued" }` |
 | `cbx_approve` | `job_id` | JobState; if `status === "queued"` the server calls `startBackground` (approval-then-launch) |
 | `cbx_review_gate` | `workspace?`, `executor?`, `timeout_ms?` | `{ pass, reason, verdict }` |
 | `cbx_clean` | `job_id`, `workspace?` | `{ job_id, cleaned: boolean }` — idempotent; no worktree record → `cleaned: false` (matches CLI `cbx clean`), does not throw |

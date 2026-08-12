@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
 import { createServer, type ServerResponse } from "node:http";
+import path from "node:path";
 import {
   approveJob,
   cancelJob,
@@ -22,6 +23,7 @@ import {
   retryQueueJob,
   startBackground,
   type TaskContract,
+  validateWorkspace,
 } from "./core.js";
 import { runReviewGate } from "./review-gate.js";
 import { constantTimeEqual } from "./storage.js";
@@ -49,7 +51,9 @@ function text(value: unknown): unknown {
 }
 // intentional-simple: workspace 三级回退 args → env → cwd。env 单值，不处理多 workspace 切换。
 function workspace(args: Record<string, unknown>): string {
-  return String(args.workspace ?? process.env.CBX_WORKSPACE ?? ".");
+  const resolved = path.resolve(String(args.workspace ?? process.env.CBX_WORKSPACE ?? "."));
+  validateWorkspace(resolved);
+  return resolved;
 }
 
 function adaptiveOverride(
@@ -76,6 +80,13 @@ function adaptiveOverride(
     maxRounds: raw.max_rounds as number | undefined,
     managerExecutor: raw.manager_executor as string | undefined,
   };
+}
+
+function optionalBoundedString(value: unknown, max: number, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  const s = String(value);
+  if (s.length > max) throw new Error(`${field} 超过 ${max} 字符上限。`);
+  return s;
 }
 
 const tools = [
@@ -535,10 +546,7 @@ async function callTool(
     const job = await createJob({
       workspace: root,
       task: args.task,
-      contextSnapshot:
-        args.context_snapshot === undefined
-          ? undefined
-          : String(args.context_snapshot),
+      contextSnapshot: optionalBoundedString(args.context_snapshot, 65_536, "context_snapshot"),
       taskContract,
       testCommand: defaults.testCommand,
       review: defaults.review,
@@ -575,6 +583,7 @@ async function callTool(
     return { job_id: id, review: await readArtifact(root, id, "review.md") };
   }
   if (name === "cbx_continue") {
+    // 未传 extra_rounds 默认 0 = 不追加轮次；仅 max_rounds gate 下 extraRounds>0 才扩展轮次。
     if (
       args.extra_rounds !== undefined &&
       (!Number.isInteger(args.extra_rounds) ||
@@ -592,9 +601,7 @@ async function callTool(
       id,
       String(args.message ?? "请根据 review.md 修复问题。"),
       Number(args.priority ?? 0),
-      args.context_snapshot === undefined
-        ? undefined
-        : String(args.context_snapshot),
+      optionalBoundedString(args.context_snapshot, 65_536, "context_snapshot"),
       args.refresh_baseline === true,
       Number(args.extra_rounds ?? 0),
     );
