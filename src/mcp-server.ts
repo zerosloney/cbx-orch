@@ -89,6 +89,11 @@ function optionalBoundedString(value: unknown, max: number, field: string): stri
   return s;
 }
 
+function optionalBoolean(args: Record<string, unknown>, field: string): void {
+  if (args[field] !== undefined && typeof args[field] !== "boolean")
+    throw new Error(`${field} 必须是布尔值。`);
+}
+
 const tools = [
   {
     name: "cbx_start",
@@ -415,36 +420,12 @@ async function callTool(
     // schema 声明 required，但 JSON-RPC 不强制 schema：缺 task 时 String(undefined) 会创建 "undefined" 垃圾任务。
     if (typeof args.task !== "string" || !args.task.trim())
       throw new Error("task 必须是非空字符串。");
-    if (
-      args.approval_before_complete !== undefined &&
-      typeof args.approval_before_complete !== "boolean"
-    )
-      throw new Error("approval_before_complete 必须是布尔值。");
-    if (
-      args.approval_before_run !== undefined &&
-      typeof args.approval_before_run !== "boolean"
-    )
-      throw new Error("approval_before_run 必须是布尔值。");
-    if (
-      args.dependency_guard !== undefined &&
-      typeof args.dependency_guard !== "boolean"
-    )
-      throw new Error("dependency_guard 必须是布尔值。");
-    if (
-      args.keep_worktree !== undefined &&
-      typeof args.keep_worktree !== "boolean"
-    )
-      throw new Error("keep_worktree 必须是布尔值。");
-    if (
-      args.auto_branch !== undefined &&
-      typeof args.auto_branch !== "boolean"
-    )
-      throw new Error("auto_branch 必须是布尔值。");
-    if (
-      args.auto_commit !== undefined &&
-      typeof args.auto_commit !== "boolean"
-    )
-      throw new Error("auto_commit 必须是布尔值。");
+    optionalBoolean(args, "approval_before_complete");
+    optionalBoolean(args, "approval_before_run");
+    optionalBoolean(args, "dependency_guard");
+    optionalBoolean(args, "keep_worktree");
+    optionalBoolean(args, "auto_branch");
+    optionalBoolean(args, "auto_commit");
     if (
       args.max_turns !== undefined &&
       (!Number.isInteger(args.max_turns) || Number(args.max_turns) < 1)
@@ -482,17 +463,21 @@ async function callTool(
           ? args.dependency_guard
           : undefined,
       keepWorktree:
-        args.keep_worktree === undefined
-          ? undefined
-          : args.keep_worktree,
+        typeof args.keep_worktree === "boolean"
+          ? args.keep_worktree
+          : undefined,
       approvalBeforeComplete:
         typeof args.approval_before_complete === "boolean"
           ? args.approval_before_complete
           : undefined,
       autoBranch:
-        args.auto_branch === undefined ? undefined : args.auto_branch,
+        typeof args.auto_branch === "boolean"
+          ? args.auto_branch
+          : undefined,
       autoCommit:
-        args.auto_commit === undefined ? undefined : args.auto_commit,
+        typeof args.auto_commit === "boolean"
+          ? args.auto_commit
+          : undefined,
       commitMessage: args.commit_message
         ? String(args.commit_message)
         : undefined,
