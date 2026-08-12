@@ -383,6 +383,7 @@ function refreshElapsedRows(){
 setInterval(refreshElapsedRows,1000);
 var stream=document.querySelector('#stream');
 	var es=new EventSource('/events',{withCredentials:true});
+	es.onerror=function(e){console.warn('cbx-ui: SSE 连接异常，浏览器将自动重连',e);};
 es.onmessage=function(e){
   var d=JSON.parse(e.data);
   if(d.type==='heartbeat'||d.type==='connected')return;
@@ -402,3 +403,4 @@ es.onmessage=function(e){
   stream.scrollTop=stream.scrollHeight;
   while(stream.children.length>200)stream.removeChild(stream.firstChild);
 };
+if(window.addEventListener){window.addEventListener('beforeunload',function(){es.close();});}

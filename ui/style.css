@@ -75,3 +75,4 @@ pre.art-view{white-space:pre-wrap;background:#080b11;padding:10px;border-radius:
 .pulse-dead{background:#ff8d8d}
 .pulse-unknown{background:#888}
 .cmd{font-family:ui-monospace,monospace;font-size:11px;color:#9ecbff;background:#080b11;padding:6px 8px;border-radius:4px;word-break:break-all;margin-top:4px}
+:focus-visible{outline:2px solid #9ecbff;outline-offset:2px}
