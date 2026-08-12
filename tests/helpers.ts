@@ -225,6 +225,7 @@ export {
 } from "../src/storage.js";
 export {
   BUILTIN_EXECUTORS,
+  findExecutable,
   resolveExecutor,
 } from "../src/executors/builtin.js";
 export { parseNextAction } from "../src/adaptive-manager.js";

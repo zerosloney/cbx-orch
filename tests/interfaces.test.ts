@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -14,7 +14,7 @@ import {
   loadState,
   readArtifact,
 } from "../src/core.js";
-import { createWebUiServer } from "../src/ui.js";
+import { createWebUiServer, readAgentLogIncremental } from "../src/ui.js";
 import {
   finishSpan,
   flushDeliveries,
@@ -262,6 +262,66 @@ test("Web UI exposes job detail APIs (timeline / executor / agent.log)", async (
   } finally {
     await closeServer(server);
   }
+});
+
+test("readAgentLogIncremental truncates tail beyond maxBytes at line boundary", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-log-trunc-"));
+  const jobId = "trunc-job";
+  const jobDirPath = path.join(workspace, ".cbx", "jobs", jobId);
+  await mkdir(jobDirPath, { recursive: true });
+  const logFile = path.join(jobDirPath, "agent.log");
+
+  // 1. 大文件 + 末尾换行：truncated=true，content 是尾部 maxBytes 子串，结尾完整行
+  const line = "x".repeat(99) + "\n"; // 100 字节/行
+  const full = line.repeat(3000); // 300_000 字节 > 256*1024
+  await writeFile(logFile, full, "utf8");
+  const chunk = await readAgentLogIncremental(workspace, jobId, 0, 256 * 1024);
+  assert.equal(chunk.truncated, true);
+  assert.ok(Buffer.byteLength(chunk.content, "utf8") <= 256 * 1024);
+  assert.ok(full.endsWith(chunk.content), "content should be the tail of full");
+  assert.ok(chunk.content.endsWith("\n"), "content should end at complete line");
+  // 文件末尾就是 \n，没有半行回退，nextOffset 应直达 EOF
+  assert.equal(
+    chunk.nextOffset,
+    (full.length - 256 * 1024) + Buffer.byteLength(chunk.content, "utf8"),
+  );
+
+  // 2. 大文件 + tail 内有换行但末尾无换行：退到最后一个 \n，丢弃半行
+  const half = line.repeat(2700) + "trailing-partial-without-newline";
+  await writeFile(logFile, half, "utf8");
+  const halfChunk = await readAgentLogIncremental(workspace, jobId, 0, 256 * 1024);
+  assert.equal(halfChunk.truncated, true);
+  assert.ok(halfChunk.content.endsWith("\n"), "should back off to last newline");
+  assert.ok(
+    !half.endsWith(halfChunk.content),
+    "dropped half-line must not appear in content",
+  );
+
+  // 3. 小文件：truncated=false，全量返回
+  const smallWs = await mkdtemp(path.join(os.tmpdir(), "cbx-log-small-"));
+  const smallDir = path.join(smallWs, ".cbx", "jobs", "small-job");
+  await mkdir(smallDir, { recursive: true });
+  await writeFile(path.join(smallDir, "agent.log"), "short content\n", "utf8");
+  const small = await readAgentLogIncremental(smallWs, "small-job");
+  assert.equal(small.truncated, false);
+  assert.equal(small.content, "short content\n");
+
+  // 4. since>0 增量续读：从 nextOffset 续读，拿到上一步丢弃的半行尾巴
+  const inc = await readAgentLogIncremental(
+    workspace,
+    jobId,
+    halfChunk.nextOffset,
+    256 * 1024,
+  );
+  assert.ok(
+    inc.content.includes("trailing-partial-without-newline"),
+    "incremental read should return the previously-dropped tail",
+  );
+  assert.equal(inc.nextOffset, half.length);
+
+  // 5. 文件不存在：空返回，不抛
+  const missing = await readAgentLogIncremental(workspace, "no-such-job");
+  assert.deepEqual(missing, { content: "", nextOffset: 0, truncated: false });
 });
 
 test("MCP initialize, tools, resources and errors preserve request ids", async () => {

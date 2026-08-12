@@ -36,6 +36,7 @@ import {
   loadPersistedState,
   savePersistedStateAndQueue,
   BUILTIN_EXECUTORS,
+  findExecutable,
   resolveExecutor,
   parseNextAction,
   CONTEXT_PACK_MAX_CHARS,
@@ -461,3 +462,80 @@ test("notifications.filters accepts valid config and rejects invalid shapes", as
   );
   assert.equal((await loadConfig(workspace)).notifications?.filters, undefined);
 });
+
+test("findExecutable wraps .ps1/.js/.mjs/.cjs paths via env override and passes plain binaries as-is", () => {
+  const spec = BUILTIN_EXECUTORS[0]; // codebuddy
+  const envVar = spec.envVar;
+  const saved = process.env[envVar];
+  try {
+    // .ps1 → powershell.exe 包装
+    process.env[envVar] = path.join(os.tmpdir(), "fake-codebuddy.ps1");
+    assert.deepEqual(findExecutable(spec), [
+      "powershell.exe",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      process.env[envVar],
+    ]);
+
+    // 大写扩展名同样识别（lowercase 归一化）
+    process.env[envVar] = "C:\\fake\\CODEBUDDY.PS1";
+    assert.deepEqual(findExecutable(spec), [
+      "powershell.exe",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      "C:\\fake\\CODEBUDDY.PS1",
+    ]);
+
+    // .mjs / .cjs / .js → node 包装
+    for (const ext of [".mjs", ".cjs", ".js"]) {
+      process.env[envVar] = path.join(os.tmpdir(), `fake-codebuddy${ext}`);
+      assert.deepEqual(
+        findExecutable(spec),
+        [process.execPath, process.env[envVar]],
+        `${ext} should resolve to node wrapper`,
+      );
+    }
+
+    // 无扩展名 / 未知扩展 → 原样返回
+    process.env[envVar] = "/usr/local/bin/codebuddy";
+    assert.deepEqual(findExecutable(spec), ["/usr/local/bin/codebuddy"]);
+  } finally {
+    if (saved === undefined) delete process.env[envVar];
+    else process.env[envVar] = saved;
+  }
+});
+
+test(
+  "findExecutable resolves binary via PowerShell Get-Command on win32",
+  { skip: process.platform !== "win32" },
+  async () => {
+    // 临时 .cmd 放进 PATH，验证 Get-Command 解析完整路径 + .cmd 不做包装
+    const tmpBin = await mkdtemp(path.join(os.tmpdir(), "cbx-fakebin-"));
+    const fakePath = path.join(tmpBin, "fakebin.cmd");
+    await writeFile(fakePath, "@echo off\r\n", "utf8");
+    const spec = {
+      ...BUILTIN_EXECUTORS[0],
+      candidates: ["fakebin"],
+      envVar: "CBX_TEST_FAKEBIN_PATH",
+    };
+    delete process.env[spec.envVar];
+    const savedPath = process.env.PATH;
+    process.env.PATH = tmpBin + path.delimiter + (savedPath ?? "");
+    try {
+      const result = findExecutable(spec);
+      assert.equal(
+        result[0].toLowerCase(),
+        fakePath.toLowerCase(),
+        `expected Get-Command to resolve ${fakePath}, got ${result[0]}`,
+      );
+      assert.equal(result.length, 1, ".cmd should pass through unwrapped");
+    } finally {
+      process.env.PATH = savedPath;
+      delete process.env[spec.envVar];
+    }
+  },
+);
