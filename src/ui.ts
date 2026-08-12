@@ -433,8 +433,16 @@ function text(
 async function readJsonBody(
   req: IncomingMessage,
 ): Promise<Record<string, unknown>> {
+  const maxBodyBytes = 1 * 1024 * 1024;
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let bodyBytes = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.from(chunk as Uint8Array);
+    bodyBytes += buffer.byteLength;
+    if (bodyBytes > maxBodyBytes)
+      throw new Error("请求体超过 1 MB 上限。");
+    chunks.push(buffer);
+  }
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw.trim()) return {};
   let parsed: unknown;

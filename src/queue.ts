@@ -271,7 +271,7 @@ export async function resumeQueue(runtime: QueueRuntime, workspaceInput: string)
 export async function retryQueueJob(runtime: QueueRuntime, workspaceInput: string, jobId: string, priority = 0): Promise<QueueEntry> {
   const workspace = path.resolve(workspaceInput);
   const state = await runtime.loadState(workspace, jobId);
-  if (["running", "queued"].includes(state.status)) throw new Error(`任务当前仍在执行或排队：${jobId}`);
+  if (["running", "queued", "awaiting_approval"].includes(state.status)) throw new Error(`任务当前仍在执行、排队或等待审批：${jobId}`);
   const directory = runtime.jobDir(workspace, jobId);
   // 单事务完成：老 entry 标 cancelled + 终止僵尸进程 + 插新 entry + 状态重置。
   // terminateTree 与 entry 状态变更必须同在队列锁内，否则与 dispatchQueue 回收并发时会误杀新 worker 或互相覆盖。

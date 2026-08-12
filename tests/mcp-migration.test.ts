@@ -402,6 +402,9 @@ test("MCP: cbx_start 拒绝非法新参数类型", async () => {
     { permission_mode: "bogus" },
     { approval_before_run: "false" },
     { dependency_guard: "false" },
+    { keep_worktree: "false" },
+    { auto_branch: "false" },
+    { auto_commit: "false" },
   ];
   for (const extra of cases) {
     const responses = await mcpCall(

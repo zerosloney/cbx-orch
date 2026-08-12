@@ -72,6 +72,8 @@ export async function createJob(options: {
   jobId?: string;
 }): Promise<{ jobId: string; directory: string }> {
   const workspace = path.resolve(options.workspace);
+  if (typeof options.task !== "string" || !options.task.trim())
+    throw new Error("task 必须是非空字符串。");
   validateWorkspace(workspace);
   validateTestCommand(options.testCommand);
   validatePermissionMode(
@@ -79,7 +81,7 @@ export async function createJob(options: {
     options.allowUnsafePermissions,
   );
   assertExecutionPolicy(options.trustMode ?? "trusted", options.isolated);
-  if (!Number.isFinite(options.maxTurns) || options.maxTurns < 1)
+  if (!Number.isInteger(options.maxTurns) || options.maxTurns < 1)
     throw new Error("maxTurns 必须是正整数。");
   if (
     options.timeoutMs !== undefined &&

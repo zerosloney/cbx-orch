@@ -420,6 +420,21 @@ async function callTool(
     )
       throw new Error("dependency_guard 必须是布尔值。");
     if (
+      args.keep_worktree !== undefined &&
+      typeof args.keep_worktree !== "boolean"
+    )
+      throw new Error("keep_worktree 必须是布尔值。");
+    if (
+      args.auto_branch !== undefined &&
+      typeof args.auto_branch !== "boolean"
+    )
+      throw new Error("auto_branch 必须是布尔值。");
+    if (
+      args.auto_commit !== undefined &&
+      typeof args.auto_commit !== "boolean"
+    )
+      throw new Error("auto_commit 必须是布尔值。");
+    if (
       args.max_turns !== undefined &&
       (!Number.isInteger(args.max_turns) || Number(args.max_turns) < 1)
     )
@@ -458,15 +473,15 @@ async function callTool(
       keepWorktree:
         args.keep_worktree === undefined
           ? undefined
-          : Boolean(args.keep_worktree),
+          : args.keep_worktree,
       approvalBeforeComplete:
         typeof args.approval_before_complete === "boolean"
           ? args.approval_before_complete
           : undefined,
       autoBranch:
-        args.auto_branch === undefined ? undefined : Boolean(args.auto_branch),
+        args.auto_branch === undefined ? undefined : args.auto_branch,
       autoCommit:
-        args.auto_commit === undefined ? undefined : Boolean(args.auto_commit),
+        args.auto_commit === undefined ? undefined : args.auto_commit,
       commitMessage: args.commit_message
         ? String(args.commit_message)
         : undefined,

@@ -295,3 +295,46 @@ test("cbx_continue overwrites context snapshot via startBackground with redactio
     "新计划\nToken: [REDACTED]\nkey [REDACTED]",
   );
 });
+
+test("retryQueueJob rejects jobs waiting for approval", async () => {
+  const workspace = await mkdtemp(
+    path.join(os.tmpdir(), "cbx-retry-approval-"),
+  );
+  const job = await createJob({
+    workspace,
+    task: "审批中的任务不能重试",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    approvalBeforeRun: true,
+    jobId: "retry-approval",
+  });
+  assert.equal(
+    (await executeJob(workspace, job.jobId)).status,
+    "awaiting_approval",
+  );
+  await assert.rejects(() => retryQueueJob(workspace, job.jobId), /等待审批/);
+  assert.equal(
+    (await loadState(workspace, job.jobId)).status,
+    "awaiting_approval",
+  );
+});
+
+test("createJob rejects blank tasks and fractional maxTurns", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-job-input-"));
+  const base = {
+    workspace,
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+  } as const;
+  await assert.rejects(
+    () => createJob({ ...base, task: " \n\t", maxTurns: 5 }),
+    /task 必须是非空字符串/,
+  );
+  await assert.rejects(
+    () => createJob({ ...base, task: "整数校验", maxTurns: 1.5 }),
+    /maxTurns 必须是正整数/,
+  );
+});

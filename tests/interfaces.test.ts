@@ -1144,6 +1144,24 @@ test("Web UI without token allows unauthenticated access", async () => {
   }
 });
 
+test("Web UI rejects oversized JSON request bodies before buffering them", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-ui-body-limit-"));
+  const server = createWebUiServer(workspace);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task: "x".repeat(1024 * 1024 + 1) }),
+    });
+    assert.equal(response.status, 500);
+    assert.match(await response.text(), /请求体超过 1 MB 上限/);
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("end-to-end job execution with mock executor plugin", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-e2e-"));
   const plugin = path.join(workspace, "mock-executor.mjs");

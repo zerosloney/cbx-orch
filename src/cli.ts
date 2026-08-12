@@ -159,7 +159,8 @@ async function main(): Promise<void> {
     const existingJob = parsed.option("--job-id");
     let jobId = existingJob;
     if (!jobId) {
-      if (!task) throw new Error("请提供 --task 或 --task-file。");
+      if (typeof task !== "string" || !task.trim())
+        throw new Error("请提供非空的 --task 或 --task-file。");
       const created = await createJob({
         workspace,
         task,
@@ -440,8 +441,12 @@ async function main(): Promise<void> {
           "utf8",
         ),
       );
-    } catch {
-      console.log("尚无 review.md");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        console.log("尚无 review.md");
+        return;
+      }
+      throw error;
     }
     return;
   }

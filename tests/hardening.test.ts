@@ -50,6 +50,34 @@ test("parseCliArgs supports --name=value, repeated options and the -- separator"
   assert.throws(() => parseCliArgs(["--task"]), /缺少值/);
 });
 
+test("CLI review preserves non-missing review.md read errors", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-cli-review-error-"));
+  const job = await createJob({
+    workspace,
+    task: "CLI review error",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "cli-review-error",
+  });
+  await mkdir(path.join(job.directory, "review.md"));
+  const cliPath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "src",
+    "cli.js",
+  );
+  const result = spawnSync(
+    process.execPath,
+    [cliPath, "review", job.jobId, "--workspace", workspace],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(result.stdout, /尚无 review\.md/);
+  assert.match(`${result.stdout}\n${result.stderr}`, /EISDIR|directory|目录/i);
+});
+
 test("parseCliArgs does not swallow the -- separator as an option value", () => {
   // 回归：值选项紧跟 `--` 时，`--` 必须作为分隔符而非选项值；其余位置参数照常收集。
   assert.throws(() => parseCliArgs(["--task", "--", "foo"]), /缺少值/);
