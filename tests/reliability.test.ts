@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -222,7 +222,9 @@ test("legacy import skips corrupt records instead of locking the workspace", asy
 
 test("plugin without enforce emits a policy warning event; enforce suppresses it", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-plugin-policy-"));
-  const plugin = path.resolve(process.cwd(), "plugins", "example-executor.mjs");
+  const pluginSrc = path.resolve(process.cwd(), "plugins", "example-executor.mjs");
+  const plugin = path.join(workspace, "my-plugin.mjs");
+  await copyFile(pluginSrc, plugin);
   const warnJob = await createJob({ workspace, task: "插件告警", review: false, isolated: false, executor: plugin, permissionMode: "auto", maxTurns: 5, timeoutMs: 2_000, maxRetries: 0, jobId: "plugin-warn" });
   assert.equal((await executeJob(workspace, warnJob.jobId)).status, "done");
   assert.match(await readFile(path.join(warnJob.directory, "events.ndjson"), "utf8"), /"event":"plugin_policy_warning"/);

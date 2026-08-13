@@ -415,6 +415,8 @@ type CbxDatabase = Database.Database;
 // intentional-simple: Promise 缓存保证同 workspace 并发只创建一次连接；创建失败时 reject，
 // 不缓存坏 promise，允许下次调用重试。
 const databases = new Map<string, Promise<CbxDatabase>>();
+// 只读连接：WAL 模式下可安全并发读，不与写连接争抢 prepare/transaction 锁。
+const readonlyDatabases = new Map<string, Promise<CbxDatabase>>();
 const SCHEMA_VERSION = 3;
 function databaseFile(workspace: string): string {
   return path.join(workspace, ".cbx", "state.sqlite");
@@ -486,6 +488,47 @@ async function database(workspaceInput: string): Promise<CbxDatabase> {
     throw error;
   }
 }
+
+/** 只读连接：用于纯查询场景。WAL 模式下可与写并发；
+ *  文件不存在或 schema 未初始化时回落到读写连接。 */
+async function databaseReadonly(workspaceInput: string): Promise<CbxDatabase> {
+  const workspace = path.resolve(workspaceInput);
+  const file = databaseFile(workspace);
+  // 文件不存在时由写连接负责初始化；不进只读缓存，避免长期持有写连接
+  try {
+    await stat(file);
+  } catch {
+    return database(workspace);
+  }
+  let promise = readonlyDatabases.get(workspace);
+  if (!promise) {
+    promise = (async (): Promise<CbxDatabase> => {
+      const db = new Database(file, { readonly: true });
+      db.pragma("busy_timeout = 5000");
+      // schema 尚未初始化时（如测试场景或首次访问）回落到读写连接；
+      // 清除只读缓存，下次访问可重新尝试只读连接
+      const hasSchema = db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='jobs'",
+        )
+        .get() as { name: string } | undefined;
+      if (!hasSchema) {
+        db.close();
+        readonlyDatabases.delete(workspace);
+        return database(workspace);
+      }
+      return db;
+    })();
+    readonlyDatabases.set(workspace, promise);
+  }
+  try {
+    return await promise;
+  } catch (error) {
+    readonlyDatabases.delete(workspace);
+    throw error;
+  }
+}
+
 async function importLegacyData(
   workspace: string,
   db: CbxDatabase,
@@ -599,7 +642,7 @@ export async function loadPersistedState<T>(
   workspace: string,
   jobId: string,
 ): Promise<T | undefined> {
-  const db = await database(workspace);
+  const db = await databaseReadonly(workspace);
   const row = db
     .prepare("SELECT state_json FROM jobs WHERE job_id = ?")
     .get(jobId) as { state_json: string } | undefined;
@@ -616,7 +659,7 @@ export async function savePersistedState(
   ).run(jobId, JSON.stringify(value), now());
 }
 export async function listPersistedStates<T>(workspace: string): Promise<T[]> {
-  const db = await database(workspace);
+  const db = await databaseReadonly(workspace);
   const rows = db
     .prepare("SELECT state_json FROM jobs ORDER BY updated_at DESC")
     .all() as Array<{ state_json: string }>;
@@ -800,7 +843,7 @@ export async function getMetadata(
   workspace: string,
   key: string,
 ): Promise<string | undefined> {
-  const db = await database(workspace);
+  const db = await databaseReadonly(workspace);
   const row = db
     .prepare("SELECT value FROM metadata WHERE key = ?")
     .get(key) as { value: string } | undefined;

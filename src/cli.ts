@@ -2,6 +2,7 @@
 import { existsSync } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   approveJob,
   cancelJob,
@@ -67,8 +68,8 @@ function print(value: unknown): void {
 const USAGE = `用法：cbx run|start|batch|ws|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|forget|purge|watch|ui|tui|review-gate|stop-review-gate ...
 选项：--help 显示本帮助；--version / -v 显示版本。`;
 
-async function main(): Promise<void> {
-  const [command, ...rest] = process.argv.slice(2);
+export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  const [command, ...rest] = argv;
   if (command === "help" || command === "--help" || command === "-h") {
     console.log(USAGE);
     return;
@@ -739,7 +740,10 @@ async function main(): Promise<void> {
   console.log(USAGE);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});
+const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });
+}

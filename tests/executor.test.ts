@@ -83,3 +83,18 @@ test("expected SHA mismatch rejects before plugin top-level code runs", async ()
   );
   await assert.rejects(() => access(sideEffect), { code: "ENOENT" });
 });
+
+test("plugin path traversal is blocked even without enforce", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-plugin-traversal-"));
+  const outside = path.join(os.tmpdir(), "outside.mjs");
+  await writeFile(outside, manifest, "utf8");
+  await assert.rejects(
+    () => inspectExecutorPlugin(outside, workspace),
+    /插件路径必须位于工作区内/,
+  );
+  // 相对路径穿越也应被拒绝
+  await assert.rejects(
+    () => inspectExecutorPlugin("../outside.mjs", workspace),
+    /插件路径必须位于工作区内/,
+  );
+});

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
@@ -86,7 +86,9 @@ test("autoCommit=true implicitly enables isolated instead of throwing", async ()
 
 test("ESM executor plugin can replace the builtin CLI", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-plugin-"));
-  const plugin = path.resolve(process.cwd(), "plugins", "example-executor.mjs");
+  const pluginSrc = path.resolve(process.cwd(), "plugins", "example-executor.mjs");
+  const plugin = path.join(workspace, "my-plugin.mjs");
+  await copyFile(pluginSrc, plugin);
   const job = await createJob({
     workspace,
     task: "插件执行",

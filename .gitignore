@@ -20,6 +20,7 @@ AGENTS.md
 .cbx-worktrees/
 sbom.cdx.json
 coverage.txt
+coverage/
 test-results.txt
 cbx-debug.mjs
 architecture-review/

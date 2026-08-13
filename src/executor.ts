@@ -52,6 +52,15 @@ async function verifyExecutorPluginSource(
   policy: PluginPolicy,
 ): Promise<{ file: string; sha256: string }> {
   const file = path.resolve(workspace, spec);
+  const resolvedWorkspace = path.resolve(workspace);
+  // 默认策略下也阻止路径穿越：插件必须位于 workspace 内，防止绝对路径加载任意文件。
+  const relative = path.relative(resolvedWorkspace, file);
+  if (
+    relative.startsWith("..") ||
+    path.isAbsolute(relative) ||
+    file === resolvedWorkspace
+  )
+    throw new Error(`插件路径必须位于工作区内：${file}`);
   const source = await readFile(file);
   const sha256 = createHash("sha256").update(source).digest("hex");
   const allowPaths = (policy.allowPaths ?? []).map((allowed) =>
