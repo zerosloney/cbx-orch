@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 export interface ExecutorRequest {
@@ -53,12 +53,14 @@ async function verifyExecutorPluginSource(
 ): Promise<{ file: string; sha256: string }> {
   const file = path.resolve(workspace, spec);
   const resolvedWorkspace = path.resolve(workspace);
-  // 默认策略下也阻止路径穿越：插件必须位于 workspace 内，防止绝对路径加载任意文件。
-  const relative = path.relative(resolvedWorkspace, file);
+  // 默认策略下也阻止路径穿越：解析符号链接后比较，防止 workspace 内软链指向外部文件。
+  const realFile = await realpath(file);
+  const realWorkspace = await realpath(resolvedWorkspace);
+  const relative = path.relative(realWorkspace, realFile);
   if (
     relative.startsWith("..") ||
     path.isAbsolute(relative) ||
-    file === resolvedWorkspace
+    realFile === realWorkspace
   )
     throw new Error(`插件路径必须位于工作区内：${file}`);
   const source = await readFile(file);

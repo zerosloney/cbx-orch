@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -95,6 +95,24 @@ test("plugin path traversal is blocked even without enforce", async () => {
   // 相对路径穿越也应被拒绝
   await assert.rejects(
     () => inspectExecutorPlugin("../outside.mjs", workspace),
+    /插件路径必须位于工作区内/,
+  );
+});
+
+test("plugin symlink escape is blocked even without enforce", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-plugin-symlink-"));
+  const outside = path.join(os.tmpdir(), "outside-symlink.mjs");
+  await writeFile(outside, manifest, "utf8");
+  const link = path.join(workspace, "evil.mjs");
+  try {
+    await symlink(outside, link);
+  } catch (error) {
+    // Windows 无特权时无法创建符号链接，跳过该用例
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+    throw error;
+  }
+  await assert.rejects(
+    () => inspectExecutorPlugin(link, workspace),
     /插件路径必须位于工作区内/,
   );
 });
