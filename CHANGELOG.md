@@ -2,6 +2,12 @@
 
 This project follows [Semantic Versioning](https://semver.org/). User-visible behavior changes, security fixes, and migration requirements are recorded here before a release.
 
+## 0.14.0 — 2026-08-13
+
+- Security: MCP `resources/read` 补齐 `validateWorkspace`，与 `resources/list` 等入口一致；此前 URI query 的 `workspace` 直接作为 root，绕过了存在性与根目录校验（受 `assertJobId` + 工件白名单约束，属鉴权不一致面）。
+- Feature: `dependencyGuard` 受监控清单从仅 JS 生态扩展到 Python/Rust/Go/Ruby/JVM 的依赖声明与锁文件；内置执行器为多语言通用 CLI，原清单让非 JS 项目裸奔。不存在的文件经 `existsSync` 守卫零开销。
+- Refactor: 合并 `runProcess`/`runShell` 两份近乎逐字重复的实现为共享 `runChild` 核心 + 两个薄封装，导出签名与行为完全等价（`shell:false/true` 的 spawn 形式差异保留）。
+
 ## 0.13.2 — 2026-08-13
 
 - Feature: 新增 `qwen` 内置执行器（Qwen Code CLI）。`permissionMode` 映射为 `plan` → `--approval-mode plan`、`auto`/`dontAsk` → `--yolo`；`maxTurns` → `--max-session-turns`。二进制路径可经 `CBX_QWEN` 覆盖。
