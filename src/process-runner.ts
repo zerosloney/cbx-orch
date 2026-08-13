@@ -176,7 +176,11 @@ export async function terminateTree(
   return waitUntilStopped(pid, forceMs);
 }
 
-export function runProcess(
+/** 共享子进程执行核心。runProcess(shell:false) 与 runShell(shell:true) 仅 spawn 形式不同，
+ *  其余（pidFile / 有界输出 / 超时 SIGKILL / 错误与 close 的 settled 守卫 / pidFile 清理）完全一致。
+ *  抽到这里避免两份 ~60 行副本漂移。 */
+function runChild(
+  useShell: boolean,
   command: string,
   args: string[],
   cwd: string,
@@ -185,13 +189,21 @@ export function runProcess(
   pidFile?: string,
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd,
-      shell: false,
-      detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    const child = useShell
+      ? spawn(command, {
+          cwd,
+          shell: true,
+          detached: process.platform !== "win32",
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+        })
+      : spawn(command, args, {
+          cwd,
+          shell: false,
+          detached: process.platform !== "win32",
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+        });
     if (pidFile && child.pid) writeFileSync(pidFile, String(child.pid), "utf8");
     const output = new BoundedOutput();
     let timedOut = false;
@@ -241,6 +253,17 @@ export function runProcess(
   });
 }
 
+export function runProcess(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  logFile?: string,
+  pidFile?: string,
+): Promise<ProcessResult> {
+  return runChild(false, command, args, cwd, timeoutMs, logFile, pidFile);
+}
+
 export function runShell(
   command: string,
   cwd: string,
@@ -248,60 +271,5 @@ export function runShell(
   logFile?: string,
   pidFile?: string,
 ): Promise<ProcessResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, {
-      cwd,
-      shell: true,
-      detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    if (pidFile && child.pid) writeFileSync(pidFile, String(child.pid), "utf8");
-    const output = new BoundedOutput();
-    let timedOut = false;
-    let settled = false;
-    const append = (chunk: Buffer) => {
-      output.append(chunk);
-      if (logFile) appendFileSync(logFile, chunk);
-    };
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
-    const timer = setTimeout(() => {
-      timedOut = true;
-      if (child.pid) killTree(child.pid, "SIGKILL", child);
-    }, timeoutMs);
-    child.on("error", (error) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        if (pidFile) {
-          try {
-            unlinkSync(pidFile);
-          } catch {
-            /* removed */
-          }
-        }
-        reject(error);
-      }
-    });
-    child.on("close", (code) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        if (pidFile) {
-          try {
-            unlinkSync(pidFile);
-          } catch {
-            /* removed */
-          }
-        }
-        resolve({
-          code: code ?? -1,
-          timedOut,
-          output: output.text(),
-          ...(output.truncated ? { outputTruncated: true } : {}),
-        });
-      }
-    });
-  });
+  return runChild(true, command, [], cwd, timeoutMs, logFile, pidFile);
 }
