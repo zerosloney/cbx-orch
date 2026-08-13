@@ -459,26 +459,6 @@ export async function runStage(params: {
     }
     testExitCode = 0;
     if (stage.skipReview || !context.reviewRequested) {
-      // 不变量：到达这里说明 executor 与 test 均已 0 退出（line 394 / line 434 已拦下非零）。
-      // 用真实变量替代硬编码 0，避免后续重构时"看似 0"掩盖真问题；同时保留 invariant 断言。
-      if (executorExitCode !== 0 || testExitCode !== 0) {
-        const invariantError = `skipReview 路径下出现非零退出码：executor=${executorExitCode} test=${testExitCode}`;
-        logJobEvent(workspace, jobId, "stage_skipreview_invariant_violation", {
-          stage: stage.name,
-          index: stageIndex,
-          executorExitCode,
-          testExitCode,
-        });
-        const state = await finish({
-          status: "needs_fix",
-          phase: "skipreview_invariant",
-          stage: stage.name,
-          executorExitCode,
-          testExitCode,
-          error: invariantError,
-        });
-        return outcome(true, state, executorExitCode, testExitCode, null);
-      }
       reviewVerdict = stage.skipReview ? "skipped" : null;
       return outcome(
         false,

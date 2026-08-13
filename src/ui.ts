@@ -440,12 +440,24 @@ async function readJsonBody(
   const maxBodyBytes = 1 * 1024 * 1024;
   const chunks: Buffer[] = [];
   let bodyBytes = 0;
+  let tooLarge = false;
   for await (const chunk of req) {
-    const buffer = Buffer.from(chunk as Uint8Array);
-    bodyBytes += buffer.byteLength;
-    if (bodyBytes > maxBodyBytes)
-      throw new Error("请求体超过 1 MB 上限。");
-    chunks.push(buffer);
+    if (!tooLarge) {
+      const buffer = Buffer.from(chunk as Uint8Array);
+      bodyBytes += buffer.byteLength;
+      if (bodyBytes > maxBodyBytes) {
+        tooLarge = true;
+      } else {
+        chunks.push(buffer);
+      }
+    }
+    // 超限后停止累积但仍排空剩余 body：提前中断会让连接滞留（req 流未读完），
+    // 响应写出时未读数据触发 RST、客户端收不到（与 /mcp 路径 0751e5e 同一修复）。
+  }
+  if (tooLarge) {
+    const error = new Error("请求体超过 1 MB 上限。") as NodeJS.ErrnoException;
+    error.code = "EBIG";
+    throw error;
   }
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw.trim()) return {};
@@ -965,13 +977,15 @@ export function createWebUiServer(
       const status =
         code === "ENOENT"
           ? 404
-          : isCbxError(error, "E_NOT_FOUND")
-            ? 404
-            : isCbxError(error, "E_ARTIFACT_FORBIDDEN")
-              ? 403
-              : isCbxError(error, "E_INVALID_JOB_ID")
-                ? 400
-                : 500;
+          : code === "EBIG"
+            ? 413
+            : isCbxError(error, "E_NOT_FOUND")
+              ? 404
+              : isCbxError(error, "E_ARTIFACT_FORBIDDEN")
+                ? 403
+                : isCbxError(error, "E_INVALID_JOB_ID")
+                  ? 400
+                  : 500;
       json(res, { error: message }, status);
     }
   });

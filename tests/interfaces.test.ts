@@ -1159,7 +1159,9 @@ test("Web UI rejects oversized JSON request bodies before buffering them", async
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ task: "x".repeat(1024 * 1024 + 1) }),
     });
-    assert.equal(response.status, 500);
+    // 413 Payload Too Large：readJsonBody 超限后 drain 完剩余 body 再抛 EBIG，
+    // 顶层 catch 映射为 413（与 /mcp 路径一致；旧实现误回 500 且未排空 body）。
+    assert.equal(response.status, 413);
     assert.match(await response.text(), /请求体超过 1 MB 上限/);
   } finally {
     await closeServer(server);
