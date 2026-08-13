@@ -230,12 +230,33 @@ export async function runStage(params: {
     fixUsed += 1;
     await persistRetries();
   };
+  // 依赖守卫的受监控清单：覆盖主流语言生态的依赖声明 + 锁文件。
+  // executor（codebuddy/opencode 等）是多语言通用编码 CLI，仅覆盖 JS 会让 Go/Rust/Python 项目裸奔。
   const DEP_FILES = [
+    // JS / Node
     "package.json",
     "package-lock.json",
     "pnpm-lock.yaml",
     "yarn.lock",
     "bun.lockb",
+    // Python
+    "requirements.txt",
+    "pyproject.toml",
+    "poetry.lock",
+    "Pipfile.lock",
+    // Rust
+    "Cargo.toml",
+    "Cargo.lock",
+    // Go
+    "go.mod",
+    "go.sum",
+    // Ruby
+    "Gemfile",
+    "Gemfile.lock",
+    // Java / JVM
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
   ];
   const depBaseline: Record<string, string> = {};
   if (context.dependencyGuard) {
