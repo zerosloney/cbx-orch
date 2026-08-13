@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { copyFile, mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
@@ -86,7 +93,11 @@ test("autoCommit=true implicitly enables isolated instead of throwing", async ()
 
 test("ESM executor plugin can replace the builtin CLI", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-plugin-"));
-  const pluginSrc = path.resolve(process.cwd(), "plugins", "example-executor.mjs");
+  const pluginSrc = path.resolve(
+    process.cwd(),
+    "plugins",
+    "example-executor.mjs",
+  );
   const plugin = path.join(workspace, "my-plugin.mjs");
   await copyFile(pluginSrc, plugin);
   const job = await createJob({
@@ -198,19 +209,51 @@ test("qwen buildArgs maps maxTurns to max-session-turns and permission mode to y
   const spec = resolveExecutor("qwen")!;
   assert.deepEqual(
     spec.buildArgs({ prompt: "fix", permissionMode: "auto", maxTurns: 5 }),
-    ["--prompt", "fix", "--output-format", "stream-json", "--max-session-turns", "5", "--yolo"],
+    [
+      "--prompt",
+      "fix",
+      "--output-format",
+      "stream-json",
+      "--max-session-turns",
+      "5",
+      "--yolo",
+    ],
   );
   assert.deepEqual(
     spec.buildArgs({ prompt: "fix", permissionMode: "dontAsk", maxTurns: 5 }),
-    ["--prompt", "fix", "--output-format", "stream-json", "--max-session-turns", "5", "--yolo"],
+    [
+      "--prompt",
+      "fix",
+      "--output-format",
+      "stream-json",
+      "--max-session-turns",
+      "5",
+      "--yolo",
+    ],
   );
   assert.deepEqual(
     spec.buildArgs({ prompt: "fix", permissionMode: "plan", maxTurns: 5 }),
-    ["--prompt", "fix", "--output-format", "stream-json", "--max-session-turns", "5", "--approval-mode", "plan"],
+    [
+      "--prompt",
+      "fix",
+      "--output-format",
+      "stream-json",
+      "--max-session-turns",
+      "5",
+      "--approval-mode",
+      "plan",
+    ],
   );
   assert.deepEqual(
     spec.buildArgs({ prompt: "fix", permissionMode: "default", maxTurns: 5 }),
-    ["--prompt", "fix", "--output-format", "stream-json", "--max-session-turns", "5"],
+    [
+      "--prompt",
+      "fix",
+      "--output-format",
+      "stream-json",
+      "--max-session-turns",
+      "5",
+    ],
   );
 });
 
