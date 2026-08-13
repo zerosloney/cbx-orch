@@ -2,6 +2,13 @@
 
 This project follows [Semantic Versioning](https://semver.org/). User-visible behavior changes, security fixes, and migration requirements are recorded here before a release.
 
+## 0.13.0 — 2026-08-13
+
+- Feature: 任务预算字段暴露到 state/result/UI。`configuredMaxTurns`（配置的最大轮次）与 `executorInvocations`（执行器实际调用次数）进入 job state 与 result，Web UI/TUI 可见，便于诊断预算耗尽与执行器行为。
+- Security: 执行器插件路径校验加固。默认策略下也阻止路径穿越（含跨盘符绝对路径），并用 `realpath` 解析符号链接后比较，防止 workspace 内软链指向外部文件绕过校验加载任意代码；同时修复只读连接在库未就绪回落时污染只读缓存导致优化失效的问题。
+- Fix: MCP streamable HTTP `readJsonBody` 对超限请求体先 drain 再返回 413，确保客户端收到 413 响应且 `server.close()` 能 resolve（此前超限请求导致连接悬挂）。
+- Fix: stage-runner `skipReview` 路径使用真实子进程退出码并补 invariant 断言，移除失效死断言。
+
 ## 0.11.0 — 2026-08-09
 
 ## 0.12.1 — 2026-08-12
