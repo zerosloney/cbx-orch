@@ -139,6 +139,7 @@ export async function performContextHandshake(
       context.permissionMode,
       context.maxTurns,
       context.timeoutMs,
+      { role: "gate", jobId: context.jobId },
     );
   } catch (error) {
     return finish({

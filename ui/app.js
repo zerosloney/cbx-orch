@@ -296,6 +296,22 @@ async function loadTab(id,tab,panelsEl,result){
       html+='<div><div class="field-label">进程状态</div><div class="field-value">'+(ex.alive===true?'活跃':ex.alive===false?'已退出':'未知')+'</div></div>';
       html+='<div><div class="field-label">心跳</div><div class="field-value">'+(ex.heartbeatAt?ex.heartbeatAt.slice(11,19)+' ('+ex.heartbeatStaleSec+'s 前)':ex.heartbeatAt===null?'无文件':'—')+'</div></div>';
       html+='<div><div class="field-label">已跑</div><div class="field-value">'+(ex.elapsedSec!=null?ex.elapsedSec+'s':'—')+'</div></div>';
+      // P0-2: 暴露累计调用次数 + 内外 loop 乘数（maxTurns × invocations）
+      var inv=Number(ex.executorInvocations)||0;
+      var mt=Number(ex.configuredMaxTurns);
+      var perStage=ex.stageInvocations||{};
+      html+='<div><div class="field-label">执行器调用</div><div class="field-value">'+inv+' 次</div></div>';
+      if(Number.isFinite(mt)&&mt>0){
+        var maxTotal=mt*inv;
+        html+='<div><div class="field-label">maxTurns × 调用</div><div class="field-value">'+mt+' × '+inv+' = '+maxTotal+'（理论上限）</div></div>';
+      } else {
+        html+='<div><div class="field-label">maxTurns × 调用</div><div class="field-value">'+mt+' × '+inv+' = —（旧任务无此字段）</div></div>';
+      }
+      var stageKeys=Object.keys(perStage);
+      if(stageKeys.length){
+        var stageList=stageKeys.sort().map(function(k){return 'stage['+k+']='+perStage[k];}).join(', ');
+        html+='<div><div class="field-label">per-stage</div><div class="field-value" style="font-size:12px">'+esc(stageList)+'</div></div>';
+      }
       html+='</div>';
       if(ex.command)html+='<div class="cmd">'+esc(ex.command)+'</div>';
       // 增量 agent.log 拉取(默认读尾部 256KB)

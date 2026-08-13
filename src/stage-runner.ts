@@ -104,6 +104,7 @@ export async function requestAdaptiveAction(params: {
       context.permissionMode,
       context.maxTurns,
       context.timeoutMs,
+      { role: "manager", jobId: context.jobId },
     );
   } catch (error) {
     invocationError = error;
@@ -266,6 +267,9 @@ export async function runStage(params: {
       testExitCode,
       reviewVerdict,
       attempts: executionUsed + fixUsed,
+      // P0-2: 把 context.maxTurns 透传到 StageReport；当前 TaskStage 未支持 per-stage 覆盖，
+      // 所以 per-stage 预算恒等于 context.maxTurns。预留字段，未来 stage 加 maxTurns 时只改这里。
+      configuredMaxTurns: context.maxTurns,
     },
     attempt,
     attemptExtra,
@@ -332,6 +336,7 @@ export async function runStage(params: {
         context.permissionMode,
         context.maxTurns,
         context.timeoutMs,
+        { role: "stage", jobId, stageIndex },
       );
     } catch (error) {
       lastError = String(error);
@@ -537,6 +542,7 @@ export async function runStage(params: {
         context.permissionMode,
         context.maxTurns,
         context.timeoutMs,
+        { role: "review", jobId, stageIndex },
       );
     } catch (error) {
       lastError = String(error);

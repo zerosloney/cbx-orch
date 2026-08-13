@@ -49,6 +49,10 @@ export async function writeResult(workspace: string, jobId: string, state: JobSt
     tests: [{ command: context.testCommand ?? null, exitCode: state.testExitCode ?? null, timedOut: state.phase === "testing" ? Boolean(state.timedOut) : false }],
     acceptanceEvidence, audit: state.audit ?? null, verifiedProgress: progress ?? null, humanGate: state.humanGate ?? null, artifactHashes, files,
     stages: Array.isArray(state.stages) ? state.stages : null,
+    // P0-2: 暴露执行器调用预算/实际消耗，让 UI 展示"内外 loop 乘数"实际值。
+    configuredMaxTurns: state.configuredMaxTurns ?? context.maxTurns ?? null,
+    executorInvocations: state.executorInvocations ?? 0,
+    stageInvocations: state.stageInvocations ?? {},
     updatedAt: now(),
   });
 }

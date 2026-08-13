@@ -357,3 +357,39 @@ test("completion approval rejects stale worktree evidence and keeps work for rev
   assert.equal(existsSync(worktree.path), true);
   await assert.rejects(() => approveJob(workspace, job.jobId), /不需要批准/);
 });
+
+test("P0-2: configuredMaxTurns + executorInvocations 在 state 与 result 中落地", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({
+    workspace,
+    task: "P0-2 预算可见",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 17,
+    timeoutMs: 2_000,
+    maxRetries: 0,
+    jobId: "p02-budget",
+  });
+  // 创建后 state 应立即记录 configuredMaxTurns
+  const created = await loadState(workspace, job.jobId);
+  assert.equal(created.configuredMaxTurns, 17);
+  process.env.FAKE_JOB_DIR = job.directory;
+  const after = await executeJob(workspace, job.jobId);
+  assert.equal(after.status, "done");
+  // 跑完后 executorInvocations 应 ≥ 1（至少一次 fake agent 调用）
+  assert.ok(
+    Number(after.executorInvocations) >= 1,
+    `expected executorInvocations >= 1, got ${after.executorInvocations}`,
+  );
+  const result = JSON.parse(
+    await readFile(path.join(job.directory, "result.json"), "utf8"),
+  ) as {
+    configuredMaxTurns: number;
+    executorInvocations: number;
+    stageInvocations: Record<string, number>;
+  };
+  assert.equal(result.configuredMaxTurns, 17);
+  assert.equal(result.executorInvocations, after.executorInvocations);
+  assert.ok(typeof result.stageInvocations === "object");
+});

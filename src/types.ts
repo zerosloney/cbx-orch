@@ -89,6 +89,12 @@ export interface JobState {
   stages?: StageReport[];
   managerDoneStreak?: number;
   stageRetries?: Record<string, { execution: number; fix: number }>;
+  /** 累计执行器调用次数（含 stage / review / adaptive manager 全部角色）。P0-2 引入。 */
+  executorInvocations?: number;
+  /** per-stage 调用次数，key 为 stageIndex。仅 stage executor 计入；reviewer/manager 不计。 */
+  stageInvocations?: Record<string, number>;
+  /** 创建时配置的 maxTurns（per stage 默认继承 context.maxTurns）。P0-2 引入，便于 UI/result 暴露实际预算。 */
+  configuredMaxTurns?: number;
   stage?: string;
   executorExitCode?: number;
   testExitCode?: number;
@@ -114,6 +120,8 @@ export interface StageReport {
   testExitCode: number | null;
   reviewVerdict: string | null;
   attempts: number;
+  /** 该 stage 实际配置传入的 maxTurns（per-stage 可独立覆盖）。P0-2 引入。 */
+  configuredMaxTurns?: number;
 }
 
 export interface StageOutcome {

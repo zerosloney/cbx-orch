@@ -4,10 +4,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from "./executor.js";
 import { findExecutable, resolveExecutor } from "./executors/builtin.js";
-import { loadConfig } from "./state.js";
+import { bumpInvocationCount, loadConfig } from "./state.js";
 import { runProcess, runShell, type ProcessResult } from "./process-runner.js";
 import { saveJson } from "./storage.js";
 import { APP_VERSION } from "./version.js";
+
+export type InvocationRole = "stage" | "review" | "manager" | "gate";
+
+export interface InvocationMeta {
+  role: InvocationRole;
+  jobId: string;
+  stageIndex?: number;
+}
 
 export function promptFor(phase: string, extra = "", label = "编码代理", contextPack: string): string {
   return `你是 ${label} 执行代理。\n\n只读取当前角色上下文包：\n- ${contextPack}\n\n上下文包是编排器生成的最小化脱敏投影；只可额外读取其中 artifacts 明确列出的文件，不要读取任何未列材料或历史轨迹。\n当前阶段：${phase}\n\n${extra}`;
@@ -26,7 +34,30 @@ async function invokeBuiltin(spec: ReturnType<typeof resolveExecutor> & {}, dire
   return result;
 }
 
-export async function invokeExecutor(executor: string, workspace: string, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number): Promise<ProcessResult> {
+export async function invokeExecutor(executor: string, workspace: string, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number, invocationMeta?: InvocationMeta): Promise<ProcessResult> {
+  if (invocationMeta?.jobId) {
+    try {
+      await bumpInvocationCount(
+        workspace,
+        invocationMeta.jobId,
+        invocationMeta.role,
+        invocationMeta.stageIndex,
+      );
+    } catch (error) {
+      // 计数失败不应阻塞执行器调用；落审计事件便于排障。
+      appendFileSync(
+        path.join(directory, "events.ndjson"),
+        JSON.stringify({
+          event: "invocation_count_failed",
+          role: invocationMeta.role,
+          stageIndex: invocationMeta.stageIndex,
+          error: error instanceof Error ? error.message : String(error),
+          at: new Date().toISOString(),
+        }) + "\n",
+        "utf8",
+      );
+    }
+  }
   const builtin = resolveExecutor(executor);
   if (builtin) return invokeBuiltin(builtin, directory, workdir, prompt, permissionMode, maxTurns, timeoutMs);
   const config = await loadConfig(workspace);

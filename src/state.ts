@@ -310,6 +310,58 @@ export async function writeState(
   return state;
 }
 
+/**
+ * 轻量级递增执行器调用计数：仅修改 state.json + SQLite 持久化副本，不发 job.state_changed 事件。
+ *
+ * 使用场景：runner.ts:invokeExecutor 每次被调用前自增一次，区分角色（stage/review/manager）
+ * 和 stageIndex（仅 stage 角色）。读端（result.json / UI 概览）聚合展示实际预算消耗。
+ *
+ * 不加 withFileLock：调用方（stage-runner 内部）已持有 run.lock 串行所有 invokeExecutor 调用，
+ * 嵌套加锁会导致自己死锁自己（retries=0 立即 busyMessage）。worker 进程内单 job 串行可保原子。
+ */
+export async function bumpInvocationCount(
+  workspace: string,
+  jobId: string,
+  role: "stage" | "review" | "manager" | "gate",
+  stageIndex?: number,
+): Promise<void> {
+  const state = await loadState(workspace, jobId);
+  const current =
+    typeof state.executorInvocations === "number" &&
+    Number.isInteger(state.executorInvocations)
+      ? state.executorInvocations
+      : 0;
+  const updates: Json = { executorInvocations: current + 1 };
+  if (role === "stage" && Number.isInteger(stageIndex)) {
+    const key = String(stageIndex);
+    const existing = (state.stageInvocations as
+      | Record<string, number>
+      | undefined) ?? {};
+    updates.stageInvocations = {
+      ...existing,
+      [key]: (Number(existing[key]) || 0) + 1,
+    };
+  }
+  // 不走 writeState（会发布 job.state_changed 事件，污染事件流）。
+  // 直接同步 SQLite + state.json 文件，保留 updatedAt。
+  Object.assign(state, updates, { updatedAt: now() });
+  await savePersistedState(workspace, jobId, state);
+  await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
+}
+
+/** 任务创建时记录 configuredMaxTurns；Stage 独立覆盖时由 stage-runner 在 stage 启动时写。 */
+export async function recordConfiguredMaxTurns(
+  workspace: string,
+  jobId: string,
+  maxTurns: number,
+): Promise<void> {
+  const state = await loadState(workspace, jobId);
+  if (state.configuredMaxTurns === maxTurns) return;
+  Object.assign(state, { configuredMaxTurns: maxTurns, updatedAt: now() });
+  await savePersistedState(workspace, jobId, state);
+  await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
+}
+
 export async function writeApprovalState(
   workspace: string,
   jobId: string,

@@ -294,6 +294,12 @@ interface ExecutorStatus {
   startedAt: string | null;
   elapsedSec: number | null;
   command: string | null;
+  /** P0-2: 累计执行器调用次数（stage + review + manager + gate 全角色）。 */
+  executorInvocations: number;
+  /** P0-2: 创建时配置的 per-stage maxTurns。null 表示旧任务无此字段。 */
+  configuredMaxTurns: number | null;
+  /** P0-2: per-stage 调用次数，key 为 stageIndex 字符串。 */
+  stageInvocations: Record<string, number>;
 }
 
 /** 读取任务当前 executor 进程状态:pid/active.pid、worker.heartbeat、process_started 命令。 */
@@ -357,6 +363,20 @@ export async function readExecutorStatus(
   } catch {
     /* no events */
   }
+  // P0-2: 暴露累计执行器调用次数 + 配置 maxTurns，让 UI 算出内外 loop 乘数。
+  let executorInvocations = 0;
+  let configuredMaxTurns: number | null = null;
+  let stageInvocations: Record<string, number> = {};
+  try {
+    const state = await loadState(workspace, jobId);
+    executorInvocations = Number(state.executorInvocations) || 0;
+    stageInvocations =
+      (state.stageInvocations as Record<string, number> | undefined) ?? {};
+    if (typeof state.configuredMaxTurns === "number")
+      configuredMaxTurns = state.configuredMaxTurns;
+  } catch {
+    /* state may not exist yet */
+  }
   return {
     pid,
     alive,
@@ -365,6 +385,9 @@ export async function readExecutorStatus(
     startedAt,
     elapsedSec,
     command,
+    executorInvocations,
+    configuredMaxTurns,
+    stageInvocations,
   };
 }
 

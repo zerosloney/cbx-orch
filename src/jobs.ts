@@ -196,6 +196,8 @@ export async function createJob(options: {
     createdAt: now(),
     updatedAt: now(),
     attempt: 0,
+    // P0-2: 创建时记录 maxTurns，UI/result 可直接读取实际预算而无需推断。
+    configuredMaxTurns: context.maxTurns,
   };
   await savePersistedState(workspace, jobId, state);
   await saveJson(path.join(directory, "state.json"), state);
