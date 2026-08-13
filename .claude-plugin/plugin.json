@@ -1,7 +1,7 @@
 {
   "name": "cbx-orch",
-  "version": "0.13.0",
-  "description": "Durable coding-agent orchestrator: dispatch tasks to codebuddy/opencode/omp/cline with persistent jobs, queue, review, and rollback.",
+  "version": "0.13.2",
+  "description": "Durable coding-agent orchestrator: dispatch tasks to codebuddy/opencode/omp/cline/qwen with persistent jobs, queue, review, and rollback.",
   "author": { "name": "dc", "url": "https://github.com/zerosloney/cbx-orch" },
   "license": "MIT",
   "skills": "skills",
@@ -21,7 +21,7 @@
     "executor": {
       "type": "string",
       "default": "codebuddy",
-      "description": "Default executor: codebuddy / opencode / omp / cline"
+      "description": "Default executor: codebuddy / opencode / omp / cline / qwen"
     },
     "review": {
       "type": "boolean",

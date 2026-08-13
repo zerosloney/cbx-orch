@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-// 内置执行器适配层：把 codebuddy / opencode / omp / cline 等编码 CLI 收敛到统一的调用契约。
+// 内置执行器适配层：把 codebuddy / opencode / omp / cline / qwen 等编码 CLI 收敛到统一的调用契约。
 // 每个 adapter 描述：发现二进制的方式 + 如何把 (prompt, permissionMode, maxTurns) 翻译成 CLI 参数。
 
 export interface BuildArgsOptions {
@@ -11,7 +11,7 @@ export interface BuildArgsOptions {
 
 export interface BuiltinExecutor {
   /** 注册名，写入 .cbx.json 的 executor 字段或 --executor */
-  name: "codebuddy" | "opencode" | "omp" | "cline";
+  name: "codebuddy" | "opencode" | "omp" | "cline" | "qwen";
   /** 别名，resolveExecutor 同样命中（oh-my-pi 指向 omp，非独立二进制） */
   aliases: string[];
   /** 显示名，注入到提示词与用户可见的错误消息中 */
@@ -73,6 +73,24 @@ export const BUILTIN_EXECUTORS: readonly BuiltinExecutor[] = [
     buildArgs: ({ prompt, permissionMode }) => {
       const args = ["--json", prompt, "--auto-approve", String(AUTO_MODES.has(permissionMode))];
       if (permissionMode === "plan") args.push("--plan");
+      return args;
+    },
+  },
+  {
+    name: "qwen",
+    aliases: [],
+    label: "Qwen Code",
+    envVar: "CBX_QWEN",
+    candidates: ["qwen"],
+    // qwen 非交互模式（--prompt）按官方 headless 文档映射（https://qwenlm.github.io/qwen-code-docs/zh/users/features/headless/）：
+    // - maxTurns → --max-session-turns（交互轮数预算）
+    // - plan → --approval-mode plan；auto/dontAsk → --yolo（auto-approve all）
+    // 不传 --sandbox：cbx 需执行器在 worktree 内自由读写，沙箱会阻碍任务执行。
+    // 无人值守场景建议在宿主环境设 QWEN_CODE_UNATTENDED_RETRY=1（子进程经 runProcess 继承 process.env）。
+    buildArgs: ({ prompt, permissionMode, maxTurns }) => {
+      const args = ["--prompt", prompt, "--output-format", "stream-json", "--max-session-turns", String(maxTurns)];
+      if (permissionMode === "plan") args.push("--approval-mode", "plan");
+      else if (AUTO_MODES.has(permissionMode)) args.push("--yolo");
       return args;
     },
   },

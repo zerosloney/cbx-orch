@@ -164,7 +164,7 @@ const tools = [
         commit_message: { type: "string" },
         executor: {
           type: "string",
-          description: "内置执行器 codebuddy/opencode/omp/cline，或插件路径",
+          description: "内置执行器 codebuddy/opencode/omp/cline/qwen，或插件路径",
         },
         review_executor: {
           type: "string",

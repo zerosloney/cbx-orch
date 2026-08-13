@@ -112,15 +112,16 @@ test("ESM executor plugin can replace the builtin CLI", async () => {
   assert.match(events, /"sha256":"[a-f0-9]{64}"/);
 });
 
-test("registry resolves codebuddy/cbc/opencode/omp/oh-my-pi/cline", () => {
+test("registry resolves codebuddy/cbc/opencode/omp/oh-my-pi/cline/qwen", () => {
   assert.equal(resolveExecutor("codebuddy")?.name, "codebuddy");
   assert.equal(resolveExecutor("cbc")?.name, "codebuddy");
   assert.equal(resolveExecutor("opencode")?.name, "opencode");
   assert.equal(resolveExecutor("omp")?.name, "omp");
   assert.equal(resolveExecutor("oh-my-pi")?.name, "omp");
   assert.equal(resolveExecutor("cline")?.name, "cline");
+  assert.equal(resolveExecutor("qwen")?.name, "qwen");
   assert.equal(resolveExecutor("unknown"), undefined);
-  assert.equal(BUILTIN_EXECUTORS.length, 4);
+  assert.equal(BUILTIN_EXECUTORS.length, 5);
 });
 
 test("codebuddy buildArgs uses print/stream-json/max-turns/permission-mode", () => {
@@ -190,6 +191,26 @@ test("cline buildArgs maps every permission mode without inheriting auto approva
   assert.deepEqual(
     spec.buildArgs({ prompt: "fix", permissionMode: "plan", maxTurns: 5 }),
     ["--json", "fix", "--auto-approve", "false", "--plan"],
+  );
+});
+
+test("qwen buildArgs maps maxTurns to max-session-turns and permission mode to yolo/plan", () => {
+  const spec = resolveExecutor("qwen")!;
+  assert.deepEqual(
+    spec.buildArgs({ prompt: "fix", permissionMode: "auto", maxTurns: 5 }),
+    ["--prompt", "fix", "--output-format", "stream-json", "--max-session-turns", "5", "--yolo"],
+  );
+  assert.deepEqual(
+    spec.buildArgs({ prompt: "fix", permissionMode: "dontAsk", maxTurns: 5 }),
+    ["--prompt", "fix", "--output-format", "stream-json", "--max-session-turns", "5", "--yolo"],
+  );
+  assert.deepEqual(
+    spec.buildArgs({ prompt: "fix", permissionMode: "plan", maxTurns: 5 }),
+    ["--prompt", "fix", "--output-format", "stream-json", "--max-session-turns", "5", "--approval-mode", "plan"],
+  );
+  assert.deepEqual(
+    spec.buildArgs({ prompt: "fix", permissionMode: "default", maxTurns: 5 }),
+    ["--prompt", "fix", "--output-format", "stream-json", "--max-session-turns", "5"],
   );
 });
 

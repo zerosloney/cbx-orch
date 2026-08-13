@@ -2,6 +2,10 @@
 
 This project follows [Semantic Versioning](https://semver.org/). User-visible behavior changes, security fixes, and migration requirements are recorded here before a release.
 
+## 0.13.2 — 2026-08-13
+
+- Feature: 新增 `qwen` 内置执行器（Qwen Code CLI）。`permissionMode` 映射为 `plan` → `--approval-mode plan`、`auto`/`dontAsk` → `--yolo`；`maxTurns` → `--max-session-turns`。二进制路径可经 `CBX_QWEN` 覆盖。
+
 ## 0.13.0 — 2026-08-13
 
 - Feature: 任务预算字段暴露到 state/result/UI。`configuredMaxTurns`（配置的最大轮次）与 `executorInvocations`（执行器实际调用次数）进入 job state 与 result，Web UI/TUI 可见，便于诊断预算耗尽与执行器行为。

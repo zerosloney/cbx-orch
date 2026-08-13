@@ -122,7 +122,7 @@ graph LR
 
 ## 执行器
 
-`executor` 决定编排器实际调用哪个编码 CLI。内置 4 个适配器，也可指向自定义 ESM 插件。
+`executor` 决定编排器实际调用哪个编码 CLI。内置 5 个适配器，也可指向自定义 ESM 插件。
 
 | 执行器    | 注册名 / 别名       | 二进制      | 一次性调用                                                                    | 安装                                  | 覆盖 env        |
 | --------- | ------------------- | ----------- | ----------------------------------------------------------------------------- | ------------------------------------- | --------------- |
@@ -130,6 +130,7 @@ graph LR
 | OpenCode  | `opencode`          | `opencode`  | `run "<prompt>" --format json [--auto]`                                       | `npm i -g opencode-ai`                | `CBX_OPENCODE`  |
 | Oh My Pi  | `omp` / `oh-my-pi`  | `omp`       | `-p "<prompt>" --mode json`                                                   | `npm i -g @oh-my-pi/pi-coding-agent`  | `CBX_OMP`       |
 | Cline     | `cline`             | `cline`     | `--json "<prompt>" --auto-approve true\|false [--plan]`                       | `npm i -g cline`                      | `CBX_CLINE`     |
+| Qwen Code | `qwen`              | `qwen`      | `--prompt "<prompt>" --output-format stream-json --max-session-turns N [--yolo \| --approval-mode plan]` | `npm i -g @qwen-code/qwen-code` | `CBX_QWEN`      |
 
 说明：
 
@@ -137,7 +138,8 @@ graph LR
 - `--auto`（OpenCode）仅在 `permissionMode` 为 `auto` 或 `dontAsk` 时追加。Cline 始终显式传 `--auto-approve`：`auto`/`dontAsk` 为 `true`，`default`/`acceptEdits`/`plan` 为 `false`；`plan` 还会追加 `--plan`。
 - Oh My Pi 的 CLI 文档未公开权限/放行 flag，因此当前不追加任何权限参数，由 omp 非交互 `-p` 默认行为决定；待其暴露后补齐。
 - Cline 在 headless 模式默认 `auto-approve=true`，因此 cbx 对非自动模式显式关闭，避免受限权限被静默放宽。
-- 四个 CLI 中只有 CodeBuddy 保留 `--max-turns`；其余靠 `--timeout-ms` 兜底。
+- Qwen Code：`permissionMode` 映射为 `plan` → `--approval-mode plan`、`auto`/`dontAsk` → `--yolo`；`maxTurns` → `--max-session-turns`。无人值守场景建议在宿主环境设 `QWEN_CODE_UNATTENDED_RETRY=1`，子进程经 `runProcess` 自动继承以重试 429/529 瞬时错误。
+- 仅 CodeBuddy（`--max-turns`）与 Qwen Code（`--max-session-turns`）支持轮数预算；OpenCode / Oh My Pi / Cline 靠 `--timeout-ms` 兜底。
 - 通过对应的 env 变量可覆盖二进制路径，常用于测试或指向自定义脚本。
 - 自定义插件：`executor` 指向一个 ESM 模块路径，模块导出 `run(request)`，返回 `{ code, output, timedOut }`。示例见 `plugins/example-executor.mjs`。
 
@@ -440,7 +442,7 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 | 配置项     | 默认值      | 作用                                             |
 | ---------- | ----------- | ------------------------------------------------ |
-| `executor` | `codebuddy` | 默认执行器：`codebuddy`/`opencode`/`omp`/`cline` |
+| `executor` | `codebuddy` | 默认执行器：`codebuddy`/`opencode`/`omp`/`cline`/`qwen` |
 | `review`   | `true`      | 测试通过后是否跑独立审查                         |
 | `isolated` | `true`      | 是否在 git worktree 中隔离执行                   |
 
@@ -450,7 +452,7 @@ zcode plugin install cbx-orch@cbx-orch-marketplace
 
 ### 前置依赖
 
-npm 发布包包含可直接运行的 `dist/` 编译产物；源码仓库不跟踪该目录。自行 clone 源码后，需先执行 `npm install && npm run build` 生成 `dist/`。还需至少安装一个执行器 CLI（codebuddy/opencode/omp/cline 之一）才能真正执行任务。Stop review-gate hook 通过 `cbx stop-review-gate` 子命令调用，只依赖全局 `cbx` 命令，不依赖插件目录内的 dist；MCP server 同样只依赖全局 `cbx` 命令。
+npm 发布包包含可直接运行的 `dist/` 编译产物；源码仓库不跟踪该目录。自行 clone 源码后，需先执行 `npm install && npm run build` 生成 `dist/`。还需至少安装一个执行器 CLI（codebuddy/opencode/omp/cline/qwen 之一）才能真正执行任务。Stop review-gate hook 通过 `cbx stop-review-gate` 子命令调用，只依赖全局 `cbx` 命令，不依赖插件目录内的 dist；MCP server 同样只依赖全局 `cbx` 命令。
 
 ## Claude Code 插件
 

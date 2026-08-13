@@ -1,11 +1,11 @@
 ---
 name: cbx-orchestration
-description: Delegate coding work to the cbx orchestrator for durable, queued, test-verified, and reviewed task execution via codebuddy/opencode/omp/cline.
+description: Delegate coding work to the cbx orchestrator for durable, queued, test-verified, and reviewed task execution via codebuddy/opencode/omp/cline/qwen.
 ---
 
 # cbx Orchestration
 
-Use this skill when the user wants to offload a coding task to a background coding-agent CLI (codebuddy / opencode / omp / cline) with durable persistence — so the task survives crashes, runs tests, gets reviewed, and leaves a full audit trail on disk.
+Use this skill when the user wants to offload a coding task to a background coding-agent CLI (codebuddy / opencode / omp / cline / qwen) with durable persistence — so the task survives crashes, runs tests, gets reviewed, and leaves a full audit trail on disk.
 
 ## When to reach for cbx
 
@@ -13,7 +13,7 @@ Prefer cbx when ANY of these hold:
 - The task spans multiple files or has non-obvious sequencing.
 - The user wants tests run and an independent review before accepting changes.
 - The task is long-running and the user prefers it in the background rather than blocking this session.
-- The user explicitly mentions cbx, "orchestrator", "pipeline", "委派", "编排", or asks to run a coding CLI (codebuddy/opencode/omp/cline).
+- The user explicitly mentions cbx, "orchestrator", "pipeline", "委派", "编排", or asks to run a coding CLI (codebuddy/opencode/omp/cline/qwen).
 
 Do NOT use cbx for:
 - Single-file edits or trivial fixes you can do inline faster.
@@ -384,7 +384,7 @@ If a stage fails (executor error, test failure, or review FAIL), the job stops a
 | Field | Required | Description |
 |---|---|---|
 | `name` | yes | Stage identifier (used in phase, events, artifact filenames) |
-| `executor` | yes | Which CLI runs this stage (`codebuddy` / `opencode` / `omp` / `cline` / plugin path) |
+| `executor` | yes | Which CLI runs this stage (`codebuddy` / `opencode` / `omp` / `cline` / `qwen` / plugin path) |
 | `task` | yes | Stage-specific instructions |
 | `review_executor` | no | Independent reviewer override; falls back to the job-level `review_executor`, then the stage's `executor` |
 | `skip_review` | no | Skip review for this stage (default: follows job-level `review` flag) |
