@@ -17,8 +17,8 @@ jobs:
         # 在嵌套子目录（tui/components/）的报告渲染存在崩溃 bug。保留 22/24 两个 LTS。
         node: [22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -35,7 +35,7 @@ jobs:
           set -o pipefail
           npm run coverage | tee coverage.txt
       - run: npm run sbom
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: verification-node-${{ matrix.node }}
           path: |
