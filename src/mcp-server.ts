@@ -752,7 +752,12 @@ async function dispatch(
       const match =
         /^cbx:\/\/job\/([^/]+)\/([^?]+)(?:\?workspace=(.*))?$/.exec(uri);
       if (!match) throw new Error(`不支持的资源 URI：${uri}`);
-      const root = match[3] ? decodeURIComponent(match[3]) : process.cwd();
+      // 与 resources/list 的 workspace() 一致：URI query 里的 workspace 也要校验存在性 + 拒绝根目录，
+      // 否则客户端可把 root 指向任意路径（虽受 assertJobId + 工件白名单约束，仍是不一致的鉴权面）。
+      const root = path.resolve(
+        match[3] ? decodeURIComponent(match[3]) : process.cwd(),
+      );
+      validateWorkspace(root);
       if (match[2] === "events") {
         // 事件流资源：返回 readEventsIncremental 增量（含 next_offset 游标）。
         // 尚无 events.ndjson 的任务返回空增量，不当作错误。
