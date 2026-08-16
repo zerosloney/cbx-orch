@@ -31,7 +31,7 @@ import {
   ManagerDecisionError,
 } from "./stage-runner.js";
 import { contextRedactor, contextArtifacts } from "./artifacts.js";
-import { prepareWorktree, snapshotDiff, commitWorktree } from "./git-ops.js";
+import { prepareWorktree, prepareStageWorktree, cleanupStageWorktree, snapshotDiff, commitWorktree } from "./git-ops.js";
 import { assertExecutionPolicy } from "./validation.js";
 import {
   createHumanGate,

@@ -23,6 +23,7 @@ import {
   pauseQueue,
   purgeJob,
   readArtifact,
+  readEventsIncremental,
   resumeQueue,
   retryQueueJob,
   startBackground,
@@ -816,6 +817,11 @@ export function createWebUiServer(
           JSON.stringify(await readAgentLogIncremental(ws, agentLog[1], since)),
           "application/json; charset=utf-8",
         );
+      }
+      const jobEvents = /^\/api\/jobs\/([^/]+)\/events$/.exec(url.pathname);
+      if (jobEvents) {
+        const since = Number(url.searchParams.get("since") ?? 0);
+        return json(res, await readEventsIncremental(ws, jobEvents[1], since));
       }
       // ---- 写操作（POST，需鉴权；SameSite=Strict cookie 阻止跨站携带，loopback 绑定 + HttpOnly 即够）----
       if (req.method === "POST") {

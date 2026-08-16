@@ -94,20 +94,25 @@ export async function readArtifact(workspaceInput: string, jobId: string, artifa
 }
 
 export async function readEventsIncremental(workspaceInput: string, jobId: string, since = 0): Promise<{ events: string[]; next_offset: number }> {
-  // intentional-simple: 行级游标 + 逐行 JSON.parse 校验。events.ndjson 单 job 最多几百行，O(n) 扫描无压力。
-  // worker 用 appendFileSync 追加；并发写入时最后一条可能截断，parse 失败则停在此处，下次调用补齐。
-  const raw = await readArtifact(workspaceInput, jobId, "events.ndjson");
-  const lines = raw.split("\n");
-  const events: string[] = [];
-  let offset = since;
-  for (let i = since; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    try { JSON.parse(line); } catch { break; }
-    events.push(line);
-    offset = i + 1;
+  try {
+    const raw = await readArtifact(workspaceInput, jobId, "events.ndjson");
+    const lines = raw.split("\n");
+    const events: string[] = [];
+    let offset = since;
+    for (let i = since; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      try { JSON.parse(line); } catch { break; }
+      events.push(line);
+      offset = i + 1;
+    }
+    return { events, next_offset: offset };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return { events: [], next_offset: 0 };
+    }
+    throw err;
   }
-  return { events, next_offset: offset };
 }
 
 export async function listArtifacts(workspaceInput: string, jobId: string): Promise<string[]> {

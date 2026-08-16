@@ -30,8 +30,22 @@ tr.job.selected{background:#1c2840;border-left:3px solid #9ecbff}
 .job-action:hover{background:#243a5c}
 .job-action:disabled{opacity:.5;cursor:default}
 pre.art-view{white-space:pre-wrap;background:#080b11;padding:10px;border-radius:6px;max-height:350px;overflow:auto;font-size:12px;border:1px solid #2a3140;margin:0;font-family:ui-monospace,monospace}
-#stream{white-space:pre-wrap;background:#0d1117;padding:10px;border-radius:6px;max-height:260px;overflow:auto;font-size:12px;margin-top:8px;border:1px solid #2a3140;font-family:ui-monospace,monospace}
-.evt{padding:2px 0}.evt .t{color:#555;margin-right:8px}
+#stream{background:#0d1117;padding:10px;border-radius:6px;max-height:300px;overflow:auto;font-size:12px;margin-top:8px;border:1px solid #2a3140;font-family:ui-monospace,monospace;display:flex;flex-direction:column;gap:6px}
+.evt{padding:4px 8px;border-radius:4px;background:#141923;border:1px solid #222a38;font-size:12px;word-break:break-word}
+.evt .t{color:#667085;margin-right:8px;font-size:11px}
+.evt-card{background:#131822;border:1px solid #232b3b;border-radius:6px;padding:8px 10px;font-size:12px;margin:2px 0;transition:border-color 0.2s}
+.evt-card:hover{border-color:#3b475d}
+.evt-header{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-weight:600}
+.evt-kind-badge{padding:1px 6px;border-radius:3px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;font-weight:bold}
+.kind-thought{background:#2a2412;color:#f59e0b;border:1px solid #4d3810}
+.kind-tool_use{background:#10283b;color:#38bdf8;border:1px solid #1d4ed8}
+.kind-error{background:#381313;color:#f87171;border:1px solid #7f1d1d}
+.kind-text{background:#1e293b;color:#94a3b8;border:1px solid #334155}
+.kind-status{background:#132e1d;color:#34d399;border:1px solid #065f46}
+.evt-body{font-family:ui-monospace,monospace;font-size:11px;color:#d0d7de;white-space:pre-wrap;background:#090d16;padding:6px 8px;border-radius:4px;margin-top:4px;border:1px solid #1a2233;max-height:200px;overflow:auto}
+.evt-thought-details{cursor:pointer}
+.evt-thought-details summary{color:#f59e0b;font-weight:500;outline:none;user-select:none;font-size:11px}
+.evt-thought-details summary:hover{color:#fbbf24}
 .topbar{display:flex;align-items:center;gap:12px;margin:4px 0 12px;font-size:13px}
 .topbar h1{margin:0;display:inline}
 .ws-pill{padding:5px 12px;background:#171c26;border-radius:6px;display:inline-flex;align-items:center;gap:8px}

@@ -176,6 +176,16 @@ export async function terminateTree(
   return waitUntilStopped(pid, forceMs);
 }
 
+import { LineStreamAccumulator } from "./log-filter.js";
+import type { LogEventFilter, LogFilterContext } from "./log-filter.js";
+import type { StreamLogEvent } from "./types.js";
+
+export interface ProcessStreamOptions {
+  filter?: LogEventFilter;
+  filterContext?: LogFilterContext;
+  onLogEvent?: (event: StreamLogEvent) => void;
+}
+
 /** 共享子进程执行核心。runProcess(shell:false) 与 runShell(shell:true) 仅 spawn 形式不同，
  *  其余（pidFile / 有界输出 / 超时 SIGKILL / 错误与 close 的 settled 守卫 / pidFile 清理）完全一致。
  *  抽到这里避免两份 ~60 行副本漂移。 */
@@ -187,6 +197,7 @@ function runChild(
   timeoutMs: number,
   logFile?: string,
   pidFile?: string,
+  streamOptions?: ProcessStreamOptions,
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = useShell
@@ -208,9 +219,25 @@ function runChild(
     const output = new BoundedOutput();
     let timedOut = false;
     let settled = false;
+
+    let accumulator: LineStreamAccumulator | undefined;
+    if (streamOptions?.filter && streamOptions.onLogEvent) {
+      accumulator = new LineStreamAccumulator(streamOptions.filter);
+    }
+
     const append = (chunk: Buffer) => {
       output.append(chunk);
       if (logFile) appendFileSync(logFile, chunk);
+      if (accumulator && streamOptions?.onLogEvent) {
+        const ctx = streamOptions.filterContext ?? {
+          jobId: "",
+          executor: "",
+        };
+        const events = accumulator.feed(chunk, ctx);
+        for (const evt of events) {
+          streamOptions.onLogEvent(evt);
+        }
+      }
     };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
@@ -218,10 +245,25 @@ function runChild(
       timedOut = true;
       if (child.pid) killTree(child.pid, "SIGKILL", child);
     }, timeoutMs);
+
+    const flushStream = () => {
+      if (accumulator && streamOptions?.onLogEvent) {
+        const ctx = streamOptions.filterContext ?? {
+          jobId: "",
+          executor: "",
+        };
+        const events = accumulator.flush(ctx);
+        for (const evt of events) {
+          streamOptions.onLogEvent(evt);
+        }
+      }
+    };
+
     child.on("error", (error) => {
       if (!settled) {
         settled = true;
         clearTimeout(timer);
+        flushStream();
         if (pidFile) {
           try {
             unlinkSync(pidFile);
@@ -236,6 +278,7 @@ function runChild(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      flushStream();
       if (pidFile) {
         try {
           unlinkSync(pidFile);
@@ -260,8 +303,18 @@ export function runProcess(
   timeoutMs: number,
   logFile?: string,
   pidFile?: string,
+  streamOptions?: ProcessStreamOptions,
 ): Promise<ProcessResult> {
-  return runChild(false, command, args, cwd, timeoutMs, logFile, pidFile);
+  return runChild(
+    false,
+    command,
+    args,
+    cwd,
+    timeoutMs,
+    logFile,
+    pidFile,
+    streamOptions,
+  );
 }
 
 export function runShell(
@@ -270,6 +323,17 @@ export function runShell(
   timeoutMs: number,
   logFile?: string,
   pidFile?: string,
+  streamOptions?: ProcessStreamOptions,
 ): Promise<ProcessResult> {
-  return runChild(true, command, [], cwd, timeoutMs, logFile, pidFile);
+  return runChild(
+    true,
+    command,
+    [],
+    cwd,
+    timeoutMs,
+    logFile,
+    pidFile,
+    streamOptions,
+  );
 }
+

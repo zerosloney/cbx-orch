@@ -1,6 +1,8 @@
 import path from "node:path";
-import { cleanupRecordedWorktree } from "./git-ops.js";
+import { cleanupRecordedWorktree, cleanupStageWorktree, prepareStageWorktree } from "./git-ops.js";
 import { jobDir } from "./state.js";
+
+export { prepareStageWorktree, cleanupStageWorktree };
 
 export async function cleanupWorktree(workspaceInput: string, jobId: string): Promise<boolean> {
   const workspace = path.resolve(workspaceInput);

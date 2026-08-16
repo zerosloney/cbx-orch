@@ -259,6 +259,57 @@ async function loadDetail(id){
   // 默认加载 overview
   loadTab(id,'overview',panelsEl,result);
 }
+function renderStreamEventCard(evt) {
+  var div = document.createElement('div');
+  div.className = 'evt-card';
+  var kind = evt.kind || 'text';
+  var content = evt.content || '';
+  var meta = evt.meta || {};
+  var jobId = evt.jobId || (evt.payload && evt.payload.jobId) || '';
+  var timeStr = fmt(evt.timestamp || evt.at || new Date().toISOString());
+
+  if (kind === 'thought') {
+    var summaryText = content.length > 50 ? content.slice(0, 50) + '…' : content;
+    div.innerHTML =
+      '<div class="evt-header">' +
+      '<span class="evt-kind-badge kind-thought">Thought</span>' +
+      '<span class="t">' + timeStr + '</span>' +
+      (jobId ? '<span class="s-running"><b>' + esc(jobId) + '</b></span>' : '') +
+      '</div>' +
+      '<details class="evt-thought-details" open>' +
+      '<summary>💭 Reasoning (' + esc(summaryText) + ')</summary>' +
+      '<div class="evt-body">' + esc(content) + '</div>' +
+      '</details>';
+  } else if (kind === 'tool_use') {
+    var argsText = typeof meta.toolArgs === 'object' ? JSON.stringify(meta.toolArgs, null, 2) : (content || '');
+    div.innerHTML =
+      '<div class="evt-header">' +
+      '<span class="evt-kind-badge kind-tool_use">Tool</span>' +
+      '<span style="color:#38bdf8">🛠️ ' + esc(meta.toolName || 'tool_use') + '</span>' +
+      '<span class="t">' + timeStr + '</span>' +
+      (jobId ? '<span class="s-running"><b>' + esc(jobId) + '</b></span>' : '') +
+      '</div>' +
+      (argsText ? '<div class="evt-body">' + esc(argsText) + '</div>' : '');
+  } else if (kind === 'error') {
+    div.innerHTML =
+      '<div class="evt-header">' +
+      '<span class="evt-kind-badge kind-error">Error</span>' +
+      '<span class="t">' + timeStr + '</span>' +
+      (jobId ? '<span class="s-failed"><b>' + esc(jobId) + '</b></span>' : '') +
+      '</div>' +
+      '<div class="evt-body" style="color:#f87171">' + esc(content) + '</div>';
+  } else {
+    div.innerHTML =
+      '<div class="evt-header">' +
+      '<span class="evt-kind-badge kind-text">Text</span>' +
+      '<span class="t">' + timeStr + '</span>' +
+      (jobId ? '<span><b>' + esc(jobId) + '</b></span>' : '') +
+      '</div>' +
+      '<div class="evt-body">' + esc(content) + '</div>';
+  }
+  return div;
+}
+
 async function loadTab(id,tab,panelsEl,result){
   var panel=panelsEl.querySelector('.tab-panel[data-tab="'+tab+'"]');
   if(!panel)return;
@@ -314,6 +365,26 @@ async function loadTab(id,tab,panelsEl,result){
       }
       html+='</div>';
       if(ex.command)html+='<div class="cmd">'+esc(ex.command)+'</div>';
+
+      // 流式事件结构化展示 (events.ndjson)
+      try {
+        var evData = await cbxFetch('/api/jobs/' + id + '/events?since=0').then(function(r) { return r.json(); });
+        var streamEvts = (evData.events || []).map(function(s) {
+          try { return JSON.parse(s); } catch(e) { return null; }
+        }).filter(function(e) {
+          return e && e.event === 'executor_stream_event';
+        });
+        if (streamEvts.length > 0) {
+          html += '<h3 style="margin:14px 0 6px;color:#9ecbff">流式执行动向 (Stream Log Events)</h3>';
+          html += '<div style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow:auto;padding:4px;background:#080b11;border:1px solid #2a3140;border-radius:6px">';
+          streamEvts.slice(-30).forEach(function(se) {
+            var card = renderStreamEventCard(se);
+            if (card) html += card.outerHTML;
+          });
+          html += '</div>';
+        }
+      } catch (e) { /* ignore */ }
+
       // 增量 agent.log 拉取(默认读尾部 256KB)
       var log=await cbxFetch('/api/jobs/'+id+'/agent.log?since=0').then(function(r){return r.json()});
       if(log.content){
@@ -400,18 +471,26 @@ function refreshElapsedRows(){
 }
 setInterval(refreshElapsedRows,1000);
 var stream=document.querySelector('#stream');
-	var es=new EventSource('/events',{withCredentials:true});
-	es.onerror=function(e){console.warn('cbx-ui: SSE 连接异常，浏览器将自动重连',e);};
+var es=new EventSource('/events',{withCredentials:true});
+es.onerror=function(e){console.warn('cbx-ui: SSE 连接异常，浏览器将自动重连',e);};
 es.onmessage=function(e){
   var d=JSON.parse(e.data);
   if(d.type==='heartbeat'||d.type==='connected')return;
-  var p=d.payload||{};
+  var p=d.payload||d;
+  if(d.event==='executor_stream_event'||p.event==='executor_stream_event'||d.event==='executor.stream_event'||p.event==='executor.stream_event'){
+    var card=renderStreamEventCard(p.event?p:d);
+    if(card){
+      stream.appendChild(card);
+      stream.scrollTop=stream.scrollHeight;
+      while(stream.children.length>200)stream.removeChild(stream.firstChild);
+    }
+    return;
+  }
   var status=p.status||'';
   var div=document.createElement('div');
   div.className='evt';
-  // status 来自 SSE payload，进 class 属性与文本前先 esc，防非常枚举值逃逸属性/标签。
   var sStatus=esc(status);
-  var txt='<span class="t">'+fmt(d.at)+'</span>';
+  var txt='<span class="t">'+fmt(d.at||new Date().toISOString())+'</span>';
   if(p.jobId)txt+='<span class="s-'+sStatus+'"><b>'+esc(p.jobId)+'</b></span> ';
   if(p.previousStatus)txt+='<span class="s-'+esc(p.previousStatus)+'">'+esc(p.previousStatus)+'</span> → <span class="s-'+sStatus+'">'+sStatus+'</span>';
   else if(status)txt+='<span class="s-'+sStatus+'">'+sStatus+'</span>';
@@ -422,3 +501,4 @@ es.onmessage=function(e){
   while(stream.children.length>200)stream.removeChild(stream.firstChild);
 };
 if(window.addEventListener){window.addEventListener('beforeunload',function(){es.close();});}
+

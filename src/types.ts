@@ -7,6 +7,32 @@ import type { RuntimeConfig } from "./storage.js";
 import type { ContextBudget } from "./context-pack.js";
 
 export type Json = Record<string, unknown>;
+
+export type LogEventKind =
+  | "turn_start"
+  | "thought"
+  | "text"
+  | "tool_use"
+  | "tool_result"
+  | "system_notice"
+  | "error"
+  | "turn_end";
+
+export interface StreamLogEvent {
+  jobId: string;
+  stageName?: string;
+  executor: string;
+  timestamp: string;
+  kind: LogEventKind;
+  content: string;
+  meta?: {
+    toolName?: string;
+    toolArgs?: Record<string, unknown>;
+    turnIndex?: number;
+    tokensNum?: number;
+  };
+}
+
 export type JobStatus =
   | "queued"
   | "running"

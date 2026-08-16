@@ -58,8 +58,24 @@ export async function prepareWorktree(workspace: string, directory: string, jobI
   return target;
 }
 
-export async function cleanupRecordedWorktree(workspace: string, directory: string): Promise<boolean> {
-  const file = path.join(directory, "worktree.json");
+export async function prepareStageWorktree(workspace: string, directory: string, jobId: string, stageIndex: number, isolated: boolean, autoBranch = false, baseCommit = "HEAD"): Promise<string> {
+  if (!isolated) return workspace;
+  const root = gitRoot(workspace);
+  if (!root) throw new Error("--isolated 要求工作区位于 Git 仓库中。");
+  const subId = `${jobId}-stage-${stageIndex}`;
+  const target = path.join(path.dirname(root), `.${path.basename(root)}.cbx-worktrees`, subId);
+  await mkdir(path.dirname(target), { recursive: true });
+  const branch = `cbx/${subId}`;
+  const branchExists = capture(["git", "show-ref", "--verify", `refs/heads/${branch}`], root).code === 0;
+  const args = autoBranch && branchExists ? ["git", "worktree", "add", target, branch] : autoBranch ? ["git", "worktree", "add", "-b", branch, target, baseCommit] : ["git", "worktree", "add", "--detach", target, baseCommit];
+  const result = capture(args, root);
+  if (result.code !== 0) throw new Error(`创建 Stage Git worktree 失败：\n${result.stderr.trim()}`);
+  await saveJson(path.join(directory, `worktree-stage-${stageIndex}.json`), { path: target, branch: autoBranch ? branch : undefined, baseCommit, createdAt: now() });
+  return target;
+}
+
+export async function cleanupStageWorktree(workspace: string, directory: string, stageIndex: number): Promise<boolean> {
+  const file = path.join(directory, `worktree-stage-${stageIndex}.json`);
   if (!existsSync(file)) return false;
   const record = await loadJson<{ path: string }>(file);
   const target = path.resolve(record.path);
@@ -67,17 +83,47 @@ export async function cleanupRecordedWorktree(workspace: string, directory: stri
   const expectedParent = root ? path.resolve(path.dirname(root), `.${path.basename(root)}.cbx-worktrees`) : "";
   if (!root || path.dirname(target) !== expectedParent) throw new Error("拒绝清理不属于本编排器的 worktree 路径。");
   const result = capture(["git", "worktree", "remove", "--force", target], root);
-  if (result.code !== 0 && existsSync(target)) throw new Error(`清理 worktree 失败：\n${result.stderr.trim()}`);
-  // 容器目录 .<repo>.cbx-worktrees/ 跨 job 复用；删完 job 子目录后若已空，一并清理避免孤儿。
-  // 并发安全：readdir 非空（其他 job 在用）则跳过；rmdir 仅删空目录，不会误伤。
+  if (result.code !== 0 && existsSync(target)) throw new Error(`清理 Stage worktree 失败：\n${result.stderr.trim()}`);
   if (expectedParent && existsSync(expectedParent)) {
     try {
       const remaining = await readdir(expectedParent);
       if (remaining.length === 0) await rmdir(expectedParent);
-    } catch { /* 容器清理是 best-effort，失败不影响 job 终态 */ }
+    } catch { /* best-effort */ }
   }
-  await saveJson(path.join(directory, "worktree-cleaned.json"), { path: target, cleanedAt: now() });
+  await saveJson(path.join(directory, `worktree-stage-${stageIndex}-cleaned.json`), { path: target, cleanedAt: now() });
   return true;
+}
+
+export async function cleanupRecordedWorktree(workspace: string, directory: string): Promise<boolean> {
+  const root = gitRoot(workspace);
+  const expectedParent = root ? path.resolve(path.dirname(root), `.${path.basename(root)}.cbx-worktrees`) : "";
+  let cleanedAny = false;
+
+  const files = existsSync(directory) ? await readdir(directory) : [];
+  const targetFiles = files.filter(f => f === "worktree.json" || /^worktree-stage-\d+\.json$/.test(f));
+
+  for (const file of targetFiles) {
+    const filePath = path.join(directory, file);
+    try {
+      const record = await loadJson<{ path: string }>(filePath);
+      const target = path.resolve(record.path);
+      if (root && path.dirname(target) === expectedParent) {
+        capture(["git", "worktree", "remove", "--force", target], root);
+        cleanedAny = true;
+      }
+    } catch { /* best-effort */ }
+  }
+
+  if (expectedParent && existsSync(expectedParent)) {
+    try {
+      const remaining = await readdir(expectedParent);
+      if (remaining.length === 0) await rmdir(expectedParent);
+    } catch { /* best-effort */ }
+  }
+  if (cleanedAny) {
+    await saveJson(path.join(directory, "worktree-cleaned.json"), { cleanedAt: now() });
+  }
+  return cleanedAny;
 }
 
 function trackedDiff(workdir: string): string {

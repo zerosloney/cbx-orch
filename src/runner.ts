@@ -21,7 +21,19 @@ export function promptFor(phase: string, extra = "", _label: string, contextPack
   return `你是任务执行代理。\n\n只读取当前角色上下文包：\n- ${contextPack}\n\n上下文包是编排器生成的最小化脱敏投影；只可额外读取其中 artifacts 明确列出的文件，不要读取任何未列材料或历史轨迹。\n当前阶段：${phase}\n\n${extra}`;
 }
 
-async function invokeBuiltin(spec: ReturnType<typeof resolveExecutor> & {}, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number): Promise<ProcessResult> {
+import { createLogEventFilter } from "./log-filter.js";
+import type { StreamLogEvent } from "./types.js";
+
+async function invokeBuiltin(
+  spec: ReturnType<typeof resolveExecutor> & {},
+  directory: string,
+  workdir: string,
+  prompt: string,
+  permissionMode: string,
+  maxTurns: number,
+  timeoutMs: number,
+  invocationMeta?: InvocationMeta,
+): Promise<ProcessResult> {
   const executable = findExecutable(spec);
   const args = [...executable.slice(1), ...spec.buildArgs({ prompt, permissionMode, maxTurns })];
   const command = executable[0];
@@ -29,7 +41,22 @@ async function invokeBuiltin(spec: ReturnType<typeof resolveExecutor> & {}, dire
   const outputLog = path.join(directory, "agent.log");
   appendFileSync(eventsFile, JSON.stringify({ event: "executor_metadata", source: "builtin", name: spec.name, version: APP_VERSION, at: new Date().toISOString() }) + "\n", "utf8");
   appendFileSync(eventsFile, JSON.stringify({ event: "process_started", command: [command, ...args], cwd: workdir, at: new Date().toISOString() }) + "\n", "utf8");
-  const result = await runProcess(command, args, workdir, timeoutMs, outputLog, path.join(directory, "active.pid"));
+
+  const filter = createLogEventFilter(spec.name);
+  const filterContext = {
+    jobId: invocationMeta?.jobId ?? "",
+    executor: spec.name,
+    stageName: invocationMeta?.stageIndex !== undefined ? `stage_${invocationMeta.stageIndex}` : undefined,
+  };
+  const streamOptions = {
+    filter,
+    filterContext,
+    onLogEvent: (evt: StreamLogEvent) => {
+      appendFileSync(eventsFile, JSON.stringify({ event: "executor_stream_event", ...evt }) + "\n", "utf8");
+    },
+  };
+
+  const result = await runProcess(command, args, workdir, timeoutMs, outputLog, path.join(directory, "active.pid"), streamOptions);
   appendFileSync(eventsFile, JSON.stringify({ event: "process_finished", returncode: result.code, timedOut: result.timedOut, at: new Date().toISOString() }) + "\n", "utf8");
   return result;
 }
@@ -59,7 +86,7 @@ export async function invokeExecutor(executor: string, workspace: string, direct
     }
   }
   const builtin = resolveExecutor(executor);
-  if (builtin) return invokeBuiltin(builtin, directory, workdir, prompt, permissionMode, maxTurns, timeoutMs);
+  if (builtin) return invokeBuiltin(builtin, directory, workdir, prompt, permissionMode, maxTurns, timeoutMs, invocationMeta);
   const config = await loadConfig(workspace);
   const identity = await inspectExecutorPlugin(executor, workspace, config.plugins);
   if (!config.plugins?.enforce) {
