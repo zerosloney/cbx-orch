@@ -747,7 +747,7 @@ test("timed out executor plugins are killed before they can mutate later", async
   const plugin = path.join(workspace, "slow-plugin.mjs");
   await writeFile(
     plugin,
-    `export default { async run(request) { await new Promise(r => setTimeout(r, 500)); await (await import("node:fs/promises")).writeFile(request.workdir + "/late-change.txt", "late"); return { code: 0 }; } };\n`,
+    `export default { async run(request) { await new Promise(r => setTimeout(r, 5000)); await (await import("node:fs/promises")).writeFile(request.workdir + "/late-change.txt", "late"); return { code: 0 }; } };\n`,
     "utf8",
   );
   const job = await createJob({
@@ -765,7 +765,7 @@ test("timed out executor plugins are killed before they can mutate later", async
   const state = await executeJob(workspace, job.jobId);
   assert.equal(state.status, "failed");
   assert.equal(state.timedOut, true);
-  await new Promise((resolve) => setTimeout(resolve, 650));
+  await new Promise((resolve) => setTimeout(resolve, 5_500));
   await assert.rejects(
     () => readFile(path.join(workspace, "late-change.txt")),
     /ENOENT/,

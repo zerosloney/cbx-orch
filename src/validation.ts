@@ -59,15 +59,24 @@ export function validateTestCommand(command?: string): void {
   if (!command) return;
   // 拒绝 shell 链式/重定向操作符、换行（命令分隔）、反引号与 $( 命令替换——这些是绕过黑名单的主要手法。
   if (/[;&|<>`\r\n]/.test(command) || command.includes("$(")) {
-    throw new Error("测试命令包含不允许的 shell 操作符、换行或命令替换。");
+    throw new CbxError(
+      "E_VALIDATION",
+      "测试命令包含不允许的 shell 操作符、换行或命令替换。",
+    );
   }
-  // 拒绝递归/强制删除与编码执行等破坏性命令（覆盖常见参数变体）。
-  // 软防线：无法穷举所有变体，非隔离任务仍依赖运行环境隔离。补 find -delete/git clean/truncate/dd/shred 等。
+  // 先去引号再匹配：`rm '-rf' /`、`git 'clean' -fd` 等引号变体与裸写行为一致（shell 均照常执行）。
+  const normalized = command.replace(/['"]/g, " ");
+  // 拒绝递归/强制删除与编码执行等破坏性命令（覆盖 flag 顺序无关的 rd /q /s、del 的 erase 同义词、find -exec）。
+  // 软防线：正则无法穷举全部变体（别名脚本、base64 管道等仍可绕过），
+  // 非隔离任务的真正防线是运行环境隔离；此处仅拦截已知高频变体。
   const destructive =
-    /(?:\brm\s+(?:-[a-z]*[rf]|--recurs|--forc)|\brd\s+\/s|\brmdir\s+\/s|Remove-Item|\bdel\s+\/s|\bdeltree\b|\bformat\s+|\bfind\s+.*\b-delete\b|\bgit\s+clean\b|\btruncate\b|\bdd\b.*\bof=|\bshred\b)/i;
+    /(?:\brm\s+(?:-[a-z]*[rf]|--recurs|--forc)|\b(?:rd|erase|del)\s+(?:\/\w\s+)*\/[a-z]*s[a-z]*\b|\brmdir\s+(?:\/\w\s+)*\/s|Remove-Item|\bdeltree\b|\bformat\s+|\bfind\s+.*\b(?:-delete|-exec)\b|\bgit\s+clean\b|\btruncate\b|\bdd\b.*\bof=|\bshred\b)/i;
   const encodedCommand = /\s-(?:enc|encodedcommand)\b/i;
-  if (destructive.test(command) || encodedCommand.test(command)) {
-    throw new Error("测试命令包含不允许的破坏性命令或编码执行。");
+  if (destructive.test(normalized) || encodedCommand.test(normalized)) {
+    throw new CbxError(
+      "E_VALIDATION",
+      "测试命令包含不允许的破坏性命令或编码执行。",
+    );
   }
 }
 

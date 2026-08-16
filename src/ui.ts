@@ -8,7 +8,7 @@ import { open, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  approveJob,
+  approveJobAndStart,
   cancelJob,
   createJob,
   forgetJobKeepWorktree,
@@ -30,7 +30,12 @@ import {
 } from "./core.js";
 import { captureAsync } from "./process-runner.js";
 import { constantTimeEqual, processAlive } from "./storage.js";
-import { isCbxError } from "./errors.js";
+import { httpStatusForError } from "./errors.js";
+import {
+  hasJsonContentType,
+  isTrustedLocalRequest,
+  requestHasBody,
+} from "./http-guard.js";
 
 /** 校验 token; 未配置 token 时始终放行。常量时间比较避免时序侧信道。
  *  支持两种凭证：Authorization Bearer header（curl/API 客户端），
@@ -690,7 +695,15 @@ export function createWebUiServer(
     try {
       if (req.method !== "GET" && req.method !== "POST")
         return json(res, { error: "method not allowed" }, 405);
+      // 防 DNS rebinding 与跨站 CSRF：Host 必须回环；带 Origin 的浏览器请求必须同源回环。
+      // 无 token 时任意网页可用 no-preflight simple POST 触发 cancel/pause 等写操作。
+      if (!isTrustedLocalRequest(req))
+        return json(res, { error: "forbidden" }, 403);
       const url = new URL(req.url ?? "/", `http://${host}:${port}`);
+      // 携带 body 的 POST 必须是 application/json：阻断以 text/plain simple request
+      // 携带 JSON body 的跨站变体；无 body POST（cancel/pause 等）不强制，保持 curl 兼容。
+      if (req.method === "POST" && requestHasBody(req) && !hasJsonContentType(req))
+        return json(res, { error: "content-type 必须是 application/json。" }, 415);
       // UI 外壳与 /healthz 保持开放；API 数据仍需鉴权。
       // /events 允许 query token (EventSource 无法设 Authorization header)。
       if (
@@ -925,10 +938,8 @@ export function createWebUiServer(
           const jobId = jobAction[1];
           const action = jobAction[2];
           if (action === "approve") {
-            const state = await approveJob(ws, jobId);
-            // 与 MCP cbx_approve 一致：批准 before_run 后状态回 queued，需显式启动。
-            if (state.status === "queued") await startBackground(ws, jobId);
-            return json(res, state);
+            // approveJobAndStart 内聚"批准 before_run 后回 queued 需重新入队"契约。
+            return json(res, await approveJobAndStart(ws, jobId));
           }
           if (action === "cancel") return json(res, await cancelJob(ws, jobId));
           if (action === "retry") {
@@ -1001,21 +1012,8 @@ export function createWebUiServer(
       return json(res, { error: "not found" }, 404);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const code = (error as NodeJS.ErrnoException)?.code;
-      // 按错误码映射 HTTP 状态，不再依赖消息文案匹配。
-      const status =
-        code === "ENOENT"
-          ? 404
-          : code === "EBIG"
-            ? 413
-            : isCbxError(error, "E_NOT_FOUND")
-              ? 404
-              : isCbxError(error, "E_ARTIFACT_FORBIDDEN")
-                ? 403
-                : isCbxError(error, "E_INVALID_JOB_ID")
-                  ? 400
-                  : 500;
-      json(res, { error: message }, status);
+      // 错误码 → HTTP 状态集中映射见 errors.httpStatusForError。
+      json(res, { error: message }, httpStatusForError(error));
     }
   });
   const heartbeat = setInterval(() => {

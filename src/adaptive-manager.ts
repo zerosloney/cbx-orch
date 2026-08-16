@@ -10,7 +10,6 @@ export interface AdaptiveTaskStage {
   task: string;
   reviewExecutor?: string;
   skipReview?: boolean;
-  dependsOn?: string[];
 }
 
 export type NextAction =
@@ -79,13 +78,14 @@ export function normalizeAdaptiveOptions(
 
 function parseStage(value: unknown): AdaptiveTaskStage {
   const stage = object(value, "nextAction.stage");
+  // dependsOn 不在允许字段内：adaptive 循环由 manager 每轮自选 stage、单 stage 串行执行，
+  // 依赖声明没有语义；manager 若幻觉出该字段按未知字段拒绝，避免静默忽略。
   known(stage, "nextAction.stage", [
     "name",
     "executor",
     "task",
     "reviewExecutor",
     "skipReview",
-    "dependsOn",
   ]);
   if (
     stage.reviewExecutor !== undefined &&
@@ -94,17 +94,6 @@ function parseStage(value: unknown): AdaptiveTaskStage {
     throw new Error("nextAction.stage.reviewExecutor 必须是非空字符串。");
   if (stage.skipReview !== undefined && typeof stage.skipReview !== "boolean")
     throw new Error("nextAction.stage.skipReview 必须是布尔值。");
-  let dependsOn: string[] | undefined;
-  if (stage.dependsOn !== undefined) {
-    if (
-      !Array.isArray(stage.dependsOn) ||
-      stage.dependsOn.some(
-        (dep: unknown) => typeof dep !== "string" || !(dep as string).trim(),
-      )
-    )
-      throw new Error("nextAction.stage.dependsOn 必须是非空字符串数组。");
-    dependsOn = [...new Set(stage.dependsOn.map((dep: string) => dep.trim()))];
-  }
   return {
     name: text(stage.name, "nextAction.stage.name", 200),
     executor: text(stage.executor, "nextAction.stage.executor", 2_000),
@@ -114,7 +103,6 @@ function parseStage(value: unknown): AdaptiveTaskStage {
         ? undefined
         : text(stage.reviewExecutor, "nextAction.stage.reviewExecutor", 2_000),
     skipReview: stage.skipReview as boolean | undefined,
-    dependsOn,
   };
 }
 

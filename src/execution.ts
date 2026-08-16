@@ -18,7 +18,7 @@ import {
   jobDir,
   logJobEvent,
 } from "./state.js";
-import { writeResult } from "./result.js";
+import { finalizeState, writeResult } from "./result.js";
 import {
   evaluateBaselineDrift,
   refreshBaseline,
@@ -31,7 +31,7 @@ import {
   ManagerDecisionError,
 } from "./stage-runner.js";
 import { contextRedactor, contextArtifacts } from "./artifacts.js";
-import { prepareWorktree, prepareStageWorktree, cleanupStageWorktree, snapshotDiff, commitWorktree } from "./git-ops.js";
+import { prepareWorktree, snapshotDiff, commitWorktree } from "./git-ops.js";
 import { assertExecutionPolicy } from "./validation.js";
 import {
   createHumanGate,
@@ -171,7 +171,7 @@ async function executeJobLocked(
   }
   const drift = evaluateBaselineDrift(context, workspace);
   if (context.isolated && context.baseDirty) {
-    const state = await writeState(
+    return finalizeState(
       workspace,
       jobId,
       {
@@ -181,13 +181,11 @@ async function executeJobLocked(
         error:
           "隔离任务无法携带创建时的未提交内容；请先提交或清理工作区后刷新基线。",
       },
-      queueEntryId,
+      { queueEntryId },
     );
-    await writeResult(workspace, jobId, state);
-    return state;
   }
   if (!context.isolated && drift.dirtyDrift) {
-    const state = await writeState(
+    return finalizeState(
       workspace,
       jobId,
       {
@@ -197,10 +195,8 @@ async function executeJobLocked(
         error:
           "非隔离工作区未提交内容已偏离任务创建基线；请刷新上下文/基线后继续。",
       },
-      queueEntryId,
+      { queueEntryId },
     );
-    await writeResult(workspace, jobId, state);
-    return state;
   }
   if (drift.commitDrift) {
     logJobEvent(workspace, jobId, "baseline_drift", {
@@ -209,7 +205,7 @@ async function executeJobLocked(
       isolated: context.isolated,
     });
     if (!context.isolated) {
-      const state = await writeState(
+      return finalizeState(
         workspace,
         jobId,
         {
@@ -220,10 +216,8 @@ async function executeJobLocked(
           error:
             "非隔离工作区 HEAD 已偏离任务创建基线；请刷新上下文/基线后继续。",
         },
-        queueEntryId,
+        { queueEntryId },
       );
-      await writeResult(workspace, jobId, state);
-      return state;
     }
     await writeState(workspace, jobId, {
       baselineDrift: true,
@@ -406,14 +400,12 @@ async function executeJobLocked(
     } catch (error) {
       await writeState(workspace, jobId, { cleanupError: String(error) });
     }
-    const finalState = await writeState(
+    return finalizeState(
       workspace,
       jobId,
       { status: "cancelled", phase: "cancelled", cancelledAt: now() },
-      queueEntryId,
+      { queueEntryId },
     );
-    await writeResult(workspace, jobId, finalState);
-    return finalState;
   };
 
   if (
@@ -625,13 +617,11 @@ async function executeJobLocked(
         { round, action: decision.action, stage, report: outcome.report },
       ];
       if (outcome.terminal) {
-        const finalState = await writeState(workspace, jobId, {
+        return finalizeState(workspace, jobId, {
           adaptiveRound: round,
           adaptiveRounds,
           stages: stageReports,
         });
-        await writeResult(workspace, jobId, finalState);
-        return finalState;
       }
       attempt = outcome.attempt;
       attemptExtra = outcome.attemptExtra;
@@ -796,11 +786,9 @@ async function executeJobLocked(
           executedNames.add(remaining.name);
         }
       }
-      const finalState = await writeState(workspace, jobId, {
+      return finalizeState(workspace, jobId, {
         stages: stageReports,
       });
-      await writeResult(workspace, jobId, finalState);
-      return finalState;
     }
     stageReports.push(outcome.report);
     attempt = outcome.attempt;

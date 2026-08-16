@@ -287,7 +287,7 @@ test("completion approval preserves verified isolated work and completes without
     isolated: true,
     permissionMode: "auto",
     maxTurns: 10,
-    timeoutMs: 2_000,
+    timeoutMs: 10_000,
     maxRetries: 0,
     approvalBeforeComplete: true,
     jobId: "completion-approval",

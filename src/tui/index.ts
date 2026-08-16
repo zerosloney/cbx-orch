@@ -16,7 +16,7 @@ import type { JobState, StageReport } from "../types.js";
 import type { QueueFile } from "../queue.js";
 import { buildTimeline, type JobTimeline } from "../ui.js";
 import {
-  approveJob,
+  approveJobAndStart,
   cancelJob,
   forgetJobKeepWorktree,
   listJobs,
@@ -388,11 +388,9 @@ export async function startTui(
       | "purge",
     jobId?: string,
   ): void => {
-    // approve 需复刻 CLI/MCP 语义：before_run 批准后状态回 queued，需显式 startBackground。
-    const approveAndStart = async (id: string): Promise<void> => {
-      const state = await approveJob(workspace, id);
-      if (state.status === "queued") await startBackground(workspace, id);
-    };
+    // 批准后重入队契约收敛在 approveJobAndStart（此前四处副本各自维护）。
+    const approveAndStart = (id: string): Promise<void> =>
+      approveJobAndStart(workspace, id).then(() => undefined);
     const operation =
       action === "pause"
         ? pauseQueue(workspace)

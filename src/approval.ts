@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { CbxError } from "./errors.js";
 import path from "node:path";
 import {
   loadJson,
@@ -15,7 +16,8 @@ import {
   jobDir,
 } from "./state.js";
 import { contextRedactor } from "./artifacts.js";
-import { writeResult } from "./result.js";
+import { finalizeApprovalState, writeResult } from "./result.js";
+import { startBackground } from "./lifecycle.js";
 import {
   createHumanGate,
   parseHumanGate,
@@ -38,7 +40,7 @@ async function approveJobLocked(
   const workspace = path.resolve(workspaceInput);
   const state = await loadState(workspace, jobId);
   if (state.status !== "awaiting_approval")
-    throw new Error(`任务当前不需要批准：${jobId}`);
+    throw new CbxError("E_STATE_CONFLICT", `任务当前不需要批准：${jobId}`);
   const gate = state.humanGate
     ? parseHumanGate(state.humanGate)
     : state.phase === "before_run"
@@ -46,10 +48,10 @@ async function approveJobLocked(
       : state.phase === "before_complete"
         ? createHumanGate("completion", { detail: "等待完成审批。" })
         : (() => {
-            throw new Error("等待审批的任务缺少 Human Gate。");
+            throw new CbxError("E_STATE_CONFLICT", "等待审批的任务缺少 Human Gate。");
           })();
   if (gate.status !== "waiting")
-    throw new Error("Human Gate 已解决，不能重复批准。");
+    throw new CbxError("E_STATE_CONFLICT", "Human Gate 已解决，不能重复批准。");
   const config = await loadConfig(workspace);
   const redact = contextRedactor(config.governance);
   if (state.phase === "before_run" && gate.reason === "before_run") {
@@ -67,7 +69,7 @@ async function approveJobLocked(
     );
   }
   if (state.phase !== "before_complete" || gate.reason !== "completion")
-    throw new Error("审批状态与 Human Gate 不一致。");
+    throw new CbxError("E_STATE_CONFLICT", "审批状态与 Human Gate 不一致。");
   const directory = jobDir(workspace, jobId);
   const context = await loadJobContext(directory);
   const pending = parsePendingCompletion(state.pendingCompletion);
@@ -96,7 +98,7 @@ async function approveJobLocked(
       "approval rejected because completion evidence changed",
       redact,
     );
-    const stale = await writeApprovalState(
+    return finalizeApprovalState(
       workspace,
       jobId,
       {
@@ -108,10 +110,8 @@ async function approveJobLocked(
         error: "完成审批证据或 worktree 已变化；拒绝完成，请重新执行验证。",
       },
       "failed",
+      { prune: true },
     );
-    await writeResult(workspace, jobId, stale);
-    await pruneAfterTerminal(workspace);
-    return stale;
   }
   const updates: Json = {
     status: "done",
@@ -133,7 +133,7 @@ async function approveJobLocked(
       updates.gitCommit =
         commitWorktree(workdir, context.commitMessage) ?? null;
     } catch (error) {
-      const failed = await writeApprovalState(
+      return finalizeApprovalState(
         workspace,
         jobId,
         {
@@ -150,10 +150,8 @@ async function approveJobLocked(
           gitCommit: null,
         },
         "failed",
+        { prune: true },
       );
-      await writeResult(workspace, jobId, failed);
-      await pruneAfterTerminal(workspace);
-      return failed;
     }
   }
   await writeApprovalState(workspace, jobId, updates, "done");
@@ -181,4 +179,19 @@ export async function approveJob(
     () => approveJobLocked(workspace, jobId),
     { retries: 0, busyMessage: `任务正在运行中：${jobId}` },
   );
+}
+
+/**
+ * 审批后统一收口：before_run 批准后状态回 queued，必须显式重新入队启动。
+ * 该契约此前复制在 CLI / MCP / TUI / Web UI 四处（各自注释"需与其他入口保持一致"），
+ * 新调用点忘写 re-enqueue 会把任务静默搁浅在 queued；所有入口统一改走本函数。
+ */
+export async function approveJobAndStart(
+  workspaceInput: string,
+  jobId: string,
+): Promise<JobState> {
+  const workspace = path.resolve(workspaceInput);
+  const state = await approveJob(workspace, jobId);
+  if (state.status === "queued") await startBackground(workspace, jobId);
+  return state;
 }

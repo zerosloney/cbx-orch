@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { CbxError } from "./errors.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -73,7 +74,7 @@ export async function createJob(options: {
 }): Promise<{ jobId: string; directory: string }> {
   const workspace = path.resolve(options.workspace);
   if (typeof options.task !== "string" || !options.task.trim())
-    throw new Error("task 必须是非空字符串。");
+    throw new CbxError("E_VALIDATION", "task 必须是非空字符串。");
   validateWorkspace(workspace);
   validateTestCommand(options.testCommand);
   validatePermissionMode(
@@ -82,21 +83,30 @@ export async function createJob(options: {
   );
   assertExecutionPolicy(options.trustMode ?? "trusted", options.isolated);
   if (!Number.isInteger(options.maxTurns) || options.maxTurns < 1)
-    throw new Error("maxTurns 必须是正整数。");
+    throw new CbxError("E_VALIDATION", "maxTurns 必须是正整数。");
   if (
     options.timeoutMs !== undefined &&
     (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 100)
   )
-    throw new Error("timeoutMs 必须不小于 100ms。");
+    throw new CbxError("E_VALIDATION", "timeoutMs 必须不小于 100ms。");
   if (
     options.maxRetries !== undefined &&
     (!Number.isInteger(options.maxRetries) || options.maxRetries < 0)
   )
-    throw new Error("maxRetries 必须是非负整数。");
+    throw new CbxError("E_VALIDATION", "maxRetries 必须是非负整数。");
   const adaptive = normalizeAdaptiveOptions(options.adaptive);
   if (adaptive.enabled && !options.review)
     throw new Error(
       "adaptive.enabled=true 需要 review=true，以便 done 通过结构化证据门。",
+    );
+  // adaptive 循环由 manager 每轮自选 stage，dependsOn 会被静默忽略（无分层/失败传播）；
+  // 显式拒绝而非接受错误语义的配置。
+  if (
+    adaptive.enabled &&
+    options.taskContract?.stages?.some((stage) => stage.dependsOn?.length)
+  )
+    throw new Error(
+      "adaptive.enabled=true 暂不支持 taskContract.stages[].dependsOn：adaptive 模式由 manager 每轮决定执行顺序，依赖声明不会生效。请移除 dependsOn 或关闭 adaptive。",
     );
   const taskContract =
     normalizeTaskContract(options.taskContract) ??
@@ -117,11 +127,15 @@ export async function createJob(options: {
   }
   const jobId = normalizeJobId(options.jobId);
   const directory = jobDir(workspace, jobId);
-  if (existsSync(directory)) throw new Error(`任务已存在：${jobId}`);
+  if (existsSync(directory))
+    throw new CbxError("E_STATE_CONFLICT", `任务已存在：${jobId}`);
   // legacy 导入可能把 .cbx/jobs/<id>/ 目录清掉但 SQLite 记录仍在；仅查目录会让同 jobId 静默覆盖旧 state。
   const persisted = await loadPersistedState<unknown>(workspace, jobId);
   if (persisted)
-    throw new Error(`任务已存在（SQLite 有记录但目录缺失）：${jobId}`);
+    throw new CbxError(
+      "E_STATE_CONFLICT",
+      `任务已存在（SQLite 有记录但目录缺失）：${jobId}`,
+    );
   await mkdir(directory, { recursive: true });
   const request = `# 任务\n\n## 目标\n\n${taskContract?.goal ?? options.task.trim()}\n\n## 验收标准\n\n${taskContract?.acceptanceCriteria?.map((item) => `- ${item}`).join("\n") || "- 以目标和验收命令为准。"}\n\n## 非目标\n\n${taskContract?.nonGoals?.map((item) => `- ${item}`).join("\n") || "- 未指定。"}\n\n## 约束\n\n${taskContract?.constraints?.map((item) => `- ${item}`).join("\n") || "- 只修改完成目标所需的文件。"}\n\n## 验收命令\n\n${options.testCommand ?? "未指定；请根据项目现有脚本选择最相关的检查。"}\n\n## 执行规则\n\n- 先检查项目结构和现有测试，再修改。\n- 完成后运行验收命令。\n- 将修改摘要、测试命令、测试结果和遗留问题写入 handback.md。\n`;
   await writeFile(path.join(directory, "request.md"), request, "utf8");

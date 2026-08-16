@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // 门槛作为覆盖率 floor（见 issue #6）：feat visualization 新代码已实质覆盖（formatting 98%、TUI ~95%、ui 83%），
-// 整体数字受预先存在的 cli.js 历史欠债拖累。本次随 governance/CJK 等测试补充，实测 lines 70.4% / branch 48.8% /
-// functions 71.9%，按 ~2% 余量上调 floor 防 flaky；后续补测应继续同步上调。
-const thresholds = { lines: 68, branch: 46, functions: 70 };
+// 整体数字受预先存在的 cli.js 历史欠债拖累。随 http-guard/process-tree/runner-redaction/reliable-reclaim 等
+// 测试补充（Windows/Node 24 实测 lines 76.5% / branch 61.72% / functions 78.11%），按 ~3% 跨平台余量上调
+// floor 防 flaky；后续补测应继续同步上调。
+const thresholds = { lines: 73, branch: 58, functions: 75 };
 
 const testsDirectory = path.join(root, "dist", "tests");
 let testFiles;
@@ -26,8 +27,12 @@ if (testFiles.length === 0) {
   process.exit(1);
 }
 
+// 与 npm test 相同的 --test-concurrency=2：此前覆盖率运行用默认并发（=CPU 数），
+// 大量 e2e 子进程并行把紧凑的墙钟假设（秒级执行器超时、百毫秒杀进程余量）拖爆，
+// 在多核开发机与 Windows CI 上表现为随机时序失败。
 const result = spawnSync(process.execPath, [
   "--test",
+  "--test-concurrency=2",
   "--experimental-test-coverage",
   `--test-coverage-lines=${thresholds.lines}`,
   `--test-coverage-branches=${thresholds.branch}`,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { copyFile, mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -24,9 +25,16 @@ test("validateTestCommand allows normal commands and blocks injection vectors", 
     "rm -r -f dir", // rm 分写变体
     "rm --recursive --force dir", // rm 长选项变体
     "rd /s /q C:\\target", // Windows 递归删除
+    "rd /q /s C:\\target", // flag 顺序无关变体
     "rmdir /s dir",
+    "rmdir /q /s dir", // rmdir flag 顺序变体
     "del /s file",
+    "del /f /s file", // del flag 顺序变体
+    "erase /f /s file", // del 的同义词
     "deltree dir",
+    "rm '-rf' /", // 引号包裹 flag（shell 照常执行）
+    "git 'clean' -fd", // 引号包裹子命令
+    "find . -exec rm -rf {} +", // find -exec 执行
     "powershell -enc QUJDREVG", // 编码命令
     "pwsh -EncodedCommand QUJD",
   ];
@@ -116,6 +124,32 @@ test("dispatchQueue reclaims a live pid whose heartbeat stopped advancing", asyn
   });
   await dispatchQueue(workspace);
   assert.equal((await listQueue(workspace)).entries.find((entry) => entry.queueId === "stale-heartbeat-entry")?.status, "queued");
+});
+
+test("dispatchQueue kills the orphaned executor of a dead worker before re-dispatch", async () => {
+  // 回归：worker 崩溃后其 detached executor 仍存活（双 agent 窗口）。回收死 worker 时
+  // 必须按 active.pid 终止孤儿 executor，避免新旧两个 agent 并发改写同一 worktree。
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-reclaim-kill-stray-"));
+  const job = await createJob({ workspace, task: "孤儿 executor", review: false, isolated: false, permissionMode: "auto", maxTurns: 5, jobId: "orphan-executor" });
+  const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true, detached: process.platform !== "win32" });
+  const orphanPid = orphan.pid ?? 0;
+  assert.ok(orphanPid, "orphan pid");
+  await writeFile(path.join(job.directory, "active.pid"), String(orphanPid), "utf8");
+  await mkdir(path.join(workspace, ".cbx"), { recursive: true });
+  await writeFile(path.join(workspace, ".cbx", "queue.json"), deadWorkerQueue(workspace, job.jobId), "utf8");
+  try {
+    await dispatchQueue(workspace);
+    const deadline = Date.now() + 5_000;
+    let alive = true;
+    while (Date.now() < deadline) {
+      try { process.kill(orphanPid, 0); } catch { alive = false; break; }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(alive, false, "孤儿 executor 应被回收路径终止");
+    assert.match(await readFile(path.join(job.directory, "events.ndjson"), "utf8"), /queue_reclaim_killed_stray_executor/);
+  } finally {
+    try { process.kill(orphanPid, "SIGKILL"); } catch { /* 已被终止 */ }
+  }
 });
 
 // ---- 终态双写与调度器的队列锁序列化 ----

@@ -22,7 +22,7 @@ export { createJob } from "./jobs.js";
 export { ARTIFACTS, AUDIT_CANDIDATE, contextArtifacts, contextRedactor, listJobs, readArtifact, readEventsIncremental, listArtifacts, discoverWorkspaces, dedupWorkspaces, listJobsAcrossWorkspaces } from "./artifacts.js";
 
 // Result writing
-export { writeResult } from "./result.js";
+export { writeResult, finalizeState, finalizeApprovalState } from "./result.js";
 
 // Executor invocation
 export { promptFor, invokeExecutor, runTest } from "./runner.js";
@@ -37,7 +37,7 @@ export { ManagerWorktreeMutationError, ManagerDecisionError, ManagerInvocationEr
 export { executeJob, prepareContinuation } from "./execution.js";
 
 // Approval
-export { approveJob } from "./approval.js";
+export { approveJob, approveJobAndStart } from "./approval.js";
 
 // Lifecycle (background start & cancel)
 export { startBackground, cancelJob } from "./lifecycle.js";

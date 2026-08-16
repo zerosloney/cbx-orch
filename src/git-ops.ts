@@ -58,42 +58,6 @@ export async function prepareWorktree(workspace: string, directory: string, jobI
   return target;
 }
 
-export async function prepareStageWorktree(workspace: string, directory: string, jobId: string, stageIndex: number, isolated: boolean, autoBranch = false, baseCommit = "HEAD"): Promise<string> {
-  if (!isolated) return workspace;
-  const root = gitRoot(workspace);
-  if (!root) throw new Error("--isolated 要求工作区位于 Git 仓库中。");
-  const subId = `${jobId}-stage-${stageIndex}`;
-  const target = path.join(path.dirname(root), `.${path.basename(root)}.cbx-worktrees`, subId);
-  await mkdir(path.dirname(target), { recursive: true });
-  const branch = `cbx/${subId}`;
-  const branchExists = capture(["git", "show-ref", "--verify", `refs/heads/${branch}`], root).code === 0;
-  const args = autoBranch && branchExists ? ["git", "worktree", "add", target, branch] : autoBranch ? ["git", "worktree", "add", "-b", branch, target, baseCommit] : ["git", "worktree", "add", "--detach", target, baseCommit];
-  const result = capture(args, root);
-  if (result.code !== 0) throw new Error(`创建 Stage Git worktree 失败：\n${result.stderr.trim()}`);
-  await saveJson(path.join(directory, `worktree-stage-${stageIndex}.json`), { path: target, branch: autoBranch ? branch : undefined, baseCommit, createdAt: now() });
-  return target;
-}
-
-export async function cleanupStageWorktree(workspace: string, directory: string, stageIndex: number): Promise<boolean> {
-  const file = path.join(directory, `worktree-stage-${stageIndex}.json`);
-  if (!existsSync(file)) return false;
-  const record = await loadJson<{ path: string }>(file);
-  const target = path.resolve(record.path);
-  const root = gitRoot(workspace);
-  const expectedParent = root ? path.resolve(path.dirname(root), `.${path.basename(root)}.cbx-worktrees`) : "";
-  if (!root || path.dirname(target) !== expectedParent) throw new Error("拒绝清理不属于本编排器的 worktree 路径。");
-  const result = capture(["git", "worktree", "remove", "--force", target], root);
-  if (result.code !== 0 && existsSync(target)) throw new Error(`清理 Stage worktree 失败：\n${result.stderr.trim()}`);
-  if (expectedParent && existsSync(expectedParent)) {
-    try {
-      const remaining = await readdir(expectedParent);
-      if (remaining.length === 0) await rmdir(expectedParent);
-    } catch { /* best-effort */ }
-  }
-  await saveJson(path.join(directory, `worktree-stage-${stageIndex}-cleaned.json`), { path: target, cleanedAt: now() });
-  return true;
-}
-
 export async function cleanupRecordedWorktree(workspace: string, directory: string): Promise<boolean> {
   const root = gitRoot(workspace);
   const expectedParent = root ? path.resolve(path.dirname(root), `.${path.basename(root)}.cbx-worktrees`) : "";

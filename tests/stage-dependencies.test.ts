@@ -183,3 +183,33 @@ test("normalizeTaskContract: rejects unknown stage field", () => {
     /不支持字段/,
   );
 });
+
+test("createJob: adaptive + dependsOn 组合被显式拒绝", async () => {
+  // adaptive 循环由 manager 每轮自选 stage，dependsOn 会被静默忽略；
+  // 显式拒绝优于接受语义错误的配置（静默忽略会让失败传播/handback 聚合缺失）。
+  const { createJob } = await import("../src/core.js");
+  const { mkdtemp } = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-adaptive-dep-"));
+  await assert.rejects(
+    createJob({
+      workspace,
+      task: "adaptive with deps",
+      review: true,
+      isolated: false,
+      permissionMode: "auto",
+      maxTurns: 5,
+      jobId: "adaptive-dep",
+      adaptive: { enabled: true, maxRounds: 4 },
+      taskContract: {
+        goal: "g",
+        stages: [
+          stage("a"),
+          { name: "b", executor: "codebuddy", task: "t", dependsOn: ["a"] },
+        ],
+      },
+    } as Parameters<typeof createJob>[0]),
+    /暂不支持.*dependsOn/,
+  );
+});

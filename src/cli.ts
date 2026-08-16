@@ -4,7 +4,7 @@ import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  approveJob,
+  approveJobAndStart,
   cancelJob,
   cleanupWorktree,
   dispatchQueue,
@@ -488,8 +488,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
   if (command === "approve") {
     const jobId = requireJobId(parsed, command);
-    const state = await approveJob(workspace, jobId);
-    if (state.status === "queued") await startBackground(workspace, jobId);
+    const state = await approveJobAndStart(workspace, jobId);
     print(state);
     return;
   }

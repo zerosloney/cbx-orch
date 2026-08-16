@@ -43,6 +43,39 @@ export type JobStatus =
   | "done"
   | "cancelled";
 
+/** 状态机 phase 全集（文档化联合类型）。持久化数据必须容忍旧版本的未知 phase，
+ *  因此 JobState.phase 保持 string 而非本类型；新增 phase 时在此登记，
+ *  便于静态检索与防止拼写漂移（如 adaptive_manager_next 误写为 adaptive_next）。 */
+export type JobPhase =
+  | "queued"
+  | "before_run"
+  | "dirty_baseline"
+  | "baseline_drift"
+  | "context_handshake"
+  | "awaiting_clarification"
+  | "executing"
+  | "retrying"
+  | "testing"
+  | "reviewing"
+  | "dependency_guard"
+  | "verification_gate"
+  | "repeated_failure"
+  | "before_complete"
+  | "adaptive_manager"
+  | "adaptive_manager_next"
+  | "adaptive_manager_ask"
+  | "adaptive_ask"
+  | "adaptive_manager_blocked"
+  | "adaptive_blocked"
+  | "adaptive_max_rounds"
+  | "adaptive_state"
+  | "git_commit"
+  | "cancel"
+  | "cancel_failed"
+  | "completion_evidence_stale"
+  | "done"
+  | "cancelled";
+
 export type CbxConfig = RuntimeConfig;
 
 export interface JobContext {

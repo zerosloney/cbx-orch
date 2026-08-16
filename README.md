@@ -333,7 +333,7 @@ node dist/src/cli.js health --workspace .
 }
 ````
 
-前置 stage 进入失败终态（review FAIL / 非零退出）后，后继 stage 标记 skipped 而非执行（失败传播），并记 `stage_skipped` 事件。stage 的 handback 注入会聚合所有 dependsOn stage 的交接文档。悬空依赖（引用不存在的 name）与循环依赖在任务创建时即被拒绝。当前层内仍串行执行（单 worktree 安全），物理并行执行为后续规划。
+前置 stage 进入失败终态（review FAIL / 非零退出）后，后继 stage 标记 skipped 而非执行（失败传播），并记 `stage_skipped` 事件。adaptive 模式不支持 `dependsOn`（manager 每轮自选 stage、依赖无语义），任务创建时组合二者会被显式拒绝。stage 的 handback 注入会聚合所有 dependsOn stage 的交接文档。悬空依赖（引用不存在的 name）与循环依赖在任务创建时即被拒绝。当前层内仍串行执行（单 worktree 安全），物理并行执行为后续规划。
 
 `continue` 默认将任务重新入队（后台执行）。加 `--foreground` 走前台同步语义（阻塞至完成）。
 
@@ -369,7 +369,7 @@ node dist/src/cli.js health --workspace .
 
 ## 质量与发布
 
-`npm run check` 执行类型 lint、格式检查和测试；`npm run coverage` 运行 Node 测试覆盖率并按 `scripts/check-coverage.mjs` 中的最低阈值（lines/branch/functions）校验，低于阈值即失败；`npm run audit` 检查高危依赖问题；`npm run sbom` 生成 CycloneDX SBOM。CI 在 Node 20、22 和 24 上执行这些确定性检查并上传测试、覆盖率和 SBOM 工件。
+`npm run check` 执行类型 lint、格式检查和测试；`npm run coverage` 运行 Node 测试覆盖率并按 `scripts/check-coverage.mjs` 中的最低阈值（lines/branch/functions）校验，低于阈值即失败；`npm run audit` 检查高危依赖问题；`npm run sbom` 生成 CycloneDX SBOM。CI 在 Ubuntu 与 Windows（Node 22、24）上执行这些确定性检查并上传测试、覆盖率和 SBOM 工件——Windows 是一等目标，进程树击杀（taskkill）、文件锁与 worktree 路径均有平台分支，需要真实 CI 覆盖。
 
 发布遵循 Semantic Versioning。源码仓库不跟踪 `dist/`；推送 `v*` tag 后，`.github/workflows/publish.yml` 会从源码构建它、运行测试，并用 `npm pack --dry-run` 校验待发布包确实包含 `dist/src/cli.js`，然后才发布到 npm（需在仓库 Secrets 配置 `NPM_TOKEN`）。`package.json.files` 仍明确限定 npm 包内容为 `dist/` 和文档，不包含源码与测试；`private` 已设为 `false`。
 
@@ -482,11 +482,12 @@ claude plugin install cbx-orch@cbx-orch-marketplace
 ## 安全说明
 
 - 默认权限模式 `auto`。可通过 `--permission-mode` 或配置覆盖；`dontAsk` 需显式 `--dangerously-skip-permissions`。
-- 测试命令由用户提供，会在目标工作区执行。cbx 只做有限黑名单过滤（正则可被变体绕过），**不保证命令安全**。建议始终用 `--isolated` 让测试在 worktree 内跑；非隔离时 cbx 会输出告警。
+- 测试命令由用户提供，会在目标工作区执行。cbx 做有限黑名单过滤（覆盖 flag 顺序无关的 `rd /q /s`、`erase`、引号包裹变体与 `find -exec` 等已知绕过手法；正则无法穷举，仍可被未知的变体绕过），**不保证命令安全**。建议始终用 `--isolated` 让测试在 worktree 内跑；非隔离时 cbx 会输出告警。
+- Web UI 与 MCP HTTP 默认校验 `Host` 头必须为本机回环（防 DNS rebinding），且浏览器请求携带的 `Origin` 头必须指向回环（防任意网页跨站发起 no-preflight POST 触发 cancel/pause 等写操作）。携带请求体的 POST 必须使用 `application/json`（MCP `POST /mcp` 一律强制）；无 body 的 POST（cancel/pause 等）不强制 content-type，保持 curl 兼容。用自定义 hosts 别名访问本机服务会被拒绝。
 - Web UI / TUI 仅绑定本机回环（127.0.0.1/::1）。可通过 `--ui-token` 或配置 `ui.token` 启用 token 鉴权：浏览器走 HttpOnly cookie，curl/API 客户端走 Bearer header，`/healthz` 和首页保持开放。未配置 token 时不做鉴权。远程共享必须放在带认证的反向代理之后。
 - `--isolated` 会创建 Git worktree，避免直接污染主工作区；**它不是 OS 安全沙箱**，不会隔离网络、凭据、宿主机文件或进程。
 - 默认 `execution.trustMode` 是 `trusted`。`untrusted` 任务需要 OS 容器沙箱；当前 cbx 没有内置容器 runner，因此会明确拒绝启动该模式。可通过 `--trust-mode trusted|untrusted` 覆盖配置。
-- `.cbx.json` 是严格 schema：未知字段、错误类型和越界值会拒绝加载，避免策略拼写错误静默失效。`governance.redactFields` 会递归脱敏事件、webhook 和死信中的同名字段；`governance.retentionDays` 会在状态更新和健康检查时原子压缩 `.cbx/delivery-failures.ndjson`，并同步清理过期 SQLite 死信记录。
+- `.cbx.json` 是严格 schema：未知字段、错误类型和越界值会拒绝加载，避免策略拼写错误静默失效。`governance.redactFields`/`redactPatterns` 会递归脱敏事件（含任务级 `events.ndjson` 中的 `process_started` argv 与 `executor_stream_event` 的 toolArgs）、webhook 和死信中的同名字段与全文匹配；`agent.log` 与 `test.log` 是原始诊断产物，不做脱敏，请不要在其中粘贴密钥。`governance.retentionDays` 会在状态更新和健康检查时原子压缩 `.cbx/delivery-failures.ndjson`，并同步清理过期 SQLite 死信记录。
 - `--timeout-ms` 限制执行器和测试命令的单次执行时间。
 - `--max-retries` 控制失败后的自动重试预算，默认 1。内部拆为两个独立计数器：执行器崩溃预算 `executionRetries = maxRetries+1`，测试/审查失败修复预算 `fixRetries = maxRetries`。执行器崩溃只消耗 `executionRetries`，测试/审查失败只消耗 `fixRetries`，避免 `needs_fix` 场景每轮白耗一次执行器重试。CLI 与 `.cbx.json` 的 `maxRetries` 语义不变。
 - `--dependency-guard` / `.cbx.json` `dependencyGuard`（默认关闭）：开启后每个 stage 执行前后对 `package.json`、`package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`bun.lockb` 取 SHA-256 baseline 比对，未授权改动触发 `needs_fix / dependency_guard` 并提示恢复或 `--no-dependency-guard` 关闭。仅做哈希比对，不阻止其他文件改动，也不替代 OS 沙箱。

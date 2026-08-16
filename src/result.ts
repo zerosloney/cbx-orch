@@ -3,12 +3,43 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { saveJson, loadJobContext, now } from "./storage.js";
-import { jobDir } from "./state.js";
+import { jobDir, pruneAfterTerminal, writeApprovalState, writeState } from "./state.js";
 import { listArtifacts } from "./artifacts.js";
 import { criterionDefinitions, reconcileVerifiedProgress, type StructuredAudit, type VerifiedProgress } from "./progress.js";
 import { structuredAuditRequested, evidenceHashes } from "./evidence.js";
 import { estimateTokens } from "./context-pack.js";
 import type { JobState } from "./types.js";
+
+/**
+ * 终态/暂停态收尾收敛：状态写盘 + result.json 生成（+可选保留期清理）一次完成。
+ * 替代此前散落在 execution.ts / approval.ts 的 writeState→writeResult(→pruneAfterTerminal)
+ * 三连副本——任何一处漏掉 writeResult 会让 result.json 停留在旧状态。
+ */
+export async function finalizeState(
+  workspace: string,
+  jobId: string,
+  updates: Record<string, unknown>,
+  options: { queueEntryId?: string; prune?: boolean } = {},
+): Promise<JobState> {
+  const state = await writeState(workspace, jobId, updates, options.queueEntryId);
+  await writeResult(workspace, jobId, state);
+  if (options.prune) await pruneAfterTerminal(workspace);
+  return state;
+}
+
+/** approval 路径的对偶：writeApprovalState 携带队列条目终态映射，后续收尾同 finalizeState。 */
+export async function finalizeApprovalState(
+  workspace: string,
+  jobId: string,
+  updates: Record<string, unknown>,
+  queueStatus: "done" | "failed",
+  options: { prune?: boolean } = {},
+): Promise<JobState> {
+  const state = await writeApprovalState(workspace, jobId, updates, queueStatus);
+  await writeResult(workspace, jobId, state);
+  if (options.prune) await pruneAfterTerminal(workspace);
+  return state;
+}
 
 export async function writeResult(workspace: string, jobId: string, state: JobState): Promise<void> {
   const directory = jobDir(workspace, jobId);

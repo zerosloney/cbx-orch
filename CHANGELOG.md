@@ -2,6 +2,21 @@
 
 This project follows [Semantic Versioning](https://semver.org/). User-visible behavior changes, security fixes, and migration requirements are recorded here before a release.
 
+## Unreleased
+
+- Security: 修复 Windows 进程树击杀失效。`killTree` 此前有句柄时先 `child.kill` 短路返回——Node 在 Windows 的 kill 仅终止直接子进程且几乎总返回 true，`taskkill /T /F` 永不执行，每次超时/取消后 agent CLI 的孙进程（bash/git/node）成为孤儿继续改写 worktree。改为 `taskkill /T /F` 先行（必须趁根进程存活才能枚举整棵树），句柄与 pid 直杀作为受限会话兜底。
+- Fix: `runProcess`/`captureAsync` 超时击杀后 close 可能永不到达（孤儿孙进程持有 stdio 管道句柄）。新增 `FORCE_SETTLE_MS`（3s）强制结算兜底，超时+宽限后 resolve 返回，杜绝 worker 因 promise 悬挂 → 心跳过期 → 队列反复回收（心跳重置绕过 `MAX_RECLAIMS` 熔断）的 30s 摆振；`captureAsync` 超时改走树杀并接入同一兜底。
+- Security: 队列回收死 worker 时按 `active.pid` 终止其遗留的 detached executor（记 `queue_reclaim_killed_stray_executor` 事件），关闭"旧 worker 崩溃后孤儿 executor 与新 worker 并发改写同一 worktree"的双 agent 窗口。worker 进程仍存活（仅心跳过期）时不杀，由 run.lock 仲裁。
+- Security: Web UI 与 MCP HTTP 增加共享请求守卫（`src/http-guard.ts`）：`Host` 头必须回环（防 DNS rebinding）、浏览器请求的 `Origin` 头必须同源回环（防任意网页以 no-preflight simple POST 调用写接口的 CSRF）、携带 body 的 POST 必须 `application/json`（MCP `POST /mcp` 一律强制）。无 body POST 保持兼容。
+- Security: `governance.redactFields`/`redactPatterns` 覆盖任务级 `events.ndjson`：`process_started` 的完整 argv（含 prompt）与 `executor_stream_event` 的 `toolArgs` 此前绕过脱敏直写落盘，现经统一 `appendEvent` 收口（对象级字段 + 行级 key + 全文正则三层）。
+- Security: `readArtifact`/`listArtifacts` 补 `assertJobId`（artifacts 层单点覆盖 CLI/UI/MCP 全部入口），阻断 `..` 等 jobId 穿越越权读 workspace 级 `.cbx` 文件。MCP stdio `send()` 捕获客户端断连的 EPIPE，消除事件回调 unhandled rejection。
+- Security: 测试命令黑名单补已知绕过变体：flag 顺序无关的 `rd /q /s`/`rmdir /q /s`/`del /f /s`、`erase` 同义词、引号包裹的 flag/子命令（`rm '-rf' /`、`git 'clean' -fd`）、`find -exec`。仍为软防线，非隔离任务依赖环境隔离。
+- Feature: adaptive + `dependsOn` 组合在任务创建时显式拒绝（此前 manager 决策的 stage 静默忽略依赖声明）；manager 决策 schema 同步移除 `dependsOn` 字段（幻觉出该字段按未知字段报错）。
+- Refactor: 收敛复制契约。新增 `finalizeState`/`finalizeApprovalState`（状态写盘 + result.json 生成 + 可选保留期清理一次完成）替代 execution/approval 中 8 处三连副本；`approveJobAndStart` 内聚"before_run 批准后回 queued 必须重新入队"契约，替换 CLI/MCP/TUI/Web UI 四处各自维护的镜像副本。
+- Refactor: `CbxError` 新增 `E_VALIDATION`（参数/策略校验）与 `E_STATE_CONFLICT`（状态冲突）错误码，`httpStatusForError` 集中错误码 → HTTP 状态映射（400/403/404/409），Web UI 弃用内联 if-else 链。`JobPhase` 联合类型文档化全部 phase 字面量（`JobState.phase` 保持 string 以兼容旧持久化数据）。移除未接线的 `prepareStageWorktree`/`cleanupStageWorktree` 死代码。
+- CI: 矩阵加入 `windows-latest`（此前仅 Ubuntu——Windows 平台分支的进程/锁/路径代码从未被 CI 覆盖，本次 killTree 修复正是该盲区的产物）。README 的 Node 矩阵描述与 CI 实际（22/24）对齐。
+- Fix: `npm run coverage` 与 `npm test` 对齐固定 `--test-concurrency=2`。此前覆盖率运行用默认并发（=CPU 数），大量 e2e 子进程并行拖爆紧凑的墙钟假设（秒级执行器超时、百毫秒杀进程余量），在多核机与 Windows CI 上随机时序失败（实测基线 17 例）。同步加固 3 例高负载脆弱测试：两例审批流测试的执行器超时上限 2s→10s（上限放宽不影响 happy path），插件超时杀进程测试的写入余量 500ms→5s（树杀经 taskkill 有数十毫秒真实延迟）。覆盖率地板随实测（76.5/61.7/78.1）从 68/46/70 上调至 73/58/75。
+
 ## 0.14.0 — 2026-08-13
 
 - Security: MCP `resources/read` 补齐 `validateWorkspace`，与 `resources/list` 等入口一致；此前 URI query 的 `workspace` 直接作为 root，绕过了存在性与根目录校验（受 `assertJobId` + 工件白名单约束，属鉴权不一致面）。
@@ -85,7 +100,7 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 - Feature: SSE 事件 Last-Event-ID 回放。`publishEvent` 为每个事件分配 workspace 内单调递增的 `seq`（持久化于 SQLite `metadata` 表，进程重启后续编）。Web UI `/events` 端点支持标准 `Last-Event-ID` 头与 `?last_event_id=` query 参数：新客户端连接时自动回放 `seq > lastEventId` 的历史事件（上限默认 1000 条，超限发 `replay_truncated` 警告并只补最近 N 条）。EventSource 断线重连自动携带 lastEventId，无需前端改动。无 lastEventId 时行为不变（只推新事件）。旧格式事件（无 seq 字段）被跳过。
 - Feature: 上下文包 token 计量与 per-role 预算裁剪。`context-pack.ts` 新增 `estimateTokens`（启发式：ASCII ≈ chars/4，CJK ≈ chars/1.5，零依赖）与 `ContextBudget`（默认 manager 6000 / executor 8000 / auditor 8000 tokens）。超预算时按优先级裁剪 taskContract 低优先字段（assumptions/rejectedOptions/decisions → constraints/relevantFiles → nonGoals；goal + acceptanceCriteria + stages 永不裁剪），再裁 recentFailure.retryReason，再收缩 userInstructions。触发裁剪时 pack 标记 `truncated: true` 并记录 `estimatedTokens`。`.cbx.json` 可经 `context.tokenBudget.{manager,executor,auditor}` 覆盖默认值（最小 100）。既有 24K char 硬上限仍生效。
-- Feature: stage 依赖声明（dependsOn）与失败传播。`taskContract.stages[].dependsOn` 接受前置 stage name 数组；`normalizeTaskContract` 校验悬空依赖（引用不存在的 name）与循环依赖（DFS 三色标记）。执行时前置 stage 进入失败终态（FAIL / 非零退出）后，后继 stage 标记 skipped 而非执行，并记 `stage_skipped` 事件。handback 注入改为聚合所有 dependsOn stage 的交接文档（依赖模式）或沿用上一阶段 handback（线性模式）。`groupStagesByDependency` 导出为工具函数供未来并行执行使用；当前层内仍串行（单 worktree 安全）。Adaptive 模式 Manager 返回的 stage 同样支持 dependsOn。
+- Feature: stage 依赖声明（dependsOn）与失败传播。`taskContract.stages[].dependsOn` 接受前置 stage name 数组；`normalizeTaskContract` 校验悬空依赖（引用不存在的 name）与循环依赖（DFS 三色标记）。执行时前置 stage 进入失败终态（FAIL / 非零退出）后，后继 stage 标记 skipped 而非执行，并记 `stage_skipped` 事件。handback 注入改为聚合所有 dependsOn stage 的交接文档（依赖模式）或沿用上一阶段 handback（线性模式）。`groupStagesByDependency` 导出为工具函数供未来并行执行使用；当前层内仍串行（单 worktree 安全）。Adaptive 模式不支持 dependsOn（manager 每轮自选 stage，依赖声明无语义）。
 - Feature: Adaptive Manager done 决策缓存。Manager 返回 done 但结构化证据门未通过时，若已有执行过的 stage，下一轮跳过 Manager 调用直接重试证据门（省一次 executor spawn）；连续跳过上限 2 次后强制重新调用 Manager 防卡死。任意非 done 决策（execute/ask/blocked）重置缓存计数。无已执行 stage 时 done 直接返回 needs_fix（无修复材料，不空转）。
 - Test: 新增 `tests/events-replay.test.ts`（8 例：seq 单调递增/跨重启持久化、Last-Event-ID 回放/id 字段/maxReplayLines 截断/跳过无 seq 旧事件/缺失文件兜底）、`tests/context-budget.test.ts`（13 例：estimateTokens ASCII/CJK/混合、预算内不裁剪、超预算裁剪低优先字段/userInstructions 收缩/retryReason 清空、parseContextPack 接受新字段/拒绝非法类型/24K 硬上限）、`tests/stage-dependencies.test.ts`（16 例：groupStagesByDependency 单层/线性/菱形/多根、validateStageDependencies 悬空/循环/自依赖、normalizeTaskContract dependsOn 透传/去重/空数组/非字符串/未知字段）。总计 180 个测试全过。
 - Feature: Adaptive 模式。`adaptive.enabled=true` 后由独立 manager executor 每轮产出 `candidate.json`（`execute`/`ask`/`blocked`/`done` 决策），编排器据此跑 stage 链并执行结构化完成门；超出 `maxRounds` 触发 `needs_fix / adaptive_max_rounds` Human Gate，可用 `--extra-rounds`（或 MCP `extra_rounds`，1–100）续跑。CLI：`--adaptive` / `--no-adaptive` / `--adaptive-max-rounds N` / `--manager-executor <cli>`；`.cbx.json`：`adaptive`（`enabled`/`maxRounds`/`managerExecutor`，maxRounds 默认 8，上限 100）；MCP `cbx_start` 同名 `adaptive` 对象（snake_case：`max_rounds`/`manager_executor`）。`adaptive.enabled=true` 要求 `review=true`。

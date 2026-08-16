@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
+import { CbxError, isCbxError } from "./errors.js";
 import { randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireServiceLease, loadPersistedQueue, now, processAlive, savePersistedQueue, withQueueLock } from "./storage.js";
-import { isCbxError } from "./errors.js";
 import { terminateTree } from "./process-runner.js";
 
 /** 队列降级路径失败原因落到 job 事件流。 */
@@ -87,6 +87,18 @@ export async function dispatchQueue(runtime: QueueRuntime, workspaceInput: strin
           || (heartbeatModifiedAt === undefined && Number.isFinite(startedAt) && Date.now() - startedAt > WORKER_HEARTBEAT_GRACE_MS)
           || (heartbeatModifiedAt !== undefined && Date.now() - heartbeatModifiedAt > WORKER_HEARTBEAT_STALE_MS);
         if (!stale) continue;
+        // worker 进程确已死亡时，其 detached executor 可能仍在改写 worktree（双 agent 窗口）：
+        // 回收时按 active.pid 终止孤儿 executor 再重新派发。worker 仍存活（仅心跳过期）时不杀，
+        // 由 run.lock 仲裁新旧 worker，避免误杀慢 worker 的在跑 executor。
+        if (!processAlive(entry.pid)) {
+          const activePid = Number(
+            await readFile(path.join(runtime.jobDir(workspace, entry.jobId), "active.pid"), "utf8").catch(() => ""),
+          );
+          if (Number.isSafeInteger(activePid) && activePid > 0) {
+            const killed = await terminateTree(activePid).catch(() => false);
+            logJobEvent(runtime, workspace, entry.jobId, "queue_reclaim_killed_stray_executor", { pid: activePid, killed });
+          }
+        }
         let reclaimed: QueueEntryStatus;
         try {
           const state = await runtime.loadState(workspace, entry.jobId);
@@ -175,7 +187,8 @@ export async function enqueueJob(runtime: QueueRuntime, workspaceInput: string, 
         item.jobId === jobId &&
         ["queued", "running", "awaiting_approval"].includes(item.status),
     );
-    if (duplicate) throw new Error(`任务已经在队列中：${jobId}`);
+    if (duplicate)
+        throw new CbxError("E_STATE_CONFLICT", `任务已经在队列中：${jobId}`);
     const created: QueueEntry = { queueId: `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`, jobId, workspace, extra, status: "queued", createdAt: now(), priority };
     queue.entries.push(created);
     await saveQueue(workspace, queue);
@@ -271,7 +284,10 @@ export async function resumeQueue(runtime: QueueRuntime, workspaceInput: string)
 export async function retryQueueJob(runtime: QueueRuntime, workspaceInput: string, jobId: string, priority = 0): Promise<QueueEntry> {
   const workspace = path.resolve(workspaceInput);
   const state = await runtime.loadState(workspace, jobId);
-  if (["running", "queued", "awaiting_approval"].includes(state.status)) throw new Error(`任务当前仍在执行、排队或等待审批：${jobId}`);
+  if (["running", "queued", "awaiting_approval"].includes(state.status)) throw new CbxError(
+    "E_STATE_CONFLICT",
+    `任务当前仍在执行、排队或等待审批：${jobId}`,
+  );
   const directory = runtime.jobDir(workspace, jobId);
   // 单事务完成：老 entry 标 cancelled + 终止僵尸进程 + 插新 entry + 状态重置。
   // terminateTree 与 entry 状态变更必须同在队列锁内，否则与 dispatchQueue 回收并发时会误杀新 worker 或互相覆盖。

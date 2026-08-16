@@ -9,13 +9,19 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        # Windows 是一等目标（进程树击杀 taskkill、文件锁、worktree 路径均有平台分支），
+        # 此前仅 ubuntu 跑 CI，Windows 专属缺陷（如 killTree 短路漏杀孙进程）无法被拦下。
+        os: [ubuntu-latest, windows-latest]
         # Node 20 runner 已被 GitHub Actions 废弃，且其 --experimental-test-coverage
         # 在嵌套子目录（tui/components/）的报告渲染存在崩溃 bug。保留 22/24 两个 LTS。
         node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -36,8 +42,9 @@ jobs:
           npm run coverage | tee coverage.txt
       - run: npm run sbom
       - uses: actions/upload-artifact@v5
+        name: Upload verification artifacts
         with:
-          name: verification-node-${{ matrix.node }}
+          name: verification-${{ matrix.os }}-node-${{ matrix.node }}
           path: |
             test-results.txt
             coverage.txt

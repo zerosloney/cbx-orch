@@ -3,6 +3,10 @@ import { appendFileSync, unlinkSync, writeFileSync } from "node:fs";
 
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 
+/** killTree 发出后 close 仍未到达（孤儿孙进程持有 stdio 管道、kill 失败等）时，
+ *  最多再等这么久就强制结算，防止调用方（worker / UI）因 promise 悬挂。 */
+export const FORCE_SETTLE_MS = 3_000;
+
 export interface ProcessResult {
   code: number;
   timedOut: boolean;
@@ -77,22 +81,31 @@ export function captureAsync(
     });
     const stdout = new BoundedOutput();
     const stderr = new BoundedOutput();
+    let killGraceTimer: NodeJS.Timeout | undefined;
+    const settle = (code: number, stderrText?: string) => {
+      clearTimeout(timer);
+      if (killGraceTimer) clearTimeout(killGraceTimer);
+      resolve({
+        code,
+        stdout: stdout.text(),
+        stderr: stderrText ?? stderr.text(),
+      });
+    };
     const timer = setTimeout(() => {
-      child.kill();
+      // 树杀而非只杀直接子进程：孙进程持有管道时 close 会永不到达，UI 请求将永久挂起。
+      if (child.pid) killTree(child.pid, "SIGKILL", child);
+      killGraceTimer = setTimeout(
+        () => settle(-1),
+        FORCE_SETTLE_MS,
+      );
     }, timeout);
     child.stdout.on("data", (chunk: Buffer) => stdout.append(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.append(chunk));
     child.on("error", (error: Error) => {
-      clearTimeout(timer);
-      resolve({
-        code: -1,
-        stdout: stdout.text(),
-        stderr: String(error.message ?? error),
-      });
+      settle(-1, String(error.message ?? error));
     });
     child.on("close", (code: number | null) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? -1, stdout: stdout.text(), stderr: stderr.text() });
+      settle(code ?? -1);
     });
   });
 }
@@ -103,8 +116,14 @@ export function killTree(
   child?: ChildProcess,
 ): boolean {
   if (process.platform === "win32") {
-    // 先尝试父进程持有的句柄：在某些环境（受限会话/作业对象）下，先执行失败的 taskkill
-    // 会使后续 child.kill 失效（返回 false），因此有句柄时必须优先用它（TerminateProcess）。
+    // taskkill /T 以根 pid 为起点遍历进程树，必须趁根进程还活着时先执行：
+    // 一旦先用 child.kill 杀掉根，孙进程已被系统过继成孤儿，/T 无法再枚举到它们。
+    // （旧实现有句柄时短路返回，导致每次超时后孙进程存活并继续改写工作区。）
+    const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      windowsHide: true,
+    });
+    if (result.status === 0 || !treeAlive(pid)) return true;
+    // 受限会话/作业对象下 taskkill 可能失败：退回本进程持有的句柄，再退回 pid 直杀。
     if (child) {
       try {
         if (child.kill("SIGKILL")) return true;
@@ -112,10 +131,6 @@ export function killTree(
         /* 进程已退出 */
       }
     }
-    const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
-      windowsHide: true,
-    });
-    if (result.status === 0) return true;
     try {
       process.kill(pid, "SIGKILL");
       return true;
@@ -241,9 +256,22 @@ function runChild(
     };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
+    let killGraceTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
       timedOut = true;
       if (child.pid) killTree(child.pid, "SIGKILL", child);
+      // close 可能永不到达：孤儿孙进程仍持有 stdio 管道句柄、或 kill 失败。宽限期满后
+      // 强制结算，避免 worker 因 promise 悬挂 → 心跳过期 → 队列反复回收（每次回收心跳
+      // 重置会绕过 MAX_RECLAIMS 熔断，形成 30s 摆振）。
+      killGraceTimer = setTimeout(() => {
+        if (settled) return;
+        try {
+          if (child.pid) killTree(child.pid, "SIGKILL");
+        } catch {
+          /* 尽力而为 */
+        }
+        settle(child.exitCode);
+      }, FORCE_SETTLE_MS);
     }, timeoutMs);
 
     const flushStream = () => {
@@ -259,26 +287,7 @@ function runChild(
       }
     };
 
-    child.on("error", (error) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        flushStream();
-        if (pidFile) {
-          try {
-            unlinkSync(pidFile);
-          } catch {
-            /* removed */
-          }
-        }
-        reject(error);
-      }
-    });
-    child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      flushStream();
+    const cleanupPidFile = () => {
       if (pidFile) {
         try {
           unlinkSync(pidFile);
@@ -286,13 +295,33 @@ function runChild(
           /* removed */
         }
       }
+    };
+
+    const settle = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (killGraceTimer) clearTimeout(killGraceTimer);
+      flushStream();
+      cleanupPidFile();
       resolve({
         code: code ?? -1,
         timedOut,
         output: output.text(),
         ...(output.truncated ? { outputTruncated: true } : {}),
       });
+    };
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (killGraceTimer) clearTimeout(killGraceTimer);
+      flushStream();
+      cleanupPidFile();
+      reject(error);
     });
+    child.on("close", (code) => settle(code));
   });
 }
 

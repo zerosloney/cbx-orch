@@ -127,7 +127,7 @@ test("3A.3 background before_complete approval resolves queue entry to done with
     isolated: true,
     permissionMode: "auto",
     maxTurns: 10,
-    timeoutMs: 2_000,
+    timeoutMs: 10_000,
     maxRetries: 0,
     approvalBeforeComplete: true,
     autoCommit: true,

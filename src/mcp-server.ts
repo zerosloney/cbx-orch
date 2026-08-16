@@ -3,7 +3,7 @@ import { createInterface } from "node:readline";
 import { createServer, type ServerResponse } from "node:http";
 import path from "node:path";
 import {
-  approveJob,
+  approveJobAndStart,
   cancelJob,
   cleanupWorktree,
   createJob,
@@ -27,6 +27,7 @@ import {
 } from "./core.js";
 import { runReviewGate } from "./review-gate.js";
 import { constantTimeEqual } from "./storage.js";
+import { hasJsonContentType, isTrustedLocalRequest } from "./http-guard.js";
 import { APP_VERSION } from "./version.js";
 
 const serverInfo = { name: "cbx-orch", version: APP_VERSION };
@@ -41,7 +42,11 @@ function send(id: unknown, result?: unknown, error?: unknown): void {
   const response: Record<string, unknown> = { jsonrpc: "2.0", id };
   if (error !== undefined) response.error = error;
   else response.result = result;
-  process.stdout.write(JSON.stringify(response) + "\n");
+  try {
+    process.stdout.write(JSON.stringify(response) + "\n");
+  } catch {
+    /* 客户端已断开（EPIPE 等）：响应丢失可接受，不让事件回调变成 unhandled rejection */
+  }
 }
 function text(value: unknown): unknown {
   return {
@@ -605,9 +610,7 @@ async function callTool(
   }
   if (name === "cbx_cancel") return cancelJob(root, id);
   if (name === "cbx_approve") {
-    const state = await approveJob(root, id);
-    if (state.status === "queued") await startBackground(root, id);
-    return state;
+    return approveJobAndStart(root, id);
   }
   if (name === "cbx_logs") {
     // 统一形状：恒为 { job_id, events, next_offset }，不再因 since 有无而分叉成 { logs } 与 { events } 两种结构。
@@ -961,6 +964,13 @@ export async function runMcpHttpServer(opts: {
   };
 
   const server = createServer(async (req, res) => {
+    // 防 DNS rebinding 与跨站 CSRF：Host 必须回环；带 Origin 的浏览器请求必须同源回环。
+    // 无 token 时任意网页可用 no-preflight 的 simple POST 调用 cbx_* 工具，必须在传输层拦下。
+    if (!isTrustedLocalRequest(req)) {
+      res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "forbidden" }));
+      return;
+    }
     // CORS：MCP HTTP 强制 loopback，允许浏览器 MCP 客户端跨域访问。
     // Bearer token 在 Authorization header（非 cookie 凭证），Access-Control-Allow-Origin: * 可用。
     res.setHeader("access-control-allow-origin", "*");
@@ -988,6 +998,13 @@ export async function runMcpHttpServer(opts: {
       }
     }
     if (req.method === "POST" && url.pathname === "/mcp") {
+      // MCP 规范要求 POST /mcp 使用 application/json；同时阻断以 text/plain 等
+      // simple-request content-type 携带 JSON-RPC body 的跨站变体。
+      if (!hasJsonContentType(req)) {
+        res.writeHead(415, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "content-type 必须是 application/json。" }));
+        return;
+      }
       // MCP JSON-RPC 请求远小于 1MB；超限按异常/恶意客户端拒，避免无界累积撑爆进程内存
       // （与 captureAsync 的 BoundedOutput 同一动机——D10 加固的对偶面）。
       const maxBodyBytes = 1 * 1024 * 1024;
