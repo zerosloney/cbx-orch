@@ -416,7 +416,7 @@ const tools = [
   },
 ];
 
-async function callTool(
+export async function callTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
