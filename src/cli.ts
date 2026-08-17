@@ -265,13 +265,19 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     return;
   }
   if (command === "list") {
+    // --limit N：只列最近 N 条（updated_at 倒序），控制大 workspace 下的输出规模。
+    const limit = parsed.intOption("--limit", undefined, {
+      min: 1,
+      max: 10000,
+    });
+    const listOpts = limit === undefined ? undefined : { limit };
     if (parsed.has("--all")) {
       // 跨 workspace 列出任务，每行带 workspace 前缀。
       const workspaces = await resolveWorkspaces(parsed);
       const all = await Promise.all(
         workspaces.map(async (ws) => ({
           ws,
-          jobs: await listJobs(ws).catch(() => []),
+          jobs: await listJobs(ws, listOpts).catch(() => []),
         })),
       );
       const combined = all.flatMap(({ ws, jobs }) =>
@@ -285,7 +291,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       else print(combined);
       return;
     }
-    const jobs = await listJobs(workspace);
+    const jobs = await listJobs(workspace, listOpts);
     if (isInteractive() && !parsed.has("--json"))
       console.log(renderJobsTable(jobs));
     else print(jobs);

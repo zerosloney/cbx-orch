@@ -145,6 +145,7 @@ When polling reaches a terminal status, branch on it. **Do not** call `cbx_conti
 | `needs_fix` | `reviewing` | Review verdict is FAIL but tests passed (`humanGate.reason=semantic_conflict` or plain FAIL). | Read `review.md` via `cbx_artifact`. For `semantic_conflict` the failure is a contract/semantic issue needing main-agent judgment. Build a specific fix message and call `cbx_continue`. |
 | `needs_fix` | `dependency_guard` | `dependencyGuard` was on and a stage mutated `package.json` / lock files without authorization. | Ask the user if the dependency change is intended. If no, instruct the worker to restore the files (the phase includes which files changed) and `cbx_continue`; if yes, re-dispatch with `--no-dependency-guard` or set `dependencyGuard: false`. |
 | `needs_fix` | `verification_gate` | Completion evidence gate failed: worktree not clean, acceptance criteria not all verified, or test/review evidence incomplete. | Read `verified-progress.json` / `audit.json` via MCP resources, plus `test.log` and `review.md`. The phase error names which condition failed; address it and `cbx_continue`. |
+| `needs_fix` | `stage_merge_conflict` | Parallel dependency layers: two same-layer stages modified the same file; their diffs cannot be merged. The phase error lists the stage and conflicting files. | This is a task-contract authoring issue: two independent stages touched the same path. Re-dispatch with adjusted stage boundaries (or merge the stages), then `cbx_continue` — re-running replays the same conflict until the contract is fixed. |
 | `needs_fix` | `repeated_failure` | Same normalized failure reason hit 3+ times (`humanGate.reason=repeated_failure`). cbx stopped auto-retrying. | **Do not** blindly `cbx_continue` — the error recurs. Escalate to the user; a human decision is required before another attempt. |
 | `needs_fix` | `adaptive_ask` | Adaptive manager returned `{"action":"ask"}` (`humanGate.reason=needs_input`). | Read `manager-context.json` + `candidate.json` via MCP resources; surface the manager's questions to the user, then `cbx_continue` with answers in `context_snapshot`. |
 | `needs_fix` | `adaptive_blocked` | Adaptive manager returned `{"action":"blocked"}` with a reason. | Read the blocked reason in `cbx_status` / `candidate.json`. Usually needs a human decision or a scope change; do not auto-continue. |
@@ -288,7 +289,12 @@ Inside `task_contract.stages[i]`:
 
 ### Review verdict
 
-`cbx_artifact review.md` returns the full report. cbx parses the first line for `VERDICT: PASS` or `VERDICT: FAIL` (case-insensitive). PASS → stage passes; FAIL → `needs_fix`. An unparsable verdict is handled differently by the two review paths: the stop-gate (`cbx_review_gate`) fails open and records `UNKNOWN`; the in-stage review (when `review: true`) treats it as FAIL and re-queues. There is no separate WARN verdict.
+`cbx_artifact review.md` returns the full report. cbx parses the verdict with a shared parser (`parseReviewVerdict`)，两种来源，结构化优先：
+
+1. `review.json`（推荐）：审查器额外写入的机器可读判定，严格 JSON `{"version":1,"verdict":"PASS"|"FAIL"}`。不受首行格式影响。
+2. `review.md` 首行 `VERDICT: PASS` 或 `VERDICT: FAIL`（大小写不敏感，旧契约回退）。
+
+PASS → stage 通过；FAIL → `needs_fix`。无法解析（UNKNOWN）时两条路径策略不同且有意为之：stop-gate（`cbx_review_gate`）fail-open 放行并记录 `UNKNOWN`（不阻塞主会话）；stage review（`review: true`）fail-closed 按 FAIL 返工（未审查的代码不得静默通过），并记 `review_verdict_unparsable` 事件供排障。没有单独的 WARN 判定。建议审查器两种都写：review.md 供人工阅读，review.json 供机器判定。
 
 ## Realtime mode workflow (CLI streaming)
 
@@ -334,6 +340,8 @@ Set `review_executor` (or `.cbx.json` `reviewExecutor`) to use a different revie
 ## Stage chain: multi-tool handoff in a single job
 
 cbx supports a **stage chain** — multiple executors接力 within one job, sharing a worktree. Each stage's `handback.md` is automatically fed forward to the next stage's prompt. This is cleaner than chaining separate jobs because all stages share one worktree, one diff, and one result.
+
+**Dependency mode (`stages[].dependsOn`) + `isolated: true` runs layers in parallel**: each stage executes in its own worktree (executor/test/review), same-layer stages run concurrently, and each layer's diffs merge into the job worktree in declaration order before the next layer starts. Downstream stages therefore see all prior layers' merged state. Merge conflicts (two same-layer stages touching the same file) pause as `needs_fix / stage_merge_conflict` — fix the task contract (e.g. split the conflicting work into a single stage) and `continue`. Non-isolated or linear (no `dependsOn`) chains keep the single-worktree serial path unchanged.
 
 ### When to use stages (vs single stage + `review_executor`)
 

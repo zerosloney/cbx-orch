@@ -81,7 +81,14 @@ export async function createJob(options: {
     options.permissionMode,
     options.allowUnsafePermissions,
   );
-  assertExecutionPolicy(options.trustMode ?? "trusted", options.isolated);
+  // untrusted 任务要求配置 execution.runner（容器隔离边界）；runner 路径穿越校验在
+  // resolveRunnerPlugin 执行时进行，此处仅确认策略前提存在。
+  const runnerConfigured = Boolean((await loadConfig(workspace)).execution?.runner);
+  assertExecutionPolicy(
+    options.trustMode ?? "trusted",
+    options.isolated,
+    runnerConfigured,
+  );
   if (!Number.isInteger(options.maxTurns) || options.maxTurns < 1)
     throw new CbxError("E_VALIDATION", "maxTurns 必须是正整数。");
   if (

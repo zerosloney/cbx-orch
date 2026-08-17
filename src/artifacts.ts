@@ -8,7 +8,7 @@ import { CbxError } from "./errors.js";
 import type { JobState, JobContext } from "./types.js";
 import type { ContextArtifact } from "./context-pack.js";
 
-export const ARTIFACTS = new Set(["request.md", "context-snapshot.md", "context-contract.json", "understanding.json", "context.json", "state.json", "events.ndjson", "agent.log", "handback.md", "review.md", "audit.json", "verified-progress.json", "manager-context.json", "executor-context.json", "auditor-context.json", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt", "result.json"]);
+export const ARTIFACTS = new Set(["request.md", "context-snapshot.md", "context-contract.json", "understanding.json", "context.json", "state.json", "events.ndjson", "agent.log", "handback.md", "review.md", "review.json", "audit.json", "verified-progress.json", "manager-context.json", "executor-context.json", "auditor-context.json", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt", "result.json"]);
 export const AUDIT_CANDIDATE = "audit-candidate.json";
 
 export function contextArtifacts(directory: string, names: readonly ContextArtifact[]): ContextArtifact[] {
@@ -19,9 +19,14 @@ export function contextRedactor(governance?: RuntimeConfig["governance"]): (text
   return text => redactText(text, governance?.redactFields, governance?.redactPatterns);
 }
 
-export async function listJobs(workspaceInput: string): Promise<JobState[]> {
+/** 列出 workspace 全部任务（按 updated_at 倒序）。limit 可选：只返回最近 N 条，
+ *  用于 CLI `cbx list --limit` 与 Web UI 列表的规模控制；缺省全量（向后兼容）。 */
+export async function listJobs(
+  workspaceInput: string,
+  opts?: { limit?: number },
+): Promise<JobState[]> {
   const workspace = path.resolve(workspaceInput);
-  return listPersistedStates<JobState>(workspace);
+  return listPersistedStates<JobState>(workspace, opts?.limit);
 }
 
 /**

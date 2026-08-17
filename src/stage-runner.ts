@@ -25,6 +25,7 @@ import {
   type VerifiedProgress,
 } from "./progress.js";
 import { evidenceHashes, structuredAuditRequested } from "./evidence.js";
+import { parseReviewVerdict } from "./verdict.js";
 import { createHumanGate } from "./human-gate.js";
 import { resolveExecutor } from "./executors/builtin.js";
 import { contextArtifacts, AUDIT_CANDIDATE } from "./artifacts.js";
@@ -170,6 +171,9 @@ export async function runStage(params: {
   redact: (text: string) => string;
   finish: (updates: Json) => Promise<JobState>;
   finishCancelled: () => Promise<JobState>;
+  /** 本 stage 产出物（handback、test.log、review 相关、audit-candidate、complete.patch）的写入目录。
+   *  缺省 = directory（串行路径：写回 jobDir）。并行路径传入 stage 私有目录，避免并发 stage 互相覆盖。 */
+  writeDir?: string;
 }): Promise<StageOutcome> {
   const {
     workspace,
@@ -186,6 +190,7 @@ export async function runStage(params: {
     redact,
     finish,
     finishCancelled,
+    writeDir = directory,
   } = params;
   let attempt = params.attempt;
   let attemptExtra = params.attemptExtra;
@@ -350,7 +355,7 @@ export async function runStage(params: {
         workdir,
         promptFor(
           `stage ${stageIndex}: ${stage.name}`,
-          `按上下文包 current.stage 与 userInstructions 执行。完成后将修改摘要、测试结果和遗留问题写入 ${path.join(directory, "handback.md")}。`,
+          `按上下文包 current.stage 与 userInstructions 执行。完成后将修改摘要、测试结果和遗留问题写入 ${path.join(writeDir, "handback.md")}。`,
           stageLabel,
           executorPack.path,
         ),
@@ -380,7 +385,7 @@ export async function runStage(params: {
     }
     if (existsSync(cancelMarker))
       return await cancelOutcome(agent.code, null);
-    await collectDiff(directory, workdir);
+    await collectDiff(writeDir, workdir);
     if (context.dependencyGuard) {
       let depChanged = false;
       const changedDepFiles: string[] = [];
@@ -449,14 +454,15 @@ export async function runStage(params: {
       executorExitCode: 0,
     });
     const test = await runTest(
-      directory,
+      context.workspace,
+      writeDir,
       workdir,
       context.testCommand,
       context.timeoutMs,
     );
     if (existsSync(cancelMarker))
       return await cancelOutcome(0, test.code);
-    const reviewedSnapshot = await collectDiff(directory, workdir);
+    const reviewedSnapshot = await collectDiff(writeDir, workdir);
     if (test.code !== 0 || test.timedOut) {
       lastError = test.timedOut
         ? `验收命令超时（${context.timeoutMs}ms）`
@@ -464,7 +470,7 @@ export async function runStage(params: {
       testExitCode = test.code;
       if (fixUsed < fixRetries) {
         await useFixRetry();
-        attemptExtra = `请读取 ${path.join(directory, "test.log")}，修复失败原因后重新执行。`;
+        attemptExtra = `请读取 ${path.join(writeDir, "test.log")}，修复失败原因后重新执行。`;
         await writeState(workspace, jobId, {
           phase: "retrying",
           stage: stage.name,
@@ -504,20 +510,22 @@ export async function runStage(params: {
       context.taskContract?.acceptanceCriteria ?? [],
     );
     const structuredAuditExtra = structuredAuditRequested(context)
-      ? `\n同时将严格 JSON 写入 ${path.join(directory, AUDIT_CANDIDATE)}：{"version":1,"completion":"complete|incomplete|blocked","cleanliness":"clean|suspect|violation","alignment":"aligned|unknown|needs_revision|invalid","criteria":[{"id":"criterion id","status":"verified|unverified|blocked","evidence":["complete.patch"]}]}。criteria 必须恰好覆盖上下文包 current.criteria 的全部 ID；verified 必须引用至少一个证据；evidence 只能引用上下文包 artifacts 中实际存在的文件名。`
+      ? `\n同时将严格 JSON 写入 ${path.join(writeDir, AUDIT_CANDIDATE)}：{"version":1,"completion":"complete|incomplete|blocked","cleanliness":"clean|suspect|violation","alignment":"aligned|unknown|needs_revision|invalid","criteria":[{"id":"criterion id","status":"verified|unverified|blocked","evidence":["complete.patch"]}]}。criteria 必须恰好覆盖上下文包 current.criteria 的全部 ID；verified 必须引用至少一个证据；evidence 只能引用上下文包 artifacts 中实际存在的文件名。`
       : "";
-    const reviewExtra = `只审查上下文包 artifacts 中列出的证据，不要修改代码。将结果写入 ${path.join(directory, "review.md")}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL。若失败源于需求歧义、公共契约冲突或基线问题，第二行写 CLASSIFICATION: SEMANTIC；普通代码缺陷无需 classification。按严重程度列出问题、文件和行号。${structuredAuditExtra}`;
+    const reviewExtra = `只审查上下文包 artifacts 中列出的证据，不要修改代码。将结果写入 ${path.join(writeDir, "review.md")}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL（供人工阅读）。同时把机器可读判定写入 ${path.join(writeDir, "review.json")}，严格 JSON：{"version":1,"verdict":"PASS"或"FAIL"}（推荐；未写则 cbx 回退解析 review.md 首行）。若失败源于需求歧义、公共契约冲突或基线问题，第二行写 CLASSIFICATION: SEMANTIC；普通代码缺陷无需 classification。按严重程度列出问题、文件和行号。${structuredAuditExtra}`;
     let reviewAgent: ProcessResult;
     const reviewExecutor =
       stage.reviewExecutor ?? context.reviewExecutor ?? stage.executor;
     const reviewLabel = resolveExecutor(reviewExecutor)?.label ?? "审查代理";
-    const auditCandidate = path.join(directory, AUDIT_CANDIDATE);
+    const auditCandidate = path.join(writeDir, AUDIT_CANDIDATE);
+    const reviewJsonCandidate = path.join(writeDir, "review.json");
     if (existsSync(auditCandidate)) await unlink(auditCandidate);
+    if (existsSync(reviewJsonCandidate)) await unlink(reviewJsonCandidate);
     if (
       structuredAuditRequested(context) &&
-      existsSync(path.join(directory, "review.md"))
+      existsSync(path.join(writeDir, "review.md"))
     )
-      await unlink(path.join(directory, "review.md"));
+      await unlink(path.join(writeDir, "review.md"));
     const auditorState = await loadState(workspace, jobId);
     const auditorPack = await createAuditorContextPack({
       directory,
@@ -587,7 +595,7 @@ export async function runStage(params: {
     if (existsSync(cancelMarker)) return await cancelOutcome(0, 0);
     const afterReview = await snapshotDiff(workdir);
     if (JSON.stringify(afterReview) !== JSON.stringify(reviewedSnapshot)) {
-      await collectDiff(directory, workdir);
+      await collectDiff(writeDir, workdir);
       lastError = "审查代理修改了工作区；为避免交付未经测试的代码，任务已停止";
       const state = await finish({
         status: "review_failed",
@@ -668,20 +676,35 @@ export async function runStage(params: {
         return outcome(true, state, 0, 0, "FAIL");
       }
     }
-    const review = existsSync(path.join(directory, "review.md"))
-      ? await readFile(path.join(directory, "review.md"), "utf8")
+    const review = existsSync(path.join(writeDir, "review.md"))
+      ? await readFile(path.join(writeDir, "review.md"), "utf8")
       : "";
-    const firstLine = review
-      .replace(/^\uFEFF/, "")
-      .split(/\r?\n/, 1)[0]
-      .trim();
-    const pass = /^VERDICT\s*:\s*PASS$/i.test(firstLine);
-    if (pass) {
+    // 统一判定解析：review.json（结构化）优先，review.md 首行回退；UNKNOWN 按失败返工（fail-closed）。
+    let reviewJson: unknown;
+    try {
+      reviewJson = existsSync(reviewJsonCandidate)
+        ? await loadJson<unknown>(reviewJsonCandidate)
+        : undefined;
+    } catch {
+      reviewJson = undefined;
+    }
+    const verdict = parseReviewVerdict(review, reviewJson);
+    if (verdict === "UNKNOWN") {
+      const firstLine = review
+        .replace(/^\uFEFF/, "")
+        .split(/\r?\n/, 1)[0]
+        .trim();
+      logJobEvent(workspace, jobId, "review_verdict_unparsable", {
+        stage: stage.name,
+        firstLine: firstLine || "<空>",
+      });
+    }
+    if (verdict === "PASS") {
       reviewVerdict = "PASS";
       return outcome(false, await loadState(workspace, jobId), 0, 0, "PASS");
     }
     lastError = "审查发现问题";
-    attemptExtra = `请读取 ${path.join(directory, "review.md")}，修复其中的问题后重新执行。`;
+    attemptExtra = `请读取 ${path.join(writeDir, "review.md")}，修复其中的问题后重新执行。`;
     const { semanticReviewFailure } = await import("./baseline.js");
     if (semanticReviewFailure(review)) {
       const detail = "审查发现语义或契约问题，需要主 Agent 纠偏。";

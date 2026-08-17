@@ -14,7 +14,8 @@ jobs:
       matrix:
         # Windows 是一等目标（进程树击杀 taskkill、文件锁、worktree 路径均有平台分支），
         # 此前仅 ubuntu 跑 CI，Windows 专属缺陷（如 killTree 短路漏杀孙进程）无法被拦下。
-        os: [ubuntu-latest, windows-latest]
+        # macOS 覆盖 Unix 侧进程组击杀（kill -pid）与文件锁/路径分支的第三平台验证。
+        os: [ubuntu-latest, windows-latest, macos-latest]
         # Node 20 runner 已被 GitHub Actions 废弃，且其 --experimental-test-coverage
         # 在嵌套子目录（tui/components/）的报告渲染存在崩溃 bug。保留 22/24 两个 LTS。
         node: [22, 24]

@@ -16,6 +16,7 @@ import {
   writeState,
   jobDir,
   logJobEvent,
+  pruneExpiredJobs,
 } from "./state.js";
 import { saveJson } from "./storage.js";
 import { publishEvent } from "./observability.js";
@@ -65,8 +66,12 @@ export async function health(
   metrics: Awaited<ReturnType<typeof persistedMetrics>>;
 }> {
   const workspace = path.resolve(workspaceInput);
-  const config = await loadConfig(workspace);
-  await prunePersistedData(workspace, config.governance?.retentionDays);
+  const governance = (await loadConfig(workspace)).governance;
+  const retentionDays = governance?.retentionDays;
+  // governance.pruneJobs 开启时，健康检查同时清理过期已终态任务（与 pruneAfterTerminal 同口径）。
+  if (governance?.pruneJobs && retentionDays)
+    await pruneExpiredJobs(workspace, retentionDays);
+  await prunePersistedData(workspace, retentionDays);
   return { status: "ok", metrics: await persistedMetrics(workspace) };
 }
 

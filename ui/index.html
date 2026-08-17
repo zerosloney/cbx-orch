@@ -6,6 +6,7 @@
 <div class="ws-list" id="ws-list" hidden></div>
 <div class="dist-bar" id="dist-bar" hidden></div>
 <div class="filter-bar" id="filter-bar" hidden><span id="filter-label"></span><button type="button" id="btn-clear-filter" class="job-action">清除筛选</button></div>
+<div class="filter-bar" id="trunc-hint" hidden>任务较多，仅显示最近 300 条。完整列表请用 <code>cbx list --limit N</code>。</div>
 <div class="cards" id="cards">
   <div class="card" data-filter=""><div class="card-label">总任务</div><div class="card-value" id="c-total">—</div></div>
   <div class="card" data-filter="running"><div class="card-label">运行中 / 并发</div><div class="card-value" id="c-running">—</div></div>

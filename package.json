@@ -10,6 +10,7 @@
     "dist/src/",
     "ui/",
     "README.md",
+    "README.en.md",
     "LICENSE",
     "SECURITY.md",
     "CHANGELOG.md"
@@ -30,17 +31,18 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test --test-concurrency=2 dist/tests/*.test.js",
-    "lint": "tsc --noEmit -p tsconfig.json",
-    "format": "prettier --write --ignore-unknown package.json README.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/core.*.test.ts tests/helpers.ts",
-    "format:check": "prettier --check --ignore-unknown package.json README.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/core.*.test.ts tests/helpers.ts",
+    "lint": "tsc --noEmit -p tsconfig.json && tsc -p ui/tsconfig.json",
+    "format": "prettier --write --ignore-unknown package.json README.md README.en.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/core.*.test.ts tests/helpers.ts",
+    "format:check": "prettier --check --ignore-unknown package.json README.md README.en.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/core.*.test.ts tests/helpers.ts",
     "check": "npm run lint && npm run format:check && npm test",
     "coverage": "npm run build && node scripts/check-coverage.mjs",
+    "smoke:executors": "node scripts/executor-smoke.mjs",
     "audit": "npm audit --audit-level=high",
     "sbom": "npm sbom --omit=dev --sbom-format=cyclonedx > sbom.cdx.json",
     "prepublishOnly": "npm run lint && tsc -p tsconfig.json"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

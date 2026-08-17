@@ -5,6 +5,7 @@ import { publishEvent } from "./observability.js";
 import {
   loadRuntimeConfig,
   loadPersistedState,
+  listPersistedStates,
   forgetPersistedJob,
   prunePersistedData,
   savePersistedState,
@@ -81,8 +82,59 @@ export async function loadConfig(workspaceInput: string): Promise<CbxConfig> {
  * 直接调，那是另一个关注点，不在终态触发范围内。
  */
 export async function pruneAfterTerminal(workspace: string): Promise<number> {
-  const retentionDays = (await loadConfig(workspace)).governance?.retentionDays;
-  return prunePersistedData(workspace, retentionDays);
+  const governance = (await loadConfig(workspace)).governance;
+  const retentionDays = governance?.retentionDays;
+  let pruned = 0;
+  if (governance?.pruneJobs && retentionDays)
+    pruned += await pruneExpiredJobs(workspace, retentionDays);
+  return pruned + (await prunePersistedData(workspace, retentionDays));
+}
+
+/** 已终态、不会再被调度的 job 状态集合（pruneExpiredJobs 的过滤口径）。 */
+const TERMINAL_RETENTION_STATUSES: ReadonlySet<string> = new Set([
+  "done",
+  "failed",
+  "needs_fix",
+  "review_failed",
+  "cancelled",
+]);
+
+/**
+ * 按 governance.pruneJobs + retentionDays 清理过期已终态任务：
+ * state.json / events.ndjson / 产物 / SQLite 行 / worktree 全部删除（等价 cbx purge）。
+ *
+ * 安全性：
+ * - 仅清理超过 retentionDays 的已终态任务；运行/排队/审批中等活跃状态永不触碰；
+ * - 正在被 finalize 的当前任务 updatedAt 刚刷新为 now，不可能小于 cutoff，天然豁免；
+ * - 复用 forgetJob 的既有守卫与审计（lifecycle/deleted 事件 + tombstone + job.deleted webhook）；
+ * - 单条清理失败（worktree 删除等）不拖垮整体，记 error 后继续。
+ * 返回实际清理的任务数。
+ */
+export async function pruneExpiredJobs(
+  workspace: string,
+  retentionDays: number,
+): Promise<number> {
+  const cutoff = Date.now() - retentionDays * 86_400_000;
+  const states = await listPersistedStates<JobState>(workspace);
+  let pruned = 0;
+  for (const state of states) {
+    if (!TERMINAL_RETENTION_STATUSES.has(String(state.status))) continue;
+    const updated = Date.parse(String(state.updatedAt ?? ""));
+    if (!Number.isFinite(updated) || updated >= cutoff) continue;
+    try {
+      await forgetJob(workspace, String(state.jobId), {
+        purgeWorktree: true,
+        reason: "retention",
+      });
+      pruned += 1;
+    } catch (error) {
+      logJobEvent(workspace, String(state.jobId), "retention_prune_failed", {
+        error: error instanceof Error ? error.message : String(error),
+        retentionDays,
+      });
+    }
+  }
+  return pruned;
 }
 
 /** 禁止直接 forget/purge 的活跃状态——必须先 cancel / approve。 */

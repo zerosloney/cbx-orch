@@ -1,5 +1,7 @@
 # CBX Orchestrator (`cbx`)
 
+> English overview: [README.en.md](./README.en.md) · 完整中文文档见本文件
+
 基于 Node.js + TypeScript 的本地编排器，把任意 AI 编码 CLI（CodeBuddy / OpenCode / Pi 等）固成一条可持久化的流水线：
 
 ```text
@@ -164,7 +166,10 @@ graph LR
     "autoCommit": true,
     "commitMessage": "chore: apply task"
   },
-  "execution": { "trustMode": "trusted" },
+  "execution": {
+    "trustMode": "trusted",
+    "runner": "./my-container-runner.mjs"
+  },
   "dependencyGuard": true,
   "templates": {
     "bugfix": {
@@ -204,6 +209,7 @@ graph LR
   },
   "governance": {
     "retentionDays": 30,
+    "pruneJobs": true,
     "redactFields": ["token", "password", "authorization"]
   },
   "ui": {
@@ -216,6 +222,7 @@ graph LR
 
 ```powershell
 node dist/src/cli.js list --workspace .
+node dist/src/cli.js list --limit 50 --workspace .    # 只列出最近 50 条（updated_at 倒序）
 node dist/src/cli.js list --all --workspace A --workspace B            # 跨 workspace 列出任务（带前缀）
 node dist/src/cli.js ws --workspace A --workspace B                   # 跨 workspace 汇总（任务/队列/健康）
 node dist/src/cli.js ws --workspaces-dir ~/code                       # 扫描含 .cbx 的子目录汇总
@@ -333,7 +340,7 @@ node dist/src/cli.js health --workspace .
 }
 ````
 
-前置 stage 进入失败终态（review FAIL / 非零退出）后，后继 stage 标记 skipped 而非执行（失败传播），并记 `stage_skipped` 事件。adaptive 模式不支持 `dependsOn`（manager 每轮自选 stage、依赖无语义），任务创建时组合二者会被显式拒绝。stage 的 handback 注入会聚合所有 dependsOn stage 的交接文档。悬空依赖（引用不存在的 name）与循环依赖在任务创建时即被拒绝。当前层内仍串行执行（单 worktree 安全），物理并行执行为后续规划。
+前置 stage 进入失败终态（review FAIL / 非零退出）后，后继 stage 标记 skipped 而非执行（失败传播），并记 `stage_skipped` 事件。adaptive 模式不支持 `dependsOn`（manager 每轮自选 stage、依赖无语义），任务创建时组合二者会被显式拒绝。stage 的 handback 注入会聚合所有 dependsOn stage 的交接文档。悬空依赖（引用不存在的 name）与循环依赖在任务创建时即被拒绝。**隔离执行（`isolated: true`）+ 依赖模式时，同层 stage 物理并行**：每个 stage 在独立 worktree 中运行（executor/test/review），层内并发、层间串行，每层完成后按声明顺序把各 stage 的 diff 合并进主 worktree，下一层的 stage worktree 包含全部前置层合并结果——与串行依赖模式的最终语义一致，仅缩短墙钟时间。合并冲突（同层 stage 改动同一文件）会以 `needs_fix / stage_merge_conflict` 暂停，需修正任务契约（如调整 stage 边界）后 `continue`。stage 产出物（handback/test.log/review.md）保留在 `stage-artifacts/<index>/`，最终聚合为 jobDir 证据。非隔离或线性模式保持单 worktree 串行执行，行为不变。
 
 `continue` 默认将任务重新入队（后台执行）。加 `--foreground` 走前台同步语义（阻塞至完成）。
 
@@ -367,9 +374,21 @@ node dist/src/cli.js health --workspace .
 }
 ```
 
+## Runner 插件（容器执行）
+
+`execution.runner` 指向一个 ESM 插件（`cbx.runner/v1`），把 executor / test / review 命令的进程执行外包给插件——典型用途是为 `untrusted` 信任模式提供容器级隔离。插件导出 `manifest`（`{ apiVersion: "cbx.runner/v1", name, version }`）与 `run(request)`；`request` 含 `workspace`/`directory`/`workdir`（host 路径，插件负责映射到容器内）、`command`（完整 argv）、`shell`、`role`（stage/review/manager/gate/test）、`timeoutMs`、`env` 与 `logFile`，返回 `{ code, timedOut, output }`。插件必须在 `timeoutMs` 内杀掉容器进程（cbx 另有墙钟兜底）。路径穿越防护与 executor 插件一致（realpath 后必须位于 workspace 内）；runner 是可信的隔离边界提供者，无白名单执行子进程。
+
+```json
+{
+  "execution": { "trustMode": "untrusted", "runner": "./docker-runner.mjs" }
+}
+```
+
+配置 runner 后 `untrusted` 任务放行（仍要求 `isolated=true`）；未配置时创建 untrusted 任务被拒绝。runner 模式下捕获输出经有界截断写入 agent.log / test.log，不产生流式事件与 active.pid。
+
 ## 质量与发布
 
-`npm run check` 执行类型 lint、格式检查和测试；`npm run coverage` 运行 Node 测试覆盖率并按 `scripts/check-coverage.mjs` 中的最低阈值（lines/branch/functions）校验，低于阈值即失败；`npm run audit` 检查高危依赖问题；`npm run sbom` 生成 CycloneDX SBOM。CI 在 Ubuntu 与 Windows（Node 22、24）上执行这些确定性检查并上传测试、覆盖率和 SBOM 工件——Windows 是一等目标，进程树击杀（taskkill）、文件锁与 worktree 路径均有平台分支，需要真实 CI 覆盖。
+`npm run check` 执行类型 lint、格式检查和测试；`npm run coverage` 运行 Node 测试覆盖率并按 `scripts/check-coverage.mjs` 中的最低阈值（lines/branch/functions）校验，低于阈值即失败；`npm run audit` 检查高危依赖问题；`npm run sbom` 生成 CycloneDX SBOM。CI 在 Ubuntu、Windows 与 macOS（Node 22、24）上执行这些确定性检查并上传测试、覆盖率和 SBOM 工件——Windows 是一等目标（进程树击杀 taskkill、文件锁与 worktree 路径均有平台分支），macOS 覆盖 Unix 侧进程组击杀与路径分支的第三平台验证。运行时要求 Node.js ≥ 22（与 CI 验证矩阵一致；Node 20 已 EOL 且不在验证范围）。
 
 发布遵循 Semantic Versioning。源码仓库不跟踪 `dist/`；推送 `v*` tag 后，`.github/workflows/publish.yml` 会从源码构建它、运行测试，并用 `npm pack --dry-run` 校验待发布包确实包含 `dist/src/cli.js`，然后才发布到 npm（需在仓库 Secrets 配置 `NPM_TOKEN`）。`package.json.files` 仍明确限定 npm 包内容为 `dist/` 和文档，不包含源码与测试；`private` 已设为 `false`。
 
@@ -486,8 +505,8 @@ claude plugin install cbx-orch@cbx-orch-marketplace
 - Web UI 与 MCP HTTP 默认校验 `Host` 头必须为本机回环（防 DNS rebinding），且浏览器请求携带的 `Origin` 头必须指向回环（防任意网页跨站发起 no-preflight POST 触发 cancel/pause 等写操作）。携带请求体的 POST 必须使用 `application/json`（MCP `POST /mcp` 一律强制）；无 body 的 POST（cancel/pause 等）不强制 content-type，保持 curl 兼容。用自定义 hosts 别名访问本机服务会被拒绝。
 - Web UI / TUI 仅绑定本机回环（127.0.0.1/::1）。可通过 `--ui-token` 或配置 `ui.token` 启用 token 鉴权：浏览器走 HttpOnly cookie，curl/API 客户端走 Bearer header，`/healthz` 和首页保持开放。未配置 token 时不做鉴权。远程共享必须放在带认证的反向代理之后。
 - `--isolated` 会创建 Git worktree，避免直接污染主工作区；**它不是 OS 安全沙箱**，不会隔离网络、凭据、宿主机文件或进程。
-- 默认 `execution.trustMode` 是 `trusted`。`untrusted` 任务需要 OS 容器沙箱；当前 cbx 没有内置容器 runner，因此会明确拒绝启动该模式。可通过 `--trust-mode trusted|untrusted` 覆盖配置。
-- `.cbx.json` 是严格 schema：未知字段、错误类型和越界值会拒绝加载，避免策略拼写错误静默失效。`governance.redactFields`/`redactPatterns` 会递归脱敏事件（含任务级 `events.ndjson` 中的 `process_started` argv 与 `executor_stream_event` 的 toolArgs）、webhook 和死信中的同名字段与全文匹配；`agent.log` 与 `test.log` 是原始诊断产物，不做脱敏，请不要在其中粘贴密钥。`governance.retentionDays` 会在状态更新和健康检查时原子压缩 `.cbx/delivery-failures.ndjson`，并同步清理过期 SQLite 死信记录。
+- 默认 `execution.trustMode` 是 `trusted`。`untrusted` 任务需要 OS 容器沙箱；cbx 自身不内置容器运行时——配置 `execution.runner`（`cbx.runner/v1` ESM 插件，在容器内执行 executor/test/review 命令）后放行，未配置时明确拒绝启动。`untrusted` 仍要求 `isolated=true`。
+- `.cbx.json` 是严格 schema：未知字段、错误类型和越界值会拒绝加载，避免策略拼写错误静默失效。`governance.redactFields`/`redactPatterns` 会递归脱敏事件（含任务级 `events.ndjson` 中的 `process_started` argv 与 `executor_stream_event` 的 toolArgs）、webhook 和死信中的同名字段与全文匹配；`agent.log` 与 `test.log` 是原始诊断产物，不做脱敏，请不要在其中粘贴密钥。`governance.retentionDays` 会在状态更新和健康检查时原子压缩 `.cbx/delivery-failures.ndjson`，并同步清理过期 SQLite 死信记录。`governance.pruneJobs`（默认 `false`，须显式开启）把保留期扩展到任务本体：超过 `retentionDays` 的已终态任务（`done`/`failed`/`needs_fix`/`review_failed`/`cancelled`）在终态路径与健康检查时自动执行等价 `cbx purge` 的清理（state/events/产物 + worktree），写入 tombstone 与 `job.deleted` webhook 审计；运行/排队/审批中任务永不触碰。
 - `--timeout-ms` 限制执行器和测试命令的单次执行时间。
 - `--max-retries` 控制失败后的自动重试预算，默认 1。内部拆为两个独立计数器：执行器崩溃预算 `executionRetries = maxRetries+1`，测试/审查失败修复预算 `fixRetries = maxRetries`。执行器崩溃只消耗 `executionRetries`，测试/审查失败只消耗 `fixRetries`，避免 `needs_fix` 场景每轮白耗一次执行器重试。CLI 与 `.cbx.json` 的 `maxRetries` 语义不变。
 - `--dependency-guard` / `.cbx.json` `dependencyGuard`（默认关闭）：开启后每个 stage 执行前后对 `package.json`、`package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`bun.lockb` 取 SHA-256 baseline 比对，未授权改动触发 `needs_fix / dependency_guard` 并提示恢复或 `--no-dependency-guard` 关闭。仅做哈希比对，不阻止其他文件改动，也不替代 OS 沙箱。

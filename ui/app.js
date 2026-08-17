@@ -31,28 +31,41 @@ function cbxPost(url,body){
   body=body||{};
   return cbxFetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
 }
+// 列表只取最近 300 条防 DOM 退化；卡片计数改用 workspace 摘要的 jobsByStatus（全量准确），
+// 详情/过滤仍基于当前列表。任务更多时显示截断提示，完整列表走 CLI `cbx list --limit`。
+var UI_JOBS_LIMIT=300;
 async function refresh(){
   var ws=encodeURIComponent(currentWorkspace||'');
-  var jobs=await cbxFetch('/api/jobs?workspace='+ws).then(function(r){return r.json()});
+  var jobs=await cbxFetch('/api/jobs?workspace='+ws+'&limit='+UI_JOBS_LIMIT).then(function(r){return r.json()});
   var q=await cbxFetch('/api/queue?workspace='+ws).then(function(r){return r.json()});
   updateCards(jobs,q);
   var filtered=filterStatus?jobs.filter(matchesFilter):jobs;
   document.querySelector('#jobs').innerHTML=filtered.map(rowHtml).join('');
   if(filtered.length===0)document.querySelector('#jobs').innerHTML='<tr><td colspan="7" style="text-align:center;color:#555;padding:16px;font-size:13px">没有匹配的'+(filterStatus?'':(jobs.length===0?'任务：创建第一个任务吧。':'任务。'))+'</td></tr>';
   if(selected){var row=document.querySelector('tr.job[data-id="'+rowAttr(selected)+'"]');if(row)row.classList.add('selected');}
+  var hint=document.querySelector('#trunc-hint');
+  if(hint)hint.hidden=jobs.length<UI_JOBS_LIMIT;
+}
+function currentSummary(){
+  if(!allWorkspaces)return null;
+  for(var i=0;i<allWorkspaces.length;i++){if(allWorkspaces[i].path===currentWorkspace)return allWorkspaces[i];}
+  return null;
 }
 function updateCards(jobs,q){
-  var total=jobs.length;
-  var running=jobs.filter(function(j){return j.status==='running';}).length;
-  var failed=jobs.filter(function(j){return j.status==='failed';}).length;
-  var needsFix=jobs.filter(function(j){return j.status==='needs_fix'||j.status==='review_failed';}).length;
-  var approval=jobs.filter(function(j){return j.status==='awaiting_approval';}).length;
-  var done=jobs.filter(function(j){return j.status==='done';}).length;
-  var queued=jobs.filter(function(j){return j.status==='queued';}).length;
-  var cancelled=jobs.filter(function(j){return j.status==='cancelled';}).length;
+  var summary=currentSummary();
+  var bs=summary&&summary.jobsByStatus?summary.jobsByStatus:null;
+  function cnt(k){return bs?(bs[k]||0):jobs.filter(function(j){return j.status===k;}).length;}
+  var total=bs?Object.keys(bs).reduce(function(a,k){return a+(bs[k]||0);},0):jobs.length;
+  var running=cnt('running');
+  var failed=cnt('failed');
+  var needsFix=cnt('needs_fix')+cnt('review_failed');
+  var approval=cnt('awaiting_approval');
+  var done=cnt('done');
+  var queued=cnt('queued');
+  var cancelled=cnt('cancelled');
   var active=(q.entries||[]).filter(function(e){return e.status==='running';}).length;
   var depth=(q.entries||[]).filter(function(e){return['queued','running','awaiting_approval'].indexOf(e.status)>=0;}).length;
-  var last=jobs.reduce(function(m,j){return j.updatedAt>m?j.updatedAt:m;},'');
+  var last=summary&&summary.lastActivityAt?summary.lastActivityAt:jobs.reduce(function(m,j){return j.updatedAt>m?j.updatedAt:m;},'');
   // 更新卡片
   setCard('c-total',total);
   setCard('c-running',running+' / '+(q.maxConcurrent||'\u2014'),running>0?'s-running':'');

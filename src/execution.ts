@@ -24,12 +24,13 @@ import {
   refreshBaseline,
   performContextHandshake,
 } from "./baseline.js";
+import { runStage, requestAdaptiveAction, ManagerWorktreeMutationError, ManagerDecisionError } from "./stage-runner.js";
 import {
-  runStage,
-  requestAdaptiveAction,
-  ManagerWorktreeMutationError,
-  ManagerDecisionError,
-} from "./stage-runner.js";
+  runDependencyLayers,
+  groupStagesByDependency,
+  collectDependencyHandbacks,
+} from "./parallel-stages.js";
+import { flushEventBuffer } from "./runner.js";
 import { contextRedactor, contextArtifacts } from "./artifacts.js";
 import { prepareWorktree, snapshotDiff, commitWorktree } from "./git-ops.js";
 import { assertExecutionPolicy } from "./validation.js";
@@ -62,58 +63,8 @@ import { cleanupWorktree } from "./worktree.js";
 import { APP_VERSION } from "./version.js";
 import type { JobState, Json, TaskStage, StageReport } from "./types.js";
 
-/** 按 stage 依赖分层：同一层内的 stage 无相互依赖（理论上可并行），跨层有依赖。
- *  本实现层内仍串行执行（单 worktree 安全），分层主要用于依赖声明 + 失败传播 + handback 聚合。
- *  依赖校验（悬空/循环）已在 normalizeTaskContract 完成，此处不重复检测。 */
-export function groupStagesByDependency(stages: TaskStage[]): TaskStage[][] {
-  if (stages.length <= 1) return [stages];
-  const hasDeps = stages.some(
-    (stage) => stage.dependsOn && stage.dependsOn.length > 0,
-  );
-  if (!hasDeps) return [stages]; // 无任何依赖：单层，保持原线性顺序
-  const completed = new Set<string>();
-  const remaining = [...stages];
-  const layers: TaskStage[][] = [];
-  while (remaining.length > 0) {
-    const ready = remaining.filter((stage) =>
-      (stage.dependsOn ?? []).every((dep) => completed.has(dep)),
-    );
-    if (ready.length === 0) {
-      // 不应发生（循环依赖已拒绝），兜底防死循环
-      layers.push(remaining);
-      break;
-    }
-    layers.push(ready);
-    for (const stage of ready) completed.add(stage.name);
-    for (const stage of ready) remaining.splice(remaining.indexOf(stage), 1);
-  }
-  return layers;
-}
-
-/** 收集一个 stage 的所有 dependsOn stage 的 handback 内容，按完成顺序拼接。 */
-async function collectDependencyHandbacks(
-  directory: string,
-  stages: TaskStage[],
-  stage: TaskStage,
-): Promise<string> {
-  const deps = stage.dependsOn ?? [];
-  if (deps.length === 0) return "";
-  const parts: string[] = [];
-  for (const dep of deps) {
-    const depIndex = stages.findIndex((s) => s.name === dep);
-    if (depIndex < 0) continue;
-    const safeName = dep.replace(/[^A-Za-z0-9._-]+/g, "-");
-    const handbackFile = path.join(
-      directory,
-      `stage-${depIndex}-${safeName}-handback.md`,
-    );
-    if (existsSync(handbackFile)) {
-      const content = await readFile(handbackFile, "utf8");
-      parts.push(`## 前置阶段 ${dep} 的交接\n\n${content}`);
-    }
-  }
-  return parts.join("\n\n");
-}
+// 依赖分层与 handback 聚合已迁至 parallel-stages.js（并行执行模块），此处 re-export 保持兼容。
+export { groupStagesByDependency, collectDependencyHandbacks } from "./parallel-stages.js";
 
 async function executeJobLocked(
   workspace: string,
@@ -141,7 +92,11 @@ async function executeJobLocked(
     });
     console.error(`cbx: ${warning}`);
   }
-  assertExecutionPolicy(context.trustMode ?? "trusted", context.isolated);
+  assertExecutionPolicy(
+    context.trustMode ?? "trusted",
+    context.isolated,
+    Boolean(runtimeConfig.execution?.runner),
+  );
   const governance = (await loadConfig(workspace)).governance;
   const redact = contextRedactor(governance);
   if (
@@ -242,12 +197,14 @@ async function executeJobLocked(
   const maxAttempts = Math.max(1, context.maxRetries + 1);
   let attempt = Number(initial.attempt ?? 0);
   let attemptExtra = extra;
+  // 依赖并行模式：主 worktree 含中间层合并提交，diff 必须对任务基线计算（HEAD 会漏掉中间层）。
+  // finish 闭包内读取，调用点（stage 链之后）赋值；串行路径保持 undefined（= 现行为）。
+  let diffBase: string | undefined;
   const cancelMarker = path.join(directory, "cancel.requested");
 
   const finish = async (updates: Json): Promise<JobState> => {
     const currentState = await loadState(workspace, jobId);
-    let finalUpdates = { ...updates };
-    if (structuredAuditRequested(context)) {
+    let finalUpdates = { ...updates };    if (structuredAuditRequested(context)) {
       const definitions = criterionDefinitions(
         context.taskContract?.acceptanceCriteria ?? [],
       );
@@ -304,7 +261,7 @@ async function executeJobLocked(
         const pendingCompletion: PendingCompletion = {
           version: 1,
           evidenceHashes: hashes,
-          worktreeSha256: worktreeSha256(await snapshotDiff(workdir)),
+          worktreeSha256: worktreeSha256(await snapshotDiff(workdir, diffBase)),
           createdAt: now(),
         };
         finalUpdates = {
@@ -674,6 +631,30 @@ async function executeJobLocked(
       reviewExecutor: context.reviewExecutor,
     },
   ];
+
+  // 依赖模式 + 隔离 → stage 层内物理并行（每 stage 独立 worktree，层内并发、层间合并）。
+  // 线性模式与非隔离保持既有串行路径（单 worktree、行为不变）。
+  if (context.isolated && stages.some((stage) => stage.dependsOn?.length)) {
+    diffBase = context.baseCommit;
+    return runDependencyLayers({
+      workspace,
+      jobId,
+      directory,
+      workdir,
+      context,
+      stages,
+      extra,
+      attempt,
+      attemptExtra,
+      maxAttempts,
+      cancelMarker,
+      redact,
+      finish,
+      finishCancelled,
+      diffBase: context.baseCommit,
+    });
+  }
+
   const stageReports: StageReport[] = [];
 
   // 分组调度：按依赖拓扑层执行（groupStagesByDependency），保证依赖 stage 先完成并产出 handback。
@@ -929,12 +910,18 @@ export async function executeJob(
             return current;
           }
         }
-        const result = await executeJobLocked(
-          workspace,
-          jobId,
-          continuation.instructions,
-          queueEntryId,
-        );
+        // 事件批量写缓冲在任务终态前落盘：保证终态可见时事件流完整（worker 与进程内测试同一语义）。
+        let result: JobState;
+        try {
+          result = await executeJobLocked(
+            workspace,
+            jobId,
+            continuation.instructions,
+            queueEntryId,
+          );
+        } finally {
+          flushEventBuffer(path.join(jobDir(workspace, jobId), "events.ndjson"));
+        }
         if (queueEntryId) await dispatchQueue(workspace);
         // 保留期清理收敛到任务终态（含 early-return 的基线漂移/取消路径），避免每次 writeState 都触发。
         await pruneAfterTerminal(workspace);

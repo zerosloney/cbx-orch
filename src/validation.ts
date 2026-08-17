@@ -95,6 +95,7 @@ export function validatePermissionMode(
 export function assertExecutionPolicy(
   trustMode: string,
   isolated: boolean,
+  runnerConfigured = false,
 ): asserts trustMode is "trusted" | "untrusted" {
   if (trustMode !== "trusted" && trustMode !== "untrusted")
     throw new Error(`不支持的 trustMode：${trustMode}`);
@@ -103,9 +104,10 @@ export function assertExecutionPolicy(
       throw new Error(
         "untrusted 任务必须设置 isolated=true；Git worktree 不是安全沙箱。",
       );
-    throw new Error(
-      "当前 cbx 未提供 OS 容器沙箱，拒绝启用 untrusted 模式；请使用受控的外部容器 runner。",
-    );
+    if (!runnerConfigured)
+      throw new Error(
+        "untrusted 模式要求配置 execution.runner（提供容器级隔离的 ESM 插件）；cbx 自身不内置容器运行时。",
+      );
   }
 }
 

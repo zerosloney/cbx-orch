@@ -31,6 +31,7 @@ const VALUE_OPTIONS = new Set([
   "--format",
   "--max-batch",
   "--wait-timeout-ms",
+  "--limit",
 ]);
 
 export interface CliArgs {

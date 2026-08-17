@@ -58,6 +58,7 @@ export type JobPhase =
   | "testing"
   | "reviewing"
   | "dependency_guard"
+  | "stage_merge_conflict"
   | "verification_gate"
   | "repeated_failure"
   | "before_complete"

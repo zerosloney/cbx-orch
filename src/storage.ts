@@ -44,7 +44,12 @@ export interface RuntimeConfig {
   executor?: string;
   reviewExecutor?: string;
   templates?: Record<string, TaskTemplate>;
-  execution?: { trustMode?: "trusted" | "untrusted" };
+  execution?: {
+    trustMode?: "trusted" | "untrusted";
+    /** ESM runner 插件路径（`cbx.runner/v1`）：接管 executor/test/review 命令的进程执行。
+     *  配置后 untrusted 信任模式放行——由插件提供容器级隔离，cbx 自身保持零依赖。 */
+    runner?: string;
+  };
   plugins?: {
     enforce?: boolean;
     allowPaths?: string[];
@@ -71,6 +76,9 @@ export interface RuntimeConfig {
   };
   governance?: {
     retentionDays?: number;
+    /** 启用后，超过 retentionDays 的已终态任务（state/产物/worktree）会被自动清理。
+     *  默认 false——保留策略涉及删除数据，必须显式开启。 */
+    pruneJobs?: boolean;
     redactFields?: string[];
     redactPatterns?: string[];
   };
@@ -198,13 +206,15 @@ export async function loadRuntimeConfig(
   }
   if (config.execution !== undefined) {
     const value = object(config.execution, "execution");
-    known(value, "execution", ["trustMode"]);
+    known(value, "execution", ["trustMode", "runner"]);
     if (
       value.trustMode !== undefined &&
       value.trustMode !== "trusted" &&
       value.trustMode !== "untrusted"
     )
       throw new Error("execution.trustMode 必须是 trusted 或 untrusted。");
+    if (value.runner !== undefined && typeof value.runner !== "string")
+      throw new Error("execution.runner 必须是字符串（ESM 插件路径）。");
   }
   if (config.plugins !== undefined) {
     const value = object(config.plugins, "plugins");
@@ -285,10 +295,12 @@ export async function loadRuntimeConfig(
     const value = object(config.governance, "governance");
     known(value, "governance", [
       "retentionDays",
+      "pruneJobs",
       "redactFields",
       "redactPatterns",
     ]);
     optionalInteger(value.retentionDays, "governance.retentionDays", 1, 3650);
+    optionalBoolean(value.pruneJobs, "governance.pruneJobs");
     if (
       value.redactFields !== undefined &&
       (!Array.isArray(value.redactFields) ||
@@ -658,11 +670,21 @@ export async function savePersistedState(
     "INSERT INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at",
   ).run(jobId, JSON.stringify(value), now());
 }
-export async function listPersistedStates<T>(workspace: string): Promise<T[]> {
+export async function listPersistedStates<T>(
+  workspace: string,
+  limit?: number,
+): Promise<T[]> {
   const db = await databaseReadonly(workspace);
-  const rows = db
-    .prepare("SELECT state_json FROM jobs ORDER BY updated_at DESC")
-    .all() as Array<{ state_json: string }>;
+  const rows =
+    limit === undefined
+      ? (db
+          .prepare("SELECT state_json FROM jobs ORDER BY updated_at DESC")
+          .all() as Array<{ state_json: string }>)
+      : (db
+          .prepare(
+            "SELECT state_json FROM jobs ORDER BY updated_at DESC LIMIT ?",
+          )
+          .all(limit) as Array<{ state_json: string }>);
   // 单条损坏的 state_json 不应拖垮整个 listJobs/health：跳过坏行保持其他 job 可见，
   // 与 importLegacyData 的损坏行跳过策略一致；恢复需 cbx forget 后重建。
   const out: T[] = [];

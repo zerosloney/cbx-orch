@@ -804,8 +804,21 @@ export function createWebUiServer(
       }
       const ws = resolveWorkspace(url);
       // GET 才返回任务列表；POST 由下方写操作区块创建任务。
-      if (url.pathname === "/api/jobs" && req.method === "GET")
+      // ?limit=N 截断为最近 N 条（updated_at 倒序）；非法值返回 400，缺省全量（向后兼容）。
+      if (url.pathname === "/api/jobs" && req.method === "GET") {
+        const rawLimit = url.searchParams.get("limit");
+        if (rawLimit !== null) {
+          const n = Number(rawLimit);
+          if (!Number.isInteger(n) || n < 1 || n > 10000)
+            return json(
+              res,
+              { error: "limit 必须是 1 到 10000 的整数。" },
+              400,
+            );
+          return json(res, await listJobs(ws, { limit: n }));
+        }
         return json(res, await listJobs(ws));
+      }
       if (url.pathname === "/api/queue") return json(res, await listQueue(ws));
       if (url.pathname === "/healthz" || url.pathname === "/api/metrics")
         return json(res, await health(ws));

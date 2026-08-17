@@ -251,3 +251,66 @@ test("app.js updateCards reflects running/failed/paused states", async () => {
   assert.equal(String(els.get("#c-health")!.textContent), "暂停");
   assert.ok(els.get("#c-queued")!.className.includes("s-running"));
 });
+
+test("app.js updateCards prefers workspace summary jobsByStatus（截断列表下卡片计数仍全量）", async () => {
+  const { ctx, els } = await loadApp();
+  const updateCards = ctx.updateCards as (
+    jobs: Array<Record<string, unknown>>,
+    q: Record<string, unknown>,
+  ) => void;
+  ctx.allWorkspaces = [
+    {
+      path: "/ws/a",
+      jobsByStatus: { done: 40, failed: 3, running: 1 },
+      lastActivityAt: "2026-08-17T10:00:00.000Z",
+    },
+  ];
+  ctx.currentWorkspace = "/ws/a";
+  // 列表被 limit 截断成 1 条，但卡片计数必须来自全量摘要（jobsByStatus）
+  updateCards(
+    [{ status: "done" }],
+    { maxConcurrent: 2, paused: false, entries: [] },
+  );
+  assert.equal(String(els.get("#c-total")!.textContent), "44");
+  assert.equal(String(els.get("#c-failed")!.textContent), "3");
+  assert.equal(String(els.get("#c-done")!.textContent), "40");
+  assert.equal(String(els.get("#c-running")!.textContent), "1 / 2");
+  // 最后活动时间取摘要的 lastActivityAt（截断列表丢失旧任务 updatedAt 时仍准确）
+  assert.equal(
+    String(els.get("#c-last")!.textContent),
+    new Date("2026-08-17T10:00:00.000Z").toLocaleTimeString(),
+  );
+});
+
+test("app.js refresh 列表被截断时显示 trunc-hint，未截断时隐藏", async () => {
+  const { ctx, els } = await loadApp();
+  // 未截断（默认 fakeFetch 返回空列表）
+  await (ctx.refresh as () => Promise<void>)();
+  assert.equal(els.get("#trunc-hint")!.hidden, true);
+  // 截断（返回 300 条 = UI_JOBS_LIMIT）
+  ctx.fetch = async (url: string | URL) => {
+    const u = String(url);
+    if (u.includes("/api/jobs"))
+      return {
+        ok: true,
+        status: 200,
+        json: async () =>
+          Array.from({ length: 300 }, (_, i) => ({
+            jobId: "j" + i,
+            status: "done",
+            phase: "done",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          })),
+      };
+    if (u.includes("/api/queue"))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ maxConcurrent: 2, paused: false, entries: [] }),
+      };
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  await (ctx.refresh as () => Promise<void>)();
+  assert.equal(els.get("#trunc-hint")!.hidden, false);
+});

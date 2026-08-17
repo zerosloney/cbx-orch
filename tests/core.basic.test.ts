@@ -171,7 +171,7 @@ test(".cbx.json provides defaults and tasks can be listed", async () => {
   assert.equal((await listJobs(workspace))[0].jobId, "config-job");
 });
 
-test("untrusted mode is rejected because a Git worktree is not an OS sandbox", async () => {
+test("untrusted mode requires a configured runner plugin (no runner → rejected)", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-untrusted-"));
   await assert.rejects(
     () =>
@@ -184,7 +184,7 @@ test("untrusted mode is rejected because a Git worktree is not an OS sandbox", a
         maxTurns: 5,
         trustMode: "untrusted",
       }),
-    /未提供 OS 容器沙箱/,
+    /execution\.runner/,
   );
 });
 

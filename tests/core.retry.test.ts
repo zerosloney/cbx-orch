@@ -135,6 +135,32 @@ test("registry resolves codebuddy/cbc/opencode/omp/oh-my-pi/cline/qwen", () => {
   assert.equal(BUILTIN_EXECUTORS.length, 5);
 });
 
+test("内置执行器注册表满足 README 契约（envVar/candidates/aliases）", () => {
+  for (const spec of BUILTIN_EXECUTORS) {
+    // envVar 命名契约：CBX_<注册名大写>，与 README 执行器表的"覆盖 env"列一致；
+    // 漂移会破坏用户配置与文档对不上，契约测试拦截。
+    assert.match(
+      spec.envVar,
+      new RegExp(
+        `^CBX_${spec.name.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}$`,
+      ),
+      `${spec.name} 的 envVar ${spec.envVar} 不符合 CBX_<NAME> 契约`,
+    );
+    assert.ok(spec.candidates.length > 0, `${spec.name} 至少一个候选二进制名`);
+    assert.ok(
+      spec.candidates.includes(spec.name),
+      `${spec.name} 候选名必须含注册名`,
+    );
+    // alias 必须命中同一 spec（README：oh-my-pi 指向 omp）
+    for (const alias of spec.aliases)
+      assert.equal(
+        resolveExecutor(alias)?.name,
+        spec.name,
+        `${spec.name} 的 alias ${alias} 未解析回自身`,
+      );
+  }
+});
+
 test("codebuddy buildArgs uses print/stream-json/max-turns/permission-mode", () => {
   const args = resolveExecutor("codebuddy")!.buildArgs({
     prompt: "do it",

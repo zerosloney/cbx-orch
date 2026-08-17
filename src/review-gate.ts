@@ -1,9 +1,11 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { invokeExecutor, loadConfig } from "./core.js";
 import { snapshotDiff } from "./git-ops.js";
+import { parseReviewVerdict } from "./verdict.js";
 import type { ProcessResult } from "./process-runner.js";
 
 export interface ReviewGateResult {
@@ -44,7 +46,7 @@ export async function runReviewGate(workspaceInput: string, options: { executor?
   await writeFile(statusFile, snapshot.status, "utf8");
   await writeFile(untrackedFile, snapshot.untracked, "utf8");
 
-  const extra = `审查以下材料：\n- ${patchFile}\n- ${statusFile}\n- ${untrackedFile}\n\n不要修改代码。将结果写入 ${reviewFile}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL。按严重程度列出问题、文件和行号。\n\n审查规则：\n${reviewRules ?? "关注正确性、回归风险、安全性、测试覆盖和改动范围。"}`;
+  const extra = `审查以下材料：\n- ${patchFile}\n- ${statusFile}\n- ${untrackedFile}\n\n不要修改代码。将结果写入 ${reviewFile}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL（供人工阅读）。同时把机器可读判定写入 ${path.join(directory, "review.json")}，严格 JSON：{"version":1,"verdict":"PASS"或"FAIL"}（推荐；未写则回退解析 review.md 首行）。按严重程度列出问题、文件和行号。\n\n审查规则：\n${reviewRules ?? "关注正确性、回归风险、安全性、测试覆盖和改动范围。"}`;
   const prompt = `你是独立审查代理。\n\n当前阶段：stop-gate review\n\n${extra}\n\n持久化要求：\n- 将审查结果写入 ${reviewFile}。\n- 报告必须包含 VERDICT 与问题清单。\n- 不要把关键信息只放在聊天输出中。\n`;
 
   let result: ProcessResult;
@@ -59,11 +61,19 @@ export async function runReviewGate(workspaceInput: string, options: { executor?
 
   let review = "";
   try { review = await readFile(reviewFile, "utf8"); } catch { review = result.output; }
+  // 统一判定解析：review.json（结构化）优先，review.md 首行回退；UNKNOWN 保持 fail-open。
+  let reviewJson: unknown;
+  try {
+    reviewJson = existsSync(path.join(directory, "review.json"))
+      ? JSON.parse(await readFile(path.join(directory, "review.json"), "utf8"))
+      : undefined;
+  } catch {
+    reviewJson = undefined;
+  }
+  const verdict = parseReviewVerdict(review, reviewJson);
+  if (verdict === "PASS") return { pass: true, reason: "审查通过", review, verdict: "PASS" };
+  if (verdict === "FAIL") return { pass: false, reason: `审查发现问题：\n${review}`, review, verdict: "FAIL" };
   const firstLine = review.replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0].trim();
-  const pass = /^VERDICT\s*:\s*PASS$/i.test(firstLine);
-  const fail = /^VERDICT\s*:\s*FAIL$/i.test(firstLine);
-  if (pass) return { pass: true, reason: "审查通过", review, verdict: "PASS" };
-  if (fail) return { pass: false, reason: `审查发现问题：\n${review}`, review, verdict: "FAIL" };
   return { pass: true, reason: `审查输出无法解析 VERDICT（fail-open 放行）；首行：${firstLine || "<空>"}`, review, verdict: "UNKNOWN" };
 }
 

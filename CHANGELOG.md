@@ -4,6 +4,18 @@ This project follows [Semantic Versioning](https://semver.org/). User-visible be
 
 ## Unreleased
 
+- Feature: **Stage 依赖层物理并行**。`taskContract.stages[].dependsOn` + `isolated: true` 时，同层 stage 在每个独立 worktree 中并发执行（executor/test/review），层间串行合并——每层完成后按声明顺序把各 stage diff 合入主 worktree（`git merge`，内部提交带 cbx 身份兜底），下一层 worktree 包含全部前置层合并结果，最终 `complete.patch` 对任务基线计算，与串行依赖模式语义一致。合并冲突（同层 stage 改同一文件）以新 phase `needs_fix / stage_merge_conflict` 暂停并列出冲突文件；失败传播（terminal stage → 下游 skipped）与串行一致。stage 产出物写入 `stage-artifacts/<index>/` 私有目录，终态聚合为 jobDir 证据；`runStage` 新增 `writeDir` 参数（缺省 = 原行为）。线性模式与非隔离依赖模式保持单 worktree 串行不变。
+- Feature: **Runner 插件接口（`cbx.runner/v1`）**。`execution.runner` 配置 ESM 插件路径后，executor/test/review 命令改由插件执行（容器隔离场景）；`untrusted` 信任模式由"一律拒绝"放行为"要求配置 runner"（isolated 仍是硬前提，路径穿越防护与 executor 插件一致）。新增 `src/runner-plugin.ts`（resolveRunnerPlugin/runViaRunner，墙钟超时兜底）；输出经截断写 agent.log/test.log，runner 模式不产生流式事件与 active.pid。保持核心零依赖（不内置容器运行时）。
+
+- Feature: 任务列表规模控制。`cbx list --limit N`（1–10000，updated_at 倒序取最近 N 条）；Web UI `/api/jobs?limit=N`（非法值 400，缺省全量向后兼容），前端列表只拉最近 300 条并显示截断提示，卡片计数改用 workspace 摘要的 `jobsByStatus`（全量准确，不再受列表截断影响）。
+- Feature: 任务保留策略 `governance.pruneJobs`（默认 `false`，须显式开启）。开启后超过 `retentionDays` 的已终态任务（`done`/`failed`/`needs_fix`/`review_failed`/`cancelled`）在终态路径与健康检查时自动等价 `cbx purge` 清理（state/events/产物 + worktree），复用 `forgetJob` 的审计（tombstone + `job.deleted` webhook）；运行/排队/审批中任务永不触碰。strict schema 接受新字段。
+- Feature: 统一审查判定解析（`src/verdict.ts`）。审查器可写机器可读 `review.json`（`{"version":1,"verdict":"PASS"|"FAIL"}`），结构化判定优先于 `review.md` 首行 `VERDICT:` 旧契约；stage review 与 stop-gate 共用同一解析，消除两处口径漂移。无法解析时语义不变且有意为之：stage fail-closed（新增 `review_verdict_unparsable` 事件）、stop-gate fail-open。`review.json` 加入 CLI/UI/MCP 产物白名单。
+- Feature: 执行器契约加固。内置执行器注册表新增 README 契约测试（envVar `CBX_<NAME>` 命名 / candidates 含注册名 / alias 回指）；新增 `npm run smoke:executors`：对每个已安装的真实编码 CLI 跑一次最小任务验证 adapter 参数契约，未安装跳过，失败非零退出（不属默认测试套件，需显式触发）。
+- Feature: Web UI 前端轻量类型检查。`ui/tsconfig.json`（checkJs + 环境声明收窄 querySelector/按钮输入框属性）纳入 `npm run lint`，对 app.js 捕获未定义变量/拼写/签名错误；`ui-frontend.test.ts` 增补截断列表下卡片计数取摘要、trunc-hint 切换用例。
+- Perf: 事件批量写。热路径 `executor_stream_event` 落盘从每次 `appendFileSync` 改为内存缓冲 + 行数(128)/字节(64KB)阈值合并写 + 进程 exit 钩子兜底；`executeJob` 终态前显式 flush 保证终态可见时事件流完整。耐久语义与改造前一致（OS page cache，不额外 fsync；SIGKILL/断电最多丢失缓冲尾部流诊断事件，审计事件不走此路径）。
+- CI: 矩阵加入 `macos-latest`（覆盖 Unix 进程组击杀与路径分支的第三平台验证）；Node 支持矩阵对齐：`engines` 从 `>=20` 收紧为 `>=22`（Node 20 已 EOL 且不在 CI 验证范围），README 同步。
+- Docs: 新增英文总览 `README.en.md`（随 npm 包发布），中文 README 顶部互链。
+
 - Security: 修复 Windows 进程树击杀失效。`killTree` 此前有句柄时先 `child.kill` 短路返回——Node 在 Windows 的 kill 仅终止直接子进程且几乎总返回 true，`taskkill /T /F` 永不执行，每次超时/取消后 agent CLI 的孙进程（bash/git/node）成为孤儿继续改写 worktree。改为 `taskkill /T /F` 先行（必须趁根进程存活才能枚举整棵树），句柄与 pid 直杀作为受限会话兜底。
 - Fix: `runProcess`/`captureAsync` 超时击杀后 close 可能永不到达（孤儿孙进程持有 stdio 管道句柄）。新增 `FORCE_SETTLE_MS`（3s）强制结算兜底，超时+宽限后 resolve 返回，杜绝 worker 因 promise 悬挂 → 心跳过期 → 队列反复回收（心跳重置绕过 `MAX_RECLAIMS` 熔断）的 30s 摆振；`captureAsync` 超时改走树杀并接入同一兜底。
 - Security: 队列回收死 worker 时按 `active.pid` 终止其遗留的 detached executor（记 `queue_reclaim_killed_stray_executor` 事件），关闭"旧 worker 崩溃后孤儿 executor 与新 worker 并发改写同一 worktree"的双 agent 窗口。worker 进程仍存活（仅心跳过期）时不杀，由 run.lock 仲裁。

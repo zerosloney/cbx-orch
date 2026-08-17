@@ -3,11 +3,20 @@ import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from "./executor.js";
-import { findExecutable, resolveExecutor } from "./executors/builtin.js";
+import { findExecutable, resolveExecutor, type BuiltinExecutor } from "./executors/builtin.js";
+import { runViaRunner, resolveRunnerPlugin, type RunnerPlugin } from "./runner-plugin.js";
+import { MAX_CAPTURE_BYTES } from "./process-runner.js";
 import { bumpInvocationCount, loadConfig } from "./state.js";
 import { runProcess, runShell, type ProcessResult } from "./process-runner.js";
 import { saveJson } from "./storage.js";
 import { APP_VERSION } from "./version.js";
+
+/** 截断字符串保留尾部（与 BoundedOutput 同一口径：保留最新内容）。 */
+function truncateTail(text: string, maxBytes: number): string {
+  const buffer = Buffer.from(text, "utf8");
+  if (buffer.length <= maxBytes) return text;
+  return buffer.subarray(buffer.length - maxBytes).toString("utf8");
+}
 
 export type InvocationRole = "stage" | "review" | "manager" | "gate";
 
@@ -31,11 +40,54 @@ interface EventRedaction {
   patterns: string[];
 }
 
+/**
+ * 批量写缓冲：executor_stream_event 高频时把多条事件合并为一次 appendFileSync，
+ * 显著减少 open/write/close 系统调用；进程正常退出经 exit 钩子 flush 兜底。
+ * 耐久语义与改造前一致（写入即进 OS page cache，不额外 fsync）；进程被 SIGKILL/断电时
+ * 最多丢失 buffer 内的尾部流事件——它们是诊断数据（executor_stream_event / 过程事件），
+ * 审计关键事件（状态转换、lifecycle）走 publishEvent / logJobEvent，不经此路径。
+ */
+const EVENT_BUFFER_MAX_LINES = 128;
+const EVENT_BUFFER_MAX_BYTES = 64 * 1024;
+interface EventBuffer {
+  lines: string[];
+  bytes: number;
+}
+const eventBuffers = new Map<string, EventBuffer>();
+let eventExitFlushInstalled = false;
+
+/** 立即把指定 events 文件的缓冲写盘（幂等；写失败保留缓冲供 exit 钩子/下次阈值重试）。 */
+export function flushEventBuffer(eventsFile: string): void {
+  const buffer = eventBuffers.get(eventsFile);
+  if (!buffer || buffer.lines.length === 0) return;
+  try {
+    appendFileSync(eventsFile, buffer.lines.join(""), "utf8");
+    eventBuffers.delete(eventsFile);
+  } catch {
+    /* 写盘失败不阻断主流程；缓冲保留，exit 钩子或下一次阈值触发会重试 */
+  }
+}
+
+/** 当前积压的未落盘事件行数（测试与诊断用）。 */
+export function pendingEventBufferLines(eventsFile: string): number {
+  return eventBuffers.get(eventsFile)?.lines.length ?? 0;
+}
+
+function installEventExitFlush(): void {
+  if (eventExitFlushInstalled) return;
+  eventExitFlushInstalled = true;
+  // exit 钩子内只能跑同步代码；appendFileSync 满足要求。SIGKILL/断电不走此路径（文档见上）。
+  process.on("exit", () => {
+    for (const file of [...eventBuffers.keys()]) flushEventBuffer(file);
+  });
+}
+installEventExitFlush();
+
 /** 事件统一脱敏后再落盘：redactSensitive 按 key 匹配对象字段，
  *  redactText 再按行级 key 与全文正则兜底（覆盖句中内嵌密钥）。
  *  修复前 process_started 的完整 argv（含 prompt）与 executor_stream_event 的
  *  toolArgs 均绕过 governance.redactFields 直写 events.ndjson。 */
-function appendEvent(
+export function appendEvent(
   eventsFile: string,
   event: Record<string, unknown>,
   redaction?: EventRedaction,
@@ -47,11 +99,23 @@ function appendEvent(
         redaction.patterns,
       )
     : JSON.stringify(event);
-  appendFileSync(eventsFile, payload + "\n", "utf8");
+  let buffer = eventBuffers.get(eventsFile);
+  if (!buffer) {
+    buffer = { lines: [], bytes: 0 };
+    eventBuffers.set(eventsFile, buffer);
+  }
+  buffer.lines.push(payload + "\n");
+  buffer.bytes += payload.length + 1;
+  if (
+    buffer.lines.length >= EVENT_BUFFER_MAX_LINES ||
+    buffer.bytes >= EVENT_BUFFER_MAX_BYTES
+  )
+    flushEventBuffer(eventsFile);
 }
 
 async function invokeBuiltin(
-  spec: ReturnType<typeof resolveExecutor> & {},
+  spec: BuiltinExecutor,
+  workspace: string,
   directory: string,
   workdir: string,
   prompt: string,
@@ -60,6 +124,7 @@ async function invokeBuiltin(
   timeoutMs: number,
   invocationMeta?: InvocationMeta,
   redaction?: EventRedaction,
+  runner?: RunnerPlugin,
 ): Promise<ProcessResult> {
   const executable = findExecutable(spec);
   const args = [...executable.slice(1), ...spec.buildArgs({ prompt, permissionMode, maxTurns })];
@@ -67,7 +132,29 @@ async function invokeBuiltin(
   const eventsFile = path.join(directory, "events.ndjson");
   const outputLog = path.join(directory, "agent.log");
   appendEvent(eventsFile, { event: "executor_metadata", source: "builtin", name: spec.name, version: APP_VERSION, at: new Date().toISOString() }, redaction);
-  appendEvent(eventsFile, { event: "process_started", command: [command, ...args], cwd: workdir, at: new Date().toISOString() }, redaction);
+  appendEvent(eventsFile, { event: "process_started", command: [command, ...args], cwd: workdir, runner: runner ? runner.manifest.name : undefined, at: new Date().toISOString() }, redaction);
+  // runner 模式：命令由插件执行（容器内），host 不 spawn 子进程，无流式事件与 active.pid。
+  if (runner) {
+    const result = await runViaRunner(runner, {
+      workspace,
+      directory,
+      workdir,
+      command: [command, ...args],
+      shell: false,
+      role: invocationMeta?.role ?? "stage",
+      timeoutMs,
+      env: { ...process.env },
+      logFile: outputLog,
+    });
+    // 捕获输出写 agent.log（有界：保留尾部 MAX_CAPTURE_BYTES）
+    const bounded = truncateTail(result.output, MAX_CAPTURE_BYTES);
+    await appendFile(
+      outputLog,
+      bounded + (bounded.length < result.output.length ? "\n[输出已截断]\n" : "") + `\n退出码：${result.code}\n超时：${result.timedOut}\n`,
+      "utf8",
+    );
+    return { code: result.code, timedOut: result.timedOut, output: result.output };
+  }
 
   const filter = createLogEventFilter(spec.name);
   const filterContext = {
@@ -90,6 +177,11 @@ async function invokeBuiltin(
 
 export async function invokeExecutor(executor: string, workspace: string, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number, invocationMeta?: InvocationMeta): Promise<ProcessResult> {
   const config = await loadConfig(workspace);
+  // runner 插件：untrusted 任务的容器执行边界（executor/test/review 命令都经它）。
+  // 解析失败（路径穿越 / manifest 无效）抛 RunnerPluginError，任务以明确错误失败。
+  const runner = config.execution?.runner
+    ? await resolveRunnerPlugin(config.execution.runner, workspace)
+    : undefined;
   const redaction: EventRedaction | undefined = config.governance
     ? {
         fields: config.governance.redactFields ?? [],
@@ -117,7 +209,20 @@ export async function invokeExecutor(executor: string, workspace: string, direct
     }
   }
   const builtin = resolveExecutor(executor);
-  if (builtin) return invokeBuiltin(builtin, directory, workdir, prompt, permissionMode, maxTurns, timeoutMs, invocationMeta, redaction);
+  if (builtin)
+    return invokeBuiltin(
+      builtin,
+      workspace,
+      directory,
+      workdir,
+      prompt,
+      permissionMode,
+      maxTurns,
+      timeoutMs,
+      invocationMeta,
+      redaction,
+      runner,
+    );
   const identity = await inspectExecutorPlugin(executor, workspace, config.plugins);
   if (!config.plugins?.enforce) {
     // 默认不强制插件白名单：显式告警并落审计事件，提醒生产环境启用 plugins.enforce。
@@ -152,10 +257,35 @@ export async function invokeExecutor(executor: string, workspace: string, direct
   return normalized;
 }
 
-export async function runTest(directory: string, workdir: string, command: string | undefined, timeoutMs: number): Promise<ProcessResult> {
+export async function runTest(workspace: string, directory: string, workdir: string, command: string | undefined, timeoutMs: number): Promise<ProcessResult> {
   if (!command) { await writeFile(path.join(directory, "test.log"), "未指定测试命令。\n", "utf8"); return { code: 0, timedOut: false, output: "" }; }
   const logFile = path.join(directory, "test.log");
   await writeFile(logFile, `$ ${command}\n\n`, "utf8");
+  const config = await loadConfig(workspace);
+  const runner = config.execution?.runner
+    ? await resolveRunnerPlugin(config.execution.runner, workspace)
+    : undefined;
+  if (runner) {
+    // runner 模式：测试命令在容器内执行（shell 语义由插件决定），host 写捕获输出。
+    const result = await runViaRunner(runner, {
+      workspace,
+      directory,
+      workdir,
+      command: [command],
+      shell: true,
+      role: "test",
+      timeoutMs,
+      env: { ...process.env },
+      logFile,
+    });
+    const bounded = truncateTail(result.output, MAX_CAPTURE_BYTES);
+    await appendFile(
+      logFile,
+      bounded + (bounded.length < result.output.length ? "\n[输出已截断]\n" : "") + `\n退出码：${result.code}\n超时：${result.timedOut}\n`,
+      "utf8",
+    );
+    return { code: result.code, timedOut: result.timedOut, output: result.output };
+  }
   const result = await runShell(command, workdir, timeoutMs, logFile, path.join(directory, "active.pid"));
   await appendFile(logFile, `\n退出码：${result.code}\n超时：${result.timedOut}\n内存输出已截断：${Boolean(result.outputTruncated)}\n`, "utf8");
   return result;

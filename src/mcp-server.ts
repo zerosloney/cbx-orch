@@ -36,6 +36,7 @@ const EVIDENCE_ARTIFACTS = new Set([
   "complete.patch",
   "test.log",
   "review.md",
+  "review.json",
   "understanding.json",
 ]);
 function send(id: unknown, result?: unknown, error?: unknown): void {

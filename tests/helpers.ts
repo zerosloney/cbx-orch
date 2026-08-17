@@ -85,6 +85,11 @@ if (jobDir) {
   } else if (prompt.includes("independent review")) {
     const verdict = process.env.FAKE_REVIEW_VERDICT ?? "PASS";
     await writeFile(jobDir + "/review.md", process.env.FAKE_REVIEW_CONTENT ?? ("VERDICT: " + verdict + "\\n"));
+    // 结构化 verdict：FAKE_REVIEW_JSON=1 时写 review.json；FAKE_REVIEW_JSON_VERDICT 可覆盖（与 md 判定不同，用于验证优先级）。
+    if (process.env.FAKE_REVIEW_JSON === "1") {
+      const jsonVerdict = process.env.FAKE_REVIEW_JSON_VERDICT ?? verdict;
+      await writeFile(jobDir + "/review.json", JSON.stringify({ version: 1, verdict: jsonVerdict }));
+    }
     let definitions;
     try { definitions = JSON.parse(await (await import("node:fs/promises")).readFile(jobDir + "/auditor-context.json", "utf8")).current.criteria; } catch {}
     if (definitions) {
@@ -101,9 +106,58 @@ if (jobDir) {
   } else {
     console.log("fake executor output");
     await writeFile(jobDir + "/handback.md", "fake handback\\n");
-    if (process.env.FAKE_MUTATE_DEP === "1") await writeFile(process.cwd() + "/package.json", '{"name":"modified"}', "utf8");
-    await writeFile(process.cwd() + "/fake-change.txt", "changed\\n");
-    if (process.env.FAKE_STAGE_CHANGE === "1") (await import("node:child_process")).spawnSync("git", ["add", "fake-change.txt"], { cwd: process.cwd() });
+    // 并行 stage 模式：按 prompt 中的 "stage <idx>: <name>" 写独立文件 / 指定冲突文件 / 按名失败。
+    const stageMatch = prompt.match(/stage (\\d+): ([A-Za-z0-9_-]+)/);
+    if (process.env.FAKE_STAGE_NAMES) {
+      if (process.env.FAKE_FAIL_STAGE && stageMatch && stageMatch[2] === process.env.FAKE_FAIL_STAGE) process.exit(7);
+      if (stageMatch) {
+        const stageName = stageMatch[2];
+        // 并发证明：api 轮询等待 ui 的 marker（确定性同步，非定时猜测）；串行执行下 api 先跑会超时退出。
+        // marker 写共享 jobDir（各 stage worktree 互相不可见），等待/触碰都指向同一绝对路径。
+        if (process.env.FAKE_WAIT_FOR_FILE) {
+          const sep = process.env.FAKE_WAIT_FOR_FILE.indexOf("=");
+          const targetStage = sep >= 0 ? process.env.FAKE_WAIT_FOR_FILE.slice(0, sep) : "";
+          const file = sep >= 0 ? process.env.FAKE_WAIT_FOR_FILE.slice(sep + 1) : "";
+          if (stageName === targetStage) {
+            const barrier = jobDir + "/" + file;
+            const deadline = Date.now() + 10_000;
+            let found = false;
+            while (Date.now() < deadline) {
+              try { await access(barrier); found = true; break; } catch {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+              }
+            }
+            if (!found) process.exit(4);
+          }
+        }
+        if (process.env.FAKE_CONFLICT_FILE) {
+          await writeFile(process.cwd() + "/" + process.env.FAKE_CONFLICT_FILE, stageName + "\\n");
+        } else {
+          await writeFile(process.cwd() + "/" + stageName + ".txt", stageName + "\\n");
+        }
+        if (process.env.FAKE_TOUCH_FILE) {
+          const sep = process.env.FAKE_TOUCH_FILE.indexOf("=");
+          const targetStage = sep >= 0 ? process.env.FAKE_TOUCH_FILE.slice(0, sep) : "";
+          const file = sep >= 0 ? process.env.FAKE_TOUCH_FILE.slice(sep + 1) : "";
+          if (stageName === targetStage) await writeFile(jobDir + "/" + file, "1\\n");
+        }
+      }
+      if (process.env.FAKE_REQUIRE_FILES) {
+        // 格式 "<stageName>=<file1>,<file2>"：只对指定 stage 校验前置产物存在（并行首层不能互等）。
+        const sep = process.env.FAKE_REQUIRE_FILES.indexOf("=");
+        const targetStage = sep >= 0 ? process.env.FAKE_REQUIRE_FILES.slice(0, sep) : "";
+        const fileList = sep >= 0 ? process.env.FAKE_REQUIRE_FILES.slice(sep + 1) : "";
+        if (stageMatch && stageMatch[2] === targetStage) {
+          for (const file of fileList.split(",")) {
+            try { await access(process.cwd() + "/" + file); } catch { process.exit(3); }
+          }
+        }
+      }
+    } else {
+      if (process.env.FAKE_MUTATE_DEP === "1") await writeFile(process.cwd() + "/package.json", '{"name":"modified"}', "utf8");
+      await writeFile(process.cwd() + "/fake-change.txt", "changed\\n");
+      if (process.env.FAKE_STAGE_CHANGE === "1") (await import("node:child_process")).spawnSync("git", ["add", "fake-change.txt"], { cwd: process.cwd() });
+    }
   }
 }
 // review-gate：prompt 含 "stop-gate review"，从 prompt 解析 review.md 路径写 verdict
@@ -140,6 +194,8 @@ export async function setupFake(): Promise<{
   process.env.FAKE_EXIT_SEQUENCE = "0";
   process.env.FAKE_REVIEW_VERDICT = "PASS";
   delete process.env.FAKE_REVIEW_CONTENT;
+  delete process.env.FAKE_REVIEW_JSON;
+  delete process.env.FAKE_REVIEW_JSON_VERDICT;
   delete process.env.FAKE_REVIEW_MUTATE;
   delete process.env.FAKE_AUDIT_MODE;
   delete process.env.FAKE_AUDIT_UNSAFE;
@@ -151,6 +207,12 @@ export async function setupFake(): Promise<{
   delete process.env.FAKE_PROMPT_FILE;
   delete process.env.FAKE_BLOCKING_QUESTION;
   delete process.env.FAKE_MUTATE_DEP;
+  delete process.env.FAKE_STAGE_NAMES;
+  delete process.env.FAKE_FAIL_STAGE;
+  delete process.env.FAKE_CONFLICT_FILE;
+  delete process.env.FAKE_REQUIRE_FILES;
+  delete process.env.FAKE_WAIT_FOR_FILE;
+  delete process.env.FAKE_TOUCH_FILE;
   return { workspace, script };
 }
 
