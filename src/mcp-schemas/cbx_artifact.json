@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "required": ["job_id", "artifact"],
+  "properties": {
+    "job_id": { "type": "string" },
+    "artifact": {
+      "type": "string",
+      "enum": ["handback.md", "complete.patch", "test.log", "review.md", "understanding.json"]
+    },
+    "workspace": { "type": "string" }
+  }
+}

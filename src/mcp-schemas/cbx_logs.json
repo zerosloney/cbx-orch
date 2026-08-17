@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "required": ["job_id"],
+  "properties": {
+    "job_id": { "type": "string" },
+    "workspace": { "type": "string" },
+    "since": {
+      "type": "number",
+      "description": "行号游标，只返回此值之后的事件；省略或 0 = 全量。响应恒为 {job_id, events: string[], next_offset: number}"
+    }
+  }
+}

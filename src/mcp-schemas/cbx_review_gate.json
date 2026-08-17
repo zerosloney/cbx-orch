@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "properties": {
+    "workspace": { "type": "string" },
+    "executor": { "type": "string" },
+    "timeout_ms": { "type": "number" }
+  }
+}

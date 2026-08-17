@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "required": ["job_id"],
+  "additionalProperties": false,
+  "properties": {
+    "job_id": { "type": "string" },
+    "workspace": { "type": "string" },
+    "message": { "type": "string" },
+    "context_snapshot": {
+      "type": "string",
+      "description": "覆盖父会话提炼的目标补充、计划、关键文件或命令输出及约束"
+    },
+    "refresh_baseline": {
+      "type": "boolean",
+      "description": "确认当前 HEAD 为新的任务基线"
+    },
+    "extra_rounds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "仅在 max_rounds Human Gate 等待时追加轮次"
+    },
+    "priority": { "type": "number" }
+  }
+}

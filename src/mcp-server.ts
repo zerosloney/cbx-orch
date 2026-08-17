@@ -30,6 +30,25 @@ import { constantTimeEqual } from "./storage.js";
 import { hasJsonContentType, isTrustedLocalRequest } from "./http-guard.js";
 import { APP_VERSION } from "./version.js";
 
+import cbx_start from "./mcp-schemas/cbx_start.json" with { type: "json" };
+import cbx_status from "./mcp-schemas/cbx_status.json" with { type: "json" };
+import cbx_review from "./mcp-schemas/cbx_review.json" with { type: "json" };
+import cbx_continue from "./mcp-schemas/cbx_continue.json" with { type: "json" };
+import cbx_artifact from "./mcp-schemas/cbx_artifact.json" with { type: "json" };
+import cbx_cancel from "./mcp-schemas/cbx_cancel.json" with { type: "json" };
+import cbx_approve from "./mcp-schemas/cbx_approve.json" with { type: "json" };
+import cbx_list from "./mcp-schemas/cbx_list.json" with { type: "json" };
+import cbx_logs from "./mcp-schemas/cbx_logs.json" with { type: "json" };
+import cbx_result from "./mcp-schemas/cbx_result.json" with { type: "json" };
+import cbx_queue from "./mcp-schemas/cbx_queue.json" with { type: "json" };
+import cbx_queue_pause from "./mcp-schemas/cbx_queue_pause.json" with { type: "json" };
+import cbx_queue_resume from "./mcp-schemas/cbx_queue_resume.json" with { type: "json" };
+import cbx_retry from "./mcp-schemas/cbx_retry.json" with { type: "json" };
+import cbx_review_gate from "./mcp-schemas/cbx_review_gate.json" with { type: "json" };
+import cbx_clean from "./mcp-schemas/cbx_clean.json" with { type: "json" };
+import cbx_forget from "./mcp-schemas/cbx_forget.json" with { type: "json" };
+import cbx_purge from "./mcp-schemas/cbx_purge.json" with { type: "json" };
+import cbx_list_workspaces from "./mcp-schemas/cbx_list_workspaces.json" with { type: "json" };
 const serverInfo = { name: "cbx-orch", version: APP_VERSION };
 const EVIDENCE_ARTIFACTS = new Set([
   "handback.md",
@@ -101,318 +120,44 @@ function optionalBoolean(args: Record<string, unknown>, field: string): void {
 }
 
 const tools = [
-  {
-    name: "cbx_start",
-    description: "创建并后台执行一个任务",
-    inputSchema: {
-      type: "object",
-      required: ["task"],
-      properties: {
-        task: { type: "string" },
-        context_snapshot: {
-          type: "string",
-          description: "父会话提炼的目标补充、计划、关键文件或命令输出及约束",
-        },
-        task_contract: {
-          type: "object",
-          description: "可选结构化契约；提供后先执行上下文握手",
-          properties: {
-            goal: { type: "string" },
-            non_goals: { type: "array", items: { type: "string" } },
-            acceptance_criteria: { type: "array", items: { type: "string" } },
-            constraints: { type: "array", items: { type: "string" } },
-            relevant_files: { type: "array", items: { type: "string" } },
-            decisions: { type: "array", items: { type: "string" } },
-            rejected_options: { type: "array", items: { type: "string" } },
-            assumptions: { type: "array", items: { type: "string" } },
-            stages: {
-              type: "array",
-              description:
-                "接力链；每个 stage 用不同 executor，前序 stage 的 handback 自动注入下一个 stage",
-              items: {
-                type: "object",
-                properties: {
-                  name: { type: "string" },
-                  executor: { type: "string" },
-                  task: { type: "string" },
-                  review_executor: { type: "string" },
-                  skip_review: { type: "boolean" },
-                  depends_on: {
-                    type: "array",
-                    items: { type: "string" },
-                    description:
-                      "前置 stage name 数组（对应 CLI task_contract.stages.dependsOn）；前置失败时本 stage 标记 skipped",
-                  },
-                },
-                required: ["name", "executor", "task"],
-              },
-            },
-          },
-        },
-        workspace: { type: "string" },
-        test_command: { type: "string" },
-        review: { type: "boolean" },
-        isolated: { type: "boolean" },
-        timeout_ms: { type: "number" },
-        max_retries: { type: "number" },
-        max_turns: { type: "integer", minimum: 1 },
-        permission_mode: {
-          type: "string",
-          enum: ["default", "acceptEdits", "auto", "dontAsk"],
-        },
-        approval_before_run: { type: "boolean" },
-        dependency_guard: { type: "boolean" },
-        keep_worktree: { type: "boolean" },
-        approval_before_complete: { type: "boolean" },
-        priority: { type: "number" },
-        auto_branch: { type: "boolean" },
-        auto_commit: { type: "boolean" },
-        commit_message: { type: "string" },
-        executor: {
-          type: "string",
-          description: "内置执行器 codebuddy/opencode/omp/cline/qwen，或插件路径",
-        },
-        review_executor: {
-          type: "string",
-          description: "可选独立审查执行器；默认沿用 executor",
-        },
-        adaptive: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            enabled: { type: "boolean" },
-            max_rounds: { type: "integer", minimum: 1, maximum: 100 },
-            manager_executor: { type: "string" },
-          },
-        },
-        allow_unsafe_permissions: {
-          type: "boolean",
-          description:
-            "permissionMode 为 dontAsk 时必须显式传 true（对应 CLI 的 --dangerously-skip-permissions）",
-        },
-      },
-    },
-  },
-  {
-    name: "cbx_status",
-    description: "读取任务状态",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      properties: { job_id: { type: "string" }, workspace: { type: "string" } },
-    },
-  },
-  {
-    name: "cbx_review",
-    description: "读取任务审查报告",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      properties: { job_id: { type: "string" }, workspace: { type: "string" } },
-    },
-  },
-  {
-    name: "cbx_continue",
-    description: "根据审查意见继续任务",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      additionalProperties: false,
-      properties: {
-        job_id: { type: "string" },
-        workspace: { type: "string" },
-        message: { type: "string" },
-        context_snapshot: {
-          type: "string",
-          description:
-            "覆盖父会话提炼的目标补充、计划、关键文件或命令输出及约束",
-        },
-        refresh_baseline: {
-          type: "boolean",
-          description: "确认当前 HEAD 为新的任务基线",
-        },
-        extra_rounds: {
-          type: "integer",
-          minimum: 1,
-          maximum: 100,
-          description: "仅在 max_rounds Human Gate 等待时追加轮次",
-        },
-        priority: { type: "number" },
-      },
-    },
-  },
-  {
-    name: "cbx_artifact",
-    description: "读取任务证据文件",
-    inputSchema: {
-      type: "object",
-      required: ["job_id", "artifact"],
-      properties: {
-        job_id: { type: "string" },
-        artifact: {
-          type: "string",
-          enum: [
-            "handback.md",
-            "complete.patch",
-            "test.log",
-            "review.md",
-            "understanding.json",
-          ],
-        },
-        workspace: { type: "string" },
-      },
-    },
-  },
-  {
-    name: "cbx_cancel",
-    description: "取消任务",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      properties: { job_id: { type: "string" }, workspace: { type: "string" } },
-    },
-  },
-  {
-    name: "cbx_approve",
-    description: "批准等待中的任务并启动",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      properties: { job_id: { type: "string" }, workspace: { type: "string" } },
-    },
-  },
-  {
-    name: "cbx_list",
-    description: "列出工作区中的任务",
-    inputSchema: {
-      type: "object",
-      properties: { workspace: { type: "string" } },
-    },
-  },
-  {
-    name: "cbx_logs",
-    description: "读取任务原始事件日志（增量游标；since=0 全量，省略等同 0）",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      properties: {
-        job_id: { type: "string" },
-        workspace: { type: "string" },
-        since: {
-          type: "number",
-          description:
-            "行号游标，只返回此值之后的事件；省略或 0 = 全量。响应恒为 {job_id, events: string[], next_offset: number}",
-        },
-      },
-    },
-  },
-  {
-    name: "cbx_result",
-    description: "读取任务结构化结果",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      properties: { job_id: { type: "string" }, workspace: { type: "string" } },
-    },
-  },
-  {
-    name: "cbx_queue",
-    description: "查看任务队列和并发槽位",
-    inputSchema: {
-      type: "object",
-      properties: { workspace: { type: "string" } },
-    },
-  },
-  {
-    name: "cbx_queue_pause",
-    description: "暂停启动新的队列 worker",
-    inputSchema: {
-      type: "object",
-      properties: { workspace: { type: "string" } },
-    },
-  },
-  {
-    name: "cbx_queue_resume",
-    description: "恢复队列并启动等待中的 worker",
-    inputSchema: {
-      type: "object",
-      properties: { workspace: { type: "string" } },
-    },
-  },
-  {
-    name: "cbx_retry",
-    description: "将失败任务重新加入队列",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      properties: {
-        job_id: { type: "string" },
-        workspace: { type: "string" },
-        priority: { type: "number" },
-      },
-    },
-  },
+  { name: "cbx_start", description: "创建并后台执行一个任务", inputSchema: cbx_start },
+  { name: "cbx_status", description: "读取任务状态", inputSchema: cbx_status },
+  { name: "cbx_review", description: "读取任务审查报告", inputSchema: cbx_review },
+  { name: "cbx_continue", description: "根据审查意见继续任务", inputSchema: cbx_continue },
+  { name: "cbx_artifact", description: "读取任务证据文件", inputSchema: cbx_artifact },
+  { name: "cbx_cancel", description: "取消任务", inputSchema: cbx_cancel },
+  { name: "cbx_approve", description: "批准等待中的任务并启动", inputSchema: cbx_approve },
+  { name: "cbx_list", description: "列出工作区中的任务", inputSchema: cbx_list },
+  { name: "cbx_logs", description: "读取任务原始事件日志（增量游标；since=0 全量，省略等同 0）", inputSchema: cbx_logs },
+  { name: "cbx_result", description: "读取任务结构化结果", inputSchema: cbx_result },
+  { name: "cbx_queue", description: "查看任务队列和并发槽位", inputSchema: cbx_queue },
+  { name: "cbx_queue_pause", description: "暂停启动新的队列 worker", inputSchema: cbx_queue_pause },
+  { name: "cbx_queue_resume", description: "恢复队列并启动等待中的 worker", inputSchema: cbx_queue_resume },
+  { name: "cbx_retry", description: "将失败任务重新加入队列", inputSchema: cbx_retry },
   {
     name: "cbx_review_gate",
-    description:
-      "对当前工作区未提交改动跑独立 review（Stop hook gate 的手动入口）",
-    inputSchema: {
-      type: "object",
-      properties: {
-        workspace: { type: "string" },
-        executor: { type: "string" },
-        timeout_ms: { type: "number" },
-      },
-    },
+    description: "对当前工作区未提交改动跑独立 review（Stop hook gate 的手动入口）",
+    inputSchema: cbx_review_gate,
   },
   {
     name: "cbx_clean",
-    description:
-      "清理任务遗留的 Git worktree（--keep-worktree 任务的清理入口）",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      properties: {
-        job_id: { type: "string" },
-        workspace: { type: "string" },
-      },
-    },
+    description: "清理任务遗留的 Git worktree（--keep-worktree 任务的清理入口）",
+    inputSchema: cbx_clean,
   },
   {
     name: "cbx_forget",
-    description:
-      "删除任务的 state.json / events.ndjson / 全部工件（保留 worktree）。不可逆——running/queued/awaiting_approval 状态会被拒绝，调用方需先 cancel 或 approve。",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      properties: {
-        job_id: { type: "string" },
-        workspace: { type: "string" },
-        reason: { type: "string" },
-      },
-    },
+    description: "删除任务的 state.json / events.ndjson / 全部工件（保留 worktree）。不可逆——running/queued/awaiting_approval 状态会被拒绝，调用方需先 cancel 或 approve。",
+    inputSchema: cbx_forget,
   },
   {
     name: "cbx_purge",
-    description:
-      "cbx_forget 的破坏力加强版：连 worktree 一起删。不可逆——running/queued/awaiting_approval 状态会被拒绝，调用方需先 cancel 或 approve。",
-    inputSchema: {
-      type: "object",
-      required: ["job_id"],
-      properties: {
-        job_id: { type: "string" },
-        workspace: { type: "string" },
-        reason: { type: "string" },
-      },
-    },
+    description: "cbx_forget 的破坏力加强版：连 worktree 一起删。不可逆——running/queued/awaiting_approval 状态会被拒绝，调用方需先 cancel 或 approve。",
+    inputSchema: cbx_purge,
   },
   {
     name: "cbx_list_workspaces",
     description: "扫描 root 下含 .cbx/ 的 workspace 并列出各自任务",
-    inputSchema: {
-      type: "object",
-      properties: { root: { type: "string" } },
-    },
+    inputSchema: cbx_list_workspaces,
   },
 ];
 

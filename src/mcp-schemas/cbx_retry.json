@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "required": ["job_id"],
+  "properties": {
+    "job_id": { "type": "string" },
+    "workspace": { "type": "string" },
+    "priority": { "type": "number" }
+  }
+}
