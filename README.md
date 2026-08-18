@@ -145,6 +145,36 @@ graph LR
 - 通过对应的 env 变量可覆盖二进制路径，常用于测试或指向自定义脚本。
 - 自定义插件：`executor` 指向一个 ESM 模块路径，模块导出 `run(request)`，返回 `{ code, output, timedOut }`。示例见 `plugins/example-executor.mjs`。
 
+### Agent 注册与自动发现
+
+内置 5 个适配器之外的新 CLI 无需改代码：在工作区 `.cbx/agents/`（项目级，可随仓库分发）或 `~/.cbx/agents/`（用户级）放置一个 JSON spec 即可被自动发现并注册。同名时 workspace 覆盖用户级；内置注册名不可被覆盖。
+
+```json
+{
+  "name": "gemini",
+  "aliases": ["gca"],
+  "label": "Gemini CLI",
+  "candidates": ["gemini"],
+  "args": ["-p", "{prompt}", "--output-format", "json"],
+  "autoArgs": ["--yolo"],
+  "planArgs": ["--approval-mode", "plan"],
+  "maxTurnsArg": "--max-turns",
+  "version": "1.0.0"
+}
+```
+
+字段说明：`name`（小写字母/数字/`._-`，不可与内置冲突）、`aliases`（可选，`resolveExecutor` 同样命中）、`label`（显示名）、`candidates`（PATH 上依次尝试的二进制名）、`args`（参数模板，支持 `{prompt}` / `{maxTurns}` 占位符）、`autoArgs`（`permissionMode` 为 `auto`/`dontAsk` 时追加）、`planArgs`（`plan` 时追加）、`maxTurnsArg`（设置后追加 `<maxTurnsArg> <maxTurns>`）、`envVar`（可选，缺省由 name 派生为 `CBX_<NAME>`，用于覆盖二进制路径）。
+
+注册后 `--executor gemini` 与 stage 的 `executor: "gemini"` 直接可用。查看注册结果与二进制可用性：
+
+```powershell
+node dist\src\cli.js agents            # 表格视图
+node dist\src\cli.js agents --json     # 机器可读
+curl http://127.0.0.1:4173/api/agents  # Web UI 同款数据
+```
+
+spec 校验失败（缺字段、name 冲突）不会中断其他 agent 的注册，错误会聚合展示在 `cbx agents` 输出与 `/api/agents` 响应的 `errors` 字段中。
+
 ## 项目配置
 
 在目标仓库根目录放置 `.cbx.json`，命令行参数会覆盖配置文件：

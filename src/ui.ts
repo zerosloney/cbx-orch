@@ -29,6 +29,7 @@ import {
   startBackground,
 } from "./core.js";
 import { captureAsync } from "./process-runner.js";
+import { discoverAgents } from "./agent-registry.js";
 import { constantTimeEqual } from "./storage.js";
 import { processAlive } from "./lock.js";
 import { httpStatusForError } from "./errors.js";
@@ -822,6 +823,8 @@ export function createWebUiServer(
         return json(res, await listJobs(ws));
       }
       if (url.pathname === "/api/queue") return json(res, await listQueue(ws));
+      if (url.pathname === "/api/agents")
+        return json(res, await discoverAgents(ws));
       if (url.pathname === "/healthz" || url.pathname === "/api/metrics")
         return json(res, await health(ws));
       const job = /^\/api\/jobs\/([^/]+)$/.exec(url.pathname);

@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import {
   AUTO_MODES,
   BUILTIN_EXECUTORS,
@@ -185,30 +185,65 @@ export async function resolveRegisteredExecutor(
   )?.spec;
 }
 
-/** 探测各 agent 的二进制可用性（envVar 覆盖 / PATH 解析），不抛错，结果内联返回。 */
-export function probeAgents(agents: RegisteredAgent[]): AgentProbe[] {
-  return agents.map(({ spec, source }) => {
+/** 依次检查候选命令是否真实存在：带路径分隔符的直接 stat，裸名沿 PATH+PATHEXT 解析。 */
+async function locateBinary(names: string[]): Promise<string | null> {
+  const pathDirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const extensions =
+    process.platform === "win32"
+      ? [...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean), ""]
+      : [""];
+  for (const name of names) {
+    const isPathLike = name.includes("/") || name.includes("\\") || path.isAbsolute(name);
+    const candidatesForName = isPathLike
+      ? [name]
+      : pathDirs.flatMap((dir) => extensions.map((ext) => path.join(dir, name + ext)));
+    for (const candidate of candidatesForName) {
+      try {
+        await access(candidate);
+        return candidate;
+      } catch {
+        /* 继续尝试下一个候选 */
+      }
+    }
+  }
+  return null;
+}
+
+async function probeAgent({ spec, source }: RegisteredAgent): Promise<AgentProbe> {
+  const base = {
+    name: spec.name,
+    label: spec.label,
+    source,
+    aliases: spec.aliases,
+  };
+  // findExecutable 对裸二进制名不做存在性检查（spawn 时才报错），探测需自行确认。
+  const configured = process.env[spec.envVar];
+  if (configured) {
     try {
+      await access(configured);
+      return { ...base, available: true, command: findExecutable(spec) };
+    } catch {
       return {
-        name: spec.name,
-        label: spec.label,
-        source,
-        aliases: spec.aliases,
-        available: true,
-        command: findExecutable(spec),
-      };
-    } catch (error) {
-      return {
-        name: spec.name,
-        label: spec.label,
-        source,
-        aliases: spec.aliases,
+        ...base,
         available: false,
         command: null,
-        error: error instanceof Error ? error.message : String(error),
+        error: `${spec.envVar} 指向的路径不存在：${configured}`,
       };
     }
-  });
+  }
+  if (await locateBinary(spec.candidates))
+    return { ...base, available: true, command: findExecutable(spec) };
+  return {
+    ...base,
+    available: false,
+    command: null,
+    error: `找不到 ${spec.label} (${spec.candidates.join("/")})。请安装 ${spec.label}，或设置 ${spec.envVar}。`,
+  };
+}
+
+/** 探测各 agent 的二进制可用性（envVar 覆盖 / PATH 解析），不抛错，结果内联返回。 */
+export async function probeAgents(agents: RegisteredAgent[]): Promise<AgentProbe[]> {
+  return Promise.all(agents.map(probeAgent));
 }
 
 export async function discoverAgents(workspace: string): Promise<{
@@ -216,5 +251,5 @@ export async function discoverAgents(workspace: string): Promise<{
   errors: string[];
 }> {
   const { agents, errors } = await collectAgents(workspace);
-  return { probes: probeAgents(agents), errors };
+  return { probes: await probeAgents(agents), errors };
 }
