@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, unlink, } from "node:fs/promises";
 import path from "node:path";
 import { loadJson } from "./storage.js";
+import { collectDepBaseline, detectChangedDeps } from "./dependency-guard.js";
+import { RetryBudget } from "./retry-budget.js";
 import { snapshotDiff, collectDiff } from "./git-ops.js";
 import { loadState, writeState, logJobEvent } from "./state.js";
 import { invokeExecutor, promptFor, runTest } from "./runner.js";
@@ -76,83 +77,21 @@ export async function runStage(params: {
   let reviewVerdict: string | null = null;
   const executionRetries = context.executionRetries ?? maxAttempts;
   const fixRetries = context.fixRetries ?? maxAttempts;
-  // 重试计数器持久化于 state.json：崩溃后被队列回收重入 runStage 时按持久值恢复，避免每次 resume 都拿满预算绕过 maxRetries；
-  // 显式 retry / 用户 resolve Human Gate 时由 prepareContinuation、retryQueueJob 归零。
   const persistedUsage = await loadState(workspace, jobId);
-  // 每 stage 独立重试预算: stageRetries 是 { [stageIndex]: { execution, fix } } 映射。
-  // 崩溃后队列回收重入时读持久化值恢复，不拿满预算绕过 maxRetries。
-  const stageRetries =
-    (persistedUsage.stageRetries as
-      Record<string, { execution: number; fix: number }> | undefined) ?? {};
-  const stageKey = String(stageIndex);
-  const stageEntry = stageRetries[stageKey] ?? { execution: 0, fix: 0 };
-  let executionUsed = Math.max(
-    0,
-    Math.floor(Number(stageEntry.execution) || 0),
+  const budget = new RetryBudget(
+    workspace,
+    jobId,
+    stageIndex,
+    persistedUsage,
+    executionRetries,
+    fixRetries,
   );
-  let fixUsed = Math.max(0, Math.floor(Number(stageEntry.fix) || 0));
-  const persistRetries = async (): Promise<void> => {
-    const current = await loadState(workspace, jobId);
-    const currentRetries =
-      (current.stageRetries as
-        Record<string, { execution: number; fix: number }> | undefined) ?? {};
-    await writeState(workspace, jobId, {
-      stageRetries: {
-        ...currentRetries,
-        [stageKey]: { execution: executionUsed, fix: fixUsed },
-      },
-    });
-  };
-  const useExecutionRetry = async (): Promise<void> => {
-    executionUsed += 1;
-    await persistRetries();
-  };
-  const useFixRetry = async (): Promise<void> => {
-    fixUsed += 1;
-    await persistRetries();
-  };
-  // 依赖守卫的受监控清单：覆盖主流语言生态的依赖声明 + 锁文件。
-  // executor（codebuddy/opencode 等）是多语言通用编码 CLI，仅覆盖 JS 会让 Go/Rust/Python 项目裸奔。
-  const DEP_FILES = [
-    // JS / Node
-    "package.json",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "bun.lockb",
-    // Python
-    "requirements.txt",
-    "pyproject.toml",
-    "poetry.lock",
-    "Pipfile.lock",
-    // Rust
-    "Cargo.toml",
-    "Cargo.lock",
-    // Go
-    "go.mod",
-    "go.sum",
-    // Ruby
-    "Gemfile",
-    "Gemfile.lock",
-    // Java / JVM
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-  ];
-  const depBaseline: Record<string, string> = {};
-  if (context.dependencyGuard) {
-    for (const file of DEP_FILES) {
-      const fullPath = path.join(workdir, file);
-      if (existsSync(fullPath)) {
-        depBaseline[file] = createHash("sha256")
-          .update(await readFile(fullPath))
-          .digest("hex");
-      }
-    }
-  }
+  const depBaseline = context.dependencyGuard
+    ? await collectDepBaseline(workdir)
+    : {};
 
   // intentional-simple: 闭包内构造辅助。report.name/executor/attempts 与 attempt/attemptExtra 在所有 16 个返回点取值相同，
-  // 仅 terminal/state/exitCode/testExitCode/reviewVerdict 因分支而异；闭包按引用读取重试预算变量，useXxxRetry 后自动累加。
+  // 仅 terminal/state/exitCode/testExitCode/reviewVerdict 因分支而异；budget.totalUsed 在 useXxxRetry 后自动累加。
   const outcome = (
     terminal: boolean,
     state: JobState,
@@ -168,7 +107,7 @@ export async function runStage(params: {
       exitCode,
       testExitCode,
       reviewVerdict,
-      attempts: executionUsed + fixUsed,
+      attempts: budget.totalUsed,
       // P0-2: 把 context.maxTurns 透传到 StageReport；当前 TaskStage 未支持 per-stage 覆盖，
       // 所以 per-stage 预算恒等于 context.maxTurns。预留字段，未来 stage 加 maxTurns 时只改这里。
       configuredMaxTurns: context.maxTurns,
@@ -242,8 +181,8 @@ export async function runStage(params: {
       );
     } catch (error) {
       lastError = String(error);
-      if (executionUsed < executionRetries) {
-        await useExecutionRetry();
+      if (budget.canRetryExecution()) {
+        await budget.useExecutionRetry();
         await writeState(workspace, jobId, {
           phase: "retrying",
           stage: stage.name,
@@ -263,24 +202,11 @@ export async function runStage(params: {
       return await cancelOutcome(agent.code, null);
     await collectDiff(writeDir, workdir);
     if (context.dependencyGuard) {
-      let depChanged = false;
-      const changedDepFiles: string[] = [];
-      for (const file of DEP_FILES) {
-        const fullPath = path.join(workdir, file);
-        if (existsSync(fullPath) && depBaseline[file]) {
-          const currentHash = createHash("sha256")
-            .update(await readFile(fullPath))
-            .digest("hex");
-          if (currentHash !== depBaseline[file]) {
-            depChanged = true;
-            changedDepFiles.push(file);
-          }
-        }
-      }
-      if (depChanged) {
+      const changedDepFiles = await detectChangedDeps(workdir, depBaseline);
+      if (changedDepFiles.length > 0) {
         lastError = `依赖守卫：未经授权修改了依赖文件：${changedDepFiles.join(", ")}。`;
-        if (fixUsed < fixRetries) {
-          await useFixRetry();
+        if (budget.canRetryFix()) {
+          await budget.useFixRetry();
           attemptExtra = `请恢复 ${changedDepFiles.join("、")} 至任务开始前的状态，或通过 --no-dependency-guard 禁用依赖守卫。`;
           await writeState(workspace, jobId, {
             phase: "retrying",
@@ -303,8 +229,8 @@ export async function runStage(params: {
         ? `${stageLabel} 超时（${context.timeoutMs}ms）`
         : `${stageLabel} 执行失败`;
       executorExitCode = agent.code;
-      if (executionUsed < executionRetries) {
-        await useExecutionRetry();
+      if (budget.canRetryExecution()) {
+        await budget.useExecutionRetry();
         await writeState(workspace, jobId, {
           phase: "retrying",
           stage: stage.name,
@@ -344,8 +270,8 @@ export async function runStage(params: {
         ? `验收命令超时（${context.timeoutMs}ms）`
         : "验收命令失败";
       testExitCode = test.code;
-      if (fixUsed < fixRetries) {
-        await useFixRetry();
+      if (budget.canRetryFix()) {
+        await budget.useFixRetry();
         attemptExtra = `请读取 ${path.join(writeDir, "test.log")}，修复失败原因后重新执行。`;
         await writeState(workspace, jobId, {
           phase: "retrying",
@@ -451,8 +377,8 @@ export async function runStage(params: {
       );
     } catch (error) {
       lastError = String(error);
-      if (fixUsed < fixRetries) {
-        await useFixRetry();
+      if (budget.canRetryFix()) {
+        await budget.useFixRetry();
         await writeState(workspace, jobId, {
           phase: "retrying",
           stage: stage.name,
@@ -487,8 +413,8 @@ export async function runStage(params: {
       lastError = reviewAgent.timedOut
         ? `审查超时（${context.timeoutMs}ms）`
         : "审查代理执行失败";
-      if (fixUsed < fixRetries) {
-        await useFixRetry();
+      if (budget.canRetryFix()) {
+        await budget.useFixRetry();
         await writeState(workspace, jobId, {
           phase: "retrying",
           stage: stage.name,
@@ -530,8 +456,8 @@ export async function runStage(params: {
         });
       } catch (error) {
         lastError = `结构化审计无效：${error instanceof Error ? error.message : String(error)}`;
-        if (fixUsed < fixRetries) {
-          await useFixRetry();
+        if (budget.canRetryFix()) {
+          await budget.useFixRetry();
           await writeState(workspace, jobId, {
             phase: "retrying",
             stage: stage.name,
@@ -597,8 +523,8 @@ export async function runStage(params: {
       return outcome(true, state, 0, 0, "FAIL");
     }
     reviewVerdict = "FAIL";
-    if (fixUsed < fixRetries) {
-      await useFixRetry();
+    if (budget.canRetryFix()) {
+      await budget.useFixRetry();
       await writeState(workspace, jobId, {
         phase: "retrying",
         stage: stage.name,

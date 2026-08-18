@@ -1,432 +1,122 @@
 import {
   mkdir,
-  open,
-  readFile,
   readdir,
-  rename,
+  readFile,
   stat,
-  unlink,
 } from "node:fs/promises";
-import { createReadStream } from "node:fs";
 import path from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import Database from "better-sqlite3";
-import { normalizeAdaptiveOptions } from "./adaptive-manager.js";
 import { CbxError } from "./errors.js";
 import { processAlive } from "./lock.js";
+import { isMissing } from "./file-utils.js";
+
+// Re-exports for backward compatibility — modules extracted from storage.ts
+export { atomicWriteFile, saveJson, loadJson } from "./file-utils.js";
+export { loadRuntimeConfig, type RuntimeConfig, type TaskTemplate } from "./config-loader.js";
+export {
+  loadPersistedState,
+  savePersistedState,
+  listPersistedStates,
+  forgetPersistedJob,
+  loadPersistedQueue,
+  savePersistedQueue,
+  savePersistedStateAndQueue,
+  upsertJobStateRow,
+  finishQueueEntryRow,
+  resolveApprovalQueueRow,
+  mapStateToQueueStatus,
+  savePersistedStateAndFinishQueue,
+  savePersistedStateAndResolveApprovalQueue,
+} from "./queue-persistence.js";
+export { nextEventSeq, prunePersistedData } from "./governance.js";
 
 export function now(): string {
   return new Date().toISOString();
 }
 
-export interface TaskTemplate {
-  task: string;
-  test?: string;
-  review?: boolean;
-  executor?: string;
-  isolated?: boolean;
-}
-
-export interface RuntimeConfig {
-  testCommand?: string;
-  review?: boolean;
-  isolated?: boolean;
-  timeoutMs?: number;
-  maxRetries?: number;
-  maxTurns?: number;
-  keepWorktree?: boolean;
-  permissionMode?: string;
-  reviewRules?: string;
-  approval?: { beforeRun?: boolean; beforeComplete?: boolean };
-  maxConcurrent?: number;
-  git?: { autoBranch?: boolean; autoCommit?: boolean; commitMessage?: string };
-  ci?: { failOnReview?: boolean };
-  executor?: string;
-  reviewExecutor?: string;
-  templates?: Record<string, TaskTemplate>;
-  execution?: {
-    trustMode?: "trusted" | "untrusted";
-    /** ESM runner 插件路径（`cbx.runner/v1`）：接管 executor/test/review 命令的进程执行。
-     *  配置后 untrusted 信任模式放行——由插件提供容器级隔离，cbx 自身保持零依赖。 */
-    runner?: string;
-  };
-  plugins?: {
-    enforce?: boolean;
-    allowPaths?: string[];
-    allowSha256?: string[];
-  };
-  notifications?: {
-    webhook?: string;
-    timeoutMs?: number;
-    maxRetries?: number;
-    retryBaseMs?: number;
-    filters?: {
-      events?: string[];
-      jobIds?: string[];
-      statuses?: string[];
-    };
-  };
-  telemetry?: {
-    enabled?: boolean;
-    endpoint?: string;
-    serviceName?: string;
-    timeoutMs?: number;
-    maxRetries?: number;
-    retryBaseMs?: number;
-  };
-  governance?: {
-    retentionDays?: number;
-    /** 启用后，超过 retentionDays 的已终态任务（state/产物/worktree）会被自动清理。
-     *  默认 false——保留策略涉及删除数据，必须显式开启。 */
-    pruneJobs?: boolean;
-    redactFields?: string[];
-    redactPatterns?: string[];
-  };
-  reviewGate?: { enabled?: boolean };
-  adaptive?: {
-    enabled?: boolean;
-    maxRounds?: number;
-    managerExecutor?: string;
-  };
-  dependencyGuard?: boolean;
-  ui?: { token?: string };
-  context?: {
-    tokenBudget?: { manager?: number; executor?: number; auditor?: number };
-  };
-}
-
-function object(value: unknown, name: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error(`${name} 必须是对象。`);
-  return value as Record<string, unknown>;
-}
-function known(
-  value: Record<string, unknown>,
-  name: string,
-  keys: string[],
-): void {
-  for (const key of Object.keys(value))
-    if (!keys.includes(key)) throw new Error(`${name} 不支持字段：${key}`);
-}
-function optionalBoolean(value: unknown, name: string): void {
-  if (value !== undefined && typeof value !== "boolean")
-    throw new Error(`${name} 必须是布尔值。`);
-}
-function optionalString(value: unknown, name: string): void {
-  if (value !== undefined && (typeof value !== "string" || !value.trim()))
-    throw new Error(`${name} 必须是非空字符串。`);
-}
-function optionalInteger(
-  value: unknown,
-  name: string,
-  minimum: number,
-  maximum = Number.MAX_SAFE_INTEGER,
-): void {
-  if (
-    value !== undefined &&
-    (!Number.isInteger(value) ||
-      Number(value) < minimum ||
-      Number(value) > maximum)
-  )
-    throw new Error(`${name} 必须是 ${minimum} 到 ${maximum} 的整数。`);
-}
-
-/** Strict runtime validation prevents unknown policy fields from silently weakening controls. */
-export async function loadRuntimeConfig(
-  workspaceInput: string,
-): Promise<RuntimeConfig> {
-  const workspace = path.resolve(workspaceInput);
-  const file = path.join(workspace, ".cbx.json");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(await readFile(file, "utf8"));
-  } catch (error) {
-    if (isMissing(error)) return {};
-    throw error;
-  }
-  const config = object(parsed, ".cbx.json");
-  known(config, ".cbx.json", [
-    "testCommand",
-    "review",
-    "isolated",
-    "timeoutMs",
-    "maxRetries",
-    "maxTurns",
-    "keepWorktree",
-    "permissionMode",
-    "reviewRules",
-    "approval",
-    "maxConcurrent",
-    "git",
-    "ci",
-    "executor",
-    "reviewExecutor",
-    "execution",
-    "plugins",
-    "notifications",
-    "telemetry",
-    "governance",
-    "reviewGate",
-    "adaptive",
-    "dependencyGuard",
-    "ui",
-    "context",
-    "templates",
-  ]);
-  optionalString(config.testCommand, "testCommand");
-  optionalBoolean(config.review, "review");
-  optionalBoolean(config.isolated, "isolated");
-  optionalInteger(config.timeoutMs, "timeoutMs", 100);
-  optionalInteger(config.maxRetries, "maxRetries", 0);
-  optionalInteger(config.maxTurns, "maxTurns", 1);
-  optionalBoolean(config.keepWorktree, "keepWorktree");
-  optionalString(config.permissionMode, "permissionMode");
-  optionalString(config.reviewRules, "reviewRules");
-  optionalInteger(config.maxConcurrent, "maxConcurrent", 1);
-  optionalString(config.executor, "executor");
-  optionalString(config.reviewExecutor, "reviewExecutor");
-  optionalBoolean(config.dependencyGuard, "dependencyGuard");
-  if (config.approval !== undefined) {
-    const value = object(config.approval, "approval");
-    known(value, "approval", ["beforeRun", "beforeComplete"]);
-    optionalBoolean(value.beforeRun, "approval.beforeRun");
-    optionalBoolean(value.beforeComplete, "approval.beforeComplete");
-  }
-  if (config.git !== undefined) {
-    const value = object(config.git, "git");
-    known(value, "git", ["autoBranch", "autoCommit", "commitMessage"]);
-    optionalBoolean(value.autoBranch, "git.autoBranch");
-    optionalBoolean(value.autoCommit, "git.autoCommit");
-    optionalString(value.commitMessage, "git.commitMessage");
-  }
-  if (config.ci !== undefined) {
-    const value = object(config.ci, "ci");
-    known(value, "ci", ["failOnReview"]);
-    optionalBoolean(value.failOnReview, "ci.failOnReview");
-  }
-  if (config.execution !== undefined) {
-    const value = object(config.execution, "execution");
-    known(value, "execution", ["trustMode", "runner"]);
-    if (
-      value.trustMode !== undefined &&
-      value.trustMode !== "trusted" &&
-      value.trustMode !== "untrusted"
-    )
-      throw new Error("execution.trustMode 必须是 trusted 或 untrusted。");
-    if (value.runner !== undefined && typeof value.runner !== "string")
-      throw new Error("execution.runner 必须是字符串（ESM 插件路径）。");
-  }
-  if (config.plugins !== undefined) {
-    const value = object(config.plugins, "plugins");
-    known(value, "plugins", ["enforce", "allowPaths", "allowSha256"]);
-    optionalBoolean(value.enforce, "plugins.enforce");
-    // 收紧默认策略：显式声明 plugins 即表示使用 executor 插件，默认强制校验。
-    if (value.enforce === undefined) value.enforce = true;
-    for (const key of ["allowPaths", "allowSha256"] as const)
-      if (
-        value[key] !== undefined &&
-        (!Array.isArray(value[key]) ||
-          value[key].some((item) => typeof item !== "string" || !item.trim()))
-      )
-        throw new Error(`plugins.${key} 必须是非空字符串数组。`);
-    const hashes = value.allowSha256 as string[] | undefined;
-    if (
-      hashes !== undefined &&
-      hashes.some((hash) => !/^[a-fA-F0-9]{64}$/.test(hash))
-    )
-      throw new Error("plugins.allowSha256 必须是 SHA-256 十六进制摘要。");
-  }
-  for (const [name, fields] of [
-    [
-      "notifications",
-      ["webhook", "timeoutMs", "maxRetries", "retryBaseMs", "filters"],
-    ],
-    [
-      "telemetry",
-      [
-        "enabled",
-        "endpoint",
-        "serviceName",
-        "timeoutMs",
-        "maxRetries",
-        "retryBaseMs",
-      ],
-    ],
-  ] as const) {
-    const raw = config[name];
-    if (raw === undefined) continue;
-    const value = object(raw, name);
-    known(value, name, fields as unknown as string[]);
-    optionalString(value.webhook, "notifications.webhook");
-    optionalString(value.endpoint, "telemetry.endpoint");
-    optionalBoolean(value.enabled, `${name}.enabled`);
-    optionalString(value.serviceName, `${name}.serviceName`);
-    if (
-      name === "telemetry" &&
-      value.enabled === true &&
-      value.endpoint === undefined
-    )
-      throw new Error("telemetry.enabled=true 时必须提供 telemetry.endpoint。");
-    optionalInteger(value.timeoutMs, `${name}.timeoutMs`, 50, 120_000);
-    optionalInteger(value.maxRetries, `${name}.maxRetries`, 0, 10);
-    if (
-      value.retryBaseMs !== undefined &&
-      (typeof value.retryBaseMs !== "number" || value.retryBaseMs < 0)
-    )
-      throw new Error(`${name}.retryBaseMs 必须是非负数。`);
-    // notifications.filters：webhook 事件订阅过滤（仅 notifications 有）。
-    if (name === "notifications" && value.filters !== undefined) {
-      const filters = object(value.filters, "notifications.filters");
-      known(filters, "notifications.filters", ["events", "jobIds", "statuses"]);
-      for (const key of ["events", "jobIds", "statuses"] as const) {
-        if (
-          filters[key] !== undefined &&
-          (!Array.isArray(filters[key]) ||
-            filters[key].length < 1 ||
-            filters[key].some(
-              (item) => typeof item !== "string" || !item.trim(),
-            ))
-        )
-          throw new Error(
-            `notifications.filters.${key} 必须是非空字符串数组。`,
-          );
-      }
-    }
-  }
-  if (config.governance !== undefined) {
-    const value = object(config.governance, "governance");
-    known(value, "governance", [
-      "retentionDays",
-      "pruneJobs",
-      "redactFields",
-      "redactPatterns",
-    ]);
-    optionalInteger(value.retentionDays, "governance.retentionDays", 1, 3650);
-    optionalBoolean(value.pruneJobs, "governance.pruneJobs");
-    if (
-      value.redactFields !== undefined &&
-      (!Array.isArray(value.redactFields) ||
-        value.redactFields.length > 100 ||
-        value.redactFields.some(
-          (field) => typeof field !== "string" || !field.trim(),
-        ))
-    )
-      throw new Error("governance.redactFields 必须是最多 100 个非空字符串。");
-    // intentional-simple: redactPatterns 只做语法校验（new RegExp 不抛即过），无 catastrophic backtracking 检测；
-    // 配置来自工作区所有者（同信任域），ReDoS 风险低。升级路径：引入 safe-regex 类启发式检测。
-    if (value.redactPatterns !== undefined) {
-      if (
-        !Array.isArray(value.redactPatterns) ||
-        value.redactPatterns.length > 100
-      )
-        throw new Error(
-          "governance.redactPatterns 必须是最多 100 个正则字符串。",
-        );
-      for (const pattern of value.redactPatterns) {
-        if (typeof pattern !== "string" || !pattern.trim())
-          throw new Error("governance.redactPatterns 必须是非空正则字符串。");
-        try {
-          new RegExp(pattern);
-        } catch {
-          throw new Error(`governance.redactPatterns 包含无效正则：${pattern}`);
-        }
-      }
-    }
-  }
-  if (config.reviewGate !== undefined) {
-    const value = object(config.reviewGate, "reviewGate");
-    known(value, "reviewGate", ["enabled"]);
-    optionalBoolean(value.enabled, "reviewGate.enabled");
-  }
-  if (config.adaptive !== undefined) normalizeAdaptiveOptions(config.adaptive);
-  if (config.ui !== undefined) {
-    const value = object(config.ui, "ui");
-    known(value, "ui", ["token"]);
-    optionalString(value.token, "ui.token");
-  }
-  if (config.context !== undefined) {
-    const value = object(config.context, "context");
-    known(value, "context", ["tokenBudget"]);
-    if (value.tokenBudget !== undefined) {
-      const budget = object(value.tokenBudget, "context.tokenBudget");
-      known(budget, "context.tokenBudget", ["manager", "executor", "auditor"]);
-      for (const role of ["manager", "executor", "auditor"] as const)
-        optionalInteger(budget[role], `context.tokenBudget.${role}`, 100);
-    }
-  }
-  if (config.templates !== undefined) {
-    // 任务模板：task 必填非空字符串；可选字段类型校验；未知模板键拒绝（防拼写错误静默失效）。
-    const templates = object(config.templates, "templates");
-    for (const [name, value] of Object.entries(templates)) {
-      const tpl = object(value, `templates.${name}`);
-      known(tpl, `templates.${name}`, [
-        "task",
-        "test",
-        "review",
-        "executor",
-        "isolated",
-      ]);
-      if (typeof tpl.task !== "string" || !tpl.task.trim())
-        throw new Error(`templates.${name}.task 必须是必填的非空字符串。`);
-      optionalString(tpl.test, `templates.${name}.test`);
-      optionalBoolean(tpl.review, `templates.${name}.review`);
-      optionalString(tpl.executor, `templates.${name}.executor`);
-      optionalBoolean(tpl.isolated, `templates.${name}.isolated`);
-    }
-  }
-  return config as RuntimeConfig;
-}
-
 export type CbxDatabase = Database.Database;
 // intentional-simple: Promise 缓存保证同 workspace 并发只创建一次连接；创建失败时 reject，
-// 不缓存坏 promise，允许下次调用重试。
-const databases = new Map<string, Promise<CbxDatabase>>();
+// 不缓存坏 promise，允许下次调用重试。lastAccessed + idleTimer 实现 60s 空闲自动关闭：
+// better-sqlite3 同步操作在微任务中完成，idleTimer 宏任务不会中断在途事务。
+interface DbCacheEntry {
+  promise: Promise<CbxDatabase>;
+  lastAccessed: number;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+}
+const databases = new Map<string, DbCacheEntry>();
 // 只读连接：WAL 模式下可安全并发读，不与写连接争抢 prepare/transaction 锁。
-const readonlyDatabases = new Map<string, Promise<CbxDatabase>>();
+const readonlyDatabases = new Map<string, DbCacheEntry>();
+const IDLE_TIMEOUT_MS = 60_000;
 
-/** 关闭指定 workspace 的 SQLite 连接并从缓存中移除；连接可能仍在异步创建中，
- *  因此等待创建完成后再关闭。未打开的 workspace 不抛错。 */
-export async function closeDatabase(workspaceInput: string): Promise<void> {
-  const workspace = path.resolve(workspaceInput);
-  const rwPromise = databases.get(workspace);
-  if (rwPromise) {
-    databases.delete(workspace);
-    try {
-      const db = await rwPromise;
-      db.close();
-    } catch {
-      /* 创建失败的 promise 已在 database() 中清理；此处忽略残留坏 promise */
-    }
+function touchEntry(entry: DbCacheEntry): void {
+  entry.lastAccessed = Date.now();
+  if (entry.idleTimer) {
+    clearTimeout(entry.idleTimer);
+    entry.idleTimer = null;
   }
-  const roPromise = readonlyDatabases.get(workspace);
-  if (roPromise) {
-    readonlyDatabases.delete(workspace);
+}
+
+function scheduleIdleClose(
+  map: Map<string, DbCacheEntry>,
+  workspace: string,
+): void {
+  const entry = map.get(workspace);
+  if (!entry) return;
+  if (entry.idleTimer) clearTimeout(entry.idleTimer);
+  entry.idleTimer = setTimeout(() => {
+    const current = map.get(workspace);
+    if (!current || current !== entry) return;
+    map.delete(workspace);
+    entry.idleTimer = null;
+    entry.promise
+      .then((db) => {
+        try {
+          db.close();
+        } catch {
+          /* best effort */
+        }
+      })
+      .catch(() => {
+        /* creation may have failed */
+      });
+  }, IDLE_TIMEOUT_MS);
+  entry.idleTimer.unref();
+}
+
+export async function closeDatabase(
+  workspaceInput: string,
+): Promise<void> {
+  const workspace = path.resolve(workspaceInput);
+  for (const map of [databases, readonlyDatabases]) {
+    const entry = map.get(workspace);
+    if (!entry) continue;
+    map.delete(workspace);
+    if (entry.idleTimer) clearTimeout(entry.idleTimer);
     try {
-      const db = await roPromise;
+      const db = await entry.promise;
       db.close();
     } catch {
-      /* 同上 */
+      /* creation may have failed — nothing to close */
     }
   }
 }
 
-/** 关闭所有缓存的 SQLite 连接；供进程退出清理使用。 */
 export async function closeAllDatabases(): Promise<void> {
   const workspaces = new Set([
     ...databases.keys(),
     ...readonlyDatabases.keys(),
   ]);
-  await Promise.all([...workspaces].map((workspace) => closeDatabase(workspace)));
+  await Promise.all([...workspaces].map((ws) => closeDatabase(ws)));
 }
 
-let exitFlushInstalled = false;
 function installDatabaseExitFlush(): void {
-  if (exitFlushInstalled) return;
-  exitFlushInstalled = true;
-  // beforeExit 在事件循环即将为空时触发，允许异步关闭连接；
-  // 显式 process.exit()/致命错误不走此路径，属于可接受的最佳努力清理。
-  process.once("beforeExit", () => {
-    closeAllDatabases().catch(() => undefined);
+  process.once("beforeExit", async () => {
+    try {
+      await closeAllDatabases();
+    } catch {
+      /* best-effort cleanup */
+    }
   });
 }
 installDatabaseExitFlush();
@@ -507,9 +197,9 @@ function migrate(db: CbxDatabase): void {
 }
 export async function database(workspaceInput: string): Promise<CbxDatabase> {
   const workspace = path.resolve(workspaceInput);
-  let promise = databases.get(workspace);
-  if (!promise) {
-    promise = (async (): Promise<CbxDatabase> => {
+  let entry = databases.get(workspace);
+  if (!entry) {
+    const promise = (async (): Promise<CbxDatabase> => {
       await mkdir(path.join(workspace, ".cbx"), { recursive: true });
       const db = new Database(databaseFile(workspace));
       db.pragma("journal_mode = WAL");
@@ -518,12 +208,15 @@ export async function database(workspaceInput: string): Promise<CbxDatabase> {
       await importLegacyData(workspace, db);
       return db;
     })();
-    databases.set(workspace, promise);
+    entry = { promise, lastAccessed: Date.now(), idleTimer: null };
+    databases.set(workspace, entry);
   }
+  touchEntry(entry);
   try {
-    return await promise;
+    const db = await entry.promise;
+    scheduleIdleClose(databases, workspace);
+    return db;
   } catch (error) {
-    // 创建失败时不缓存坏 promise，允许后续调用重试。
     databases.delete(workspace);
     throw error;
   }
@@ -560,7 +253,7 @@ export async function withQueueTxLock<T>(
 
 /** 只读连接：用于纯查询场景。WAL 模式下可与写并发；
  *  文件不存在或 schema 未初始化时回落到读写连接。 */
-async function databaseReadonly(workspaceInput: string): Promise<CbxDatabase> {
+export async function databaseReadonly(workspaceInput: string): Promise<CbxDatabase> {
   const workspace = path.resolve(workspaceInput);
   const file = databaseFile(workspace);
   // 文件不存在时由写连接负责初始化；不进只读缓存，避免长期持有写连接
@@ -569,9 +262,9 @@ async function databaseReadonly(workspaceInput: string): Promise<CbxDatabase> {
   } catch {
     return database(workspace);
   }
-  let promise = readonlyDatabases.get(workspace);
-  if (!promise) {
-    promise = (async (): Promise<CbxDatabase> => {
+  let entry = readonlyDatabases.get(workspace);
+  if (!entry) {
+    const promise = (async (): Promise<CbxDatabase> => {
       const db = new Database(file, { readonly: true });
       db.pragma("busy_timeout = 5000");
       // schema 尚未初始化时（如测试场景或首次访问）回落到读写连接；
@@ -588,10 +281,14 @@ async function databaseReadonly(workspaceInput: string): Promise<CbxDatabase> {
       }
       return db;
     })();
-    readonlyDatabases.set(workspace, promise);
+    entry = { promise, lastAccessed: Date.now(), idleTimer: null };
+    readonlyDatabases.set(workspace, entry);
   }
+  touchEntry(entry);
   try {
-    return await promise;
+    const db = await entry.promise;
+    scheduleIdleClose(readonlyDatabases, workspace);
+    return db;
   } catch (error) {
     readonlyDatabases.delete(workspace);
     throw error;
@@ -794,194 +491,6 @@ export function readQueueRows(db: CbxDatabase): PersistedQueueLike | undefined {
   };
 }
 
-export async function loadPersistedState<T>(
-  workspace: string,
-  jobId: string,
-): Promise<T | undefined> {
-  const db = await databaseReadonly(workspace);
-  const row = db
-    .prepare("SELECT state_json FROM jobs WHERE job_id = ?")
-    .get(jobId) as { state_json: string } | undefined;
-  return row ? (JSON.parse(row.state_json) as T) : undefined;
-}
-export async function savePersistedState(
-  workspace: string,
-  jobId: string,
-  value: unknown,
-): Promise<void> {
-  const db = await database(workspace);
-  db.prepare(
-    "INSERT INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at",
-  ).run(jobId, JSON.stringify(value), now());
-}
-export async function listPersistedStates<T>(
-  workspace: string,
-  limit?: number,
-): Promise<T[]> {
-  const db = await databaseReadonly(workspace);
-  const rows =
-    limit === undefined
-      ? (db
-          .prepare("SELECT state_json FROM jobs ORDER BY updated_at DESC")
-          .all() as Array<{ state_json: string }>)
-      : (db
-          .prepare(
-            "SELECT state_json FROM jobs ORDER BY updated_at DESC LIMIT ?",
-          )
-          .all(limit) as Array<{ state_json: string }>);
-  // 单条损坏的 state_json 不应拖垮整个 listJobs/health：跳过坏行保持其他 job 可见，
-  // 与 importLegacyData 的损坏行跳过策略一致；恢复需 cbx forget 后重建。
-  const out: T[] = [];
-  for (const row of rows) {
-    try {
-      out.push(JSON.parse(row.state_json) as T);
-    } catch {
-      /* skip corrupt row */
-    }
-  }
-  return out;
-}
-
-/**
- * 单事务删除 jobId 在持久化层（jobs 表 + queue_entries 行）的全部记录。
- *
- * 与 `queue.cancelQueueEntries` 不同：cancel 是把 active entries 标 cancelled（审计可见），
- * forget 是把同 jobId 的所有 entries 物理删除。两者串联——上层先 cancel 杀活 worker
- * 并持久化 cancelled 状态，再 forget 清掉 entries 残留，**单事务**确保 jobs 行删和
- * queue entries 删要么都成功要么都回滚，避免 listJobs 看不见但 queue 还残留的撕裂状态。
- *
- * 返回剩余 queue 长度供上层做断言与日志。
- */
-export async function forgetPersistedJob(
-  workspaceInput: string,
-  jobId: string,
-): Promise<{ deletedJob: boolean; remainingEntries: number }> {
-  const workspace = path.resolve(workspaceInput);
-  return withQueueTxLock(workspace, (db) => {
-    const result = db
-      .prepare("DELETE FROM jobs WHERE job_id = ?")
-      .run(jobId);
-    const deletedJob = result.changes > 0;
-    db.prepare("DELETE FROM queue_entries WHERE job_id = ?").run(jobId);
-    const remainingEntries = (
-      db
-        .prepare("SELECT COUNT(*) AS count FROM queue_entries")
-        .get() as { count: number }
-    ).count;
-    return { deletedJob, remainingEntries };
-  });
-}
-
-export async function loadPersistedQueue<T>(
-  workspace: string,
-  fallback: T,
-): Promise<T> {
-  const resolved = path.resolve(workspace);
-  const db = await database(resolved);
-  const stored = readQueueRows(db);
-  if (stored) return stored as T;
-  // 更早版本（SQLite 之前）的 queue.json 一次性导入行级表。
-  const file = path.join(resolved, ".cbx", "queue.json");
-  try {
-    const imported = JSON.parse(
-      await readFile(file, "utf8"),
-    ) as PersistedQueueLike;
-    db.transaction(() => writeQueueRows(db, imported, now()))();
-    return imported as T;
-  } catch (error) {
-    if (!isMissing(error)) throw error;
-  }
-  return fallback;
-}
-export async function savePersistedQueue(
-  workspace: string,
-  value: unknown,
-): Promise<void> {
-  const db = await database(workspace);
-  db.transaction(() =>
-    writeQueueRows(db, value as PersistedQueueLike, now()),
-  )();
-}
-export async function savePersistedStateAndQueue(
-  workspace: string,
-  jobId: string,
-  state: unknown,
-  queue: unknown,
-): Promise<void> {
-  const db = await database(workspace);
-  db.transaction(() => {
-    upsertJobStateRow(db, jobId, JSON.stringify(state));
-    writeQueueRows(db, queue as PersistedQueueLike, now());
-  })();
-}
-
-const UPSERT_JOB_SQL =
-  "INSERT INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at";
-
-export function upsertJobStateRow(
-  db: CbxDatabase,
-  jobId: string,
-  stateJson: string,
-): void {
-  db.prepare(UPSERT_JOB_SQL).run(jobId, stateJson, now());
-}
-
-export function finishQueueEntryRow(
-  db: CbxDatabase,
-  queueId: string,
-  queueStatus: string,
-): void {
-  db.prepare(
-    "UPDATE queue_entries SET status = ?, finished_at = ?, pid = NULL, updated_at = ? WHERE queue_id = ?",
-  ).run(queueStatus, now(), now(), queueId);
-}
-
-export function resolveApprovalQueueRow(
-  db: CbxDatabase,
-  jobId: string,
-  queueStatus: "done" | "failed",
-): void {
-  db.prepare(
-    "UPDATE queue_entries SET status = ?, finished_at = ?, pid = NULL, updated_at = ? WHERE job_id = ? AND status = 'awaiting_approval'",
-  ).run(queueStatus, now(), now(), jobId);
-}
-
-export function mapStateToQueueStatus(state: Record<string, unknown>): string {
-  const status = String(state.status);
-  return status === "done"
-    ? "done"
-    : status === "cancelled"
-      ? "cancelled"
-      : status === "awaiting_approval"
-        ? "awaiting_approval"
-        : "failed";
-}
-
-export async function savePersistedStateAndFinishQueue(
-  workspace: string,
-  jobId: string,
-  state: Record<string, unknown>,
-  queueId: string,
-): Promise<void> {
-  const db = await database(workspace);
-  db.transaction(() => {
-    finishQueueEntryRow(db, queueId, mapStateToQueueStatus(state));
-    upsertJobStateRow(db, jobId, JSON.stringify(state));
-  })();
-}
-export async function savePersistedStateAndResolveApprovalQueue(
-  workspace: string,
-  jobId: string,
-  state: Record<string, unknown>,
-  queueStatus: "done" | "failed",
-): Promise<void> {
-  const db = await database(workspace);
-  db.transaction(() => {
-    resolveApprovalQueueRow(db, jobId, queueStatus);
-    upsertJobStateRow(db, jobId, JSON.stringify(state));
-  })();
-}
-
 /** 读取 metadata 表中 key 对应的字符串值；不存在返回 undefined。 */
 export async function getMetadata(
   workspace: string,
@@ -1006,83 +515,6 @@ export async function setMetadata(
   ).run(key, value);
 }
 
-/** 原子自增并返回下一个事件 seq。用 SQLite 单事务保证跨进程唯一：INSERT OR IGNORE 初始化后 UPDATE ... RETURNING 取新值。
- *  并发进程在 SQLite 行锁下串行化，不会读到相同 seq。 */
-export async function nextEventSeq(workspace: string): Promise<number> {
-  const db = await database(workspace);
-  return db.transaction(() => {
-    db.prepare("INSERT OR IGNORE INTO metadata(key, value) VALUES (?, ?)").run(
-      "event_seq",
-      "0",
-    );
-    const row = db
-      .prepare(
-        "UPDATE metadata SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = ? RETURNING CAST(value AS INTEGER) AS seq",
-      )
-      .get("event_seq") as { seq: number } | undefined;
-    if (!row) throw new Error("event_seq 分配失败：metadata 表可能已损坏。");
-    return Number(row.seq);
-  })();
-}
-async function pruneDeliveryFailureArtifact(
-  workspace: string,
-  cutoff: number,
-): Promise<number> {
-  const file = path.join(workspace, ".cbx", "delivery-failures.ndjson");
-  const retained: string[] = [];
-  let removed = 0;
-  try {
-    const readline = await import("node:readline");
-    const stream = createReadStream(file, { encoding: "utf8" });
-    try {
-      const reader = readline.createInterface({
-        input: stream,
-        crlfDelay: Infinity,
-      });
-      for await (const line of reader) {
-        if (!line) continue;
-        try {
-          const record = JSON.parse(line) as { at?: string; createdAt?: string };
-          const at = Date.parse(record.at ?? record.createdAt ?? "");
-          if (Number.isFinite(at) && at < cutoff) {
-            removed += 1;
-            continue;
-          }
-        } catch {
-          /* preserve malformed records for manual recovery */
-        }
-        retained.push(line);
-      }
-    } finally {
-      try {
-        stream.close();
-      } catch {
-        /* best effort */
-      }
-    }
-  } catch (error) {
-    if (isMissing(error)) return 0;
-    throw error;
-  }
-  if (removed)
-    await atomicWriteFile(
-      file,
-      retained.length ? retained.join("\n") + "\n" : "",
-    );
-  return removed;
-}
-export async function prunePersistedData(
-  workspace: string,
-  retentionDays?: number,
-): Promise<number> {
-  if (!retentionDays) return 0;
-  const cutoff = Date.now() - retentionDays * 86_400_000;
-  const db = await database(workspace);
-  const sqlite = db
-    .prepare("DELETE FROM delivery_failures WHERE created_at < ?")
-    .run(new Date(cutoff).toISOString()).changes;
-  return sqlite + (await pruneDeliveryFailureArtifact(workspace, cutoff));
-}
 export async function persistedMetrics(workspace: string): Promise<{
   jobsByStatus: Record<string, number>;
   queueDepth: number;
@@ -1159,8 +591,10 @@ export async function acquireServiceLease(
   acquire();
   return {
     async renew(): Promise<boolean> {
+      // touch: 更新 lastAccessed 并取消 idleTimer，防止 lease 续期期间连接被空闲关闭
+      const leaseDb = await database(workspace);
       return (
-        db
+        leaseDb
           .prepare(
             "UPDATE service_leases SET expires_at = ? WHERE name = ? AND owner_token = ?",
           )
@@ -1168,79 +602,12 @@ export async function acquireServiceLease(
       );
     },
     async release(): Promise<void> {
-      db.prepare(
+      const leaseDb = await database(workspace);
+      leaseDb.prepare(
         "DELETE FROM service_leases WHERE name = ? AND owner_token = ?",
       ).run(name, token);
     },
   };
-}
-
-function isMissing(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException)?.code === "ENOENT";
-}
-
-async function replaceFile(source: string, target: string): Promise<void> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    try {
-      await rename(source, target);
-      return;
-    } catch (error) {
-      lastError = error;
-      const code = (error as NodeJS.ErrnoException).code;
-      if (
-        !new Set(["EACCES", "EPERM", "EBUSY"]).has(String(code)) ||
-        attempt === 4
-      )
-        throw error;
-      await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
-    }
-  }
-  throw lastError;
-}
-
-/** Write a complete file in the destination directory, fsync it, then atomically replace the destination. */
-export async function atomicWriteFile(
-  file: string,
-  contents: string,
-): Promise<void> {
-  const directory = path.dirname(file);
-  await mkdir(directory, { recursive: true });
-  const temporary = path.join(
-    directory,
-    `.${path.basename(file)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
-  );
-  const handle = await open(temporary, "wx", 0o600);
-  try {
-    await handle.writeFile(contents, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  try {
-    await replaceFile(temporary, file);
-  } catch (error) {
-    try {
-      await unlink(temporary);
-    } catch {
-      /* best effort */
-    }
-    throw error;
-  }
-}
-
-export async function saveJson(file: string, value: unknown): Promise<void> {
-  await atomicWriteFile(file, JSON.stringify(value, null, 2) + "\n");
-}
-
-/** A fallback is used only when the file does not exist. Corrupt JSON always remains visible to callers. */
-export async function loadJson<T>(file: string, fallback?: T): Promise<T> {
-  try {
-    return JSON.parse(await readFile(file, "utf8")) as T;
-  } catch (error) {
-    if (fallback !== undefined && isMissing(error)) return fallback;
-    throw error;
-  }
 }
 
 /** 常量时间字符串比较：两侧先各取 SHA-256 再 timingSafeEqual，同时规避长度泄漏与逐字节时序差异。 */

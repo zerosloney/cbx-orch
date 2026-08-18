@@ -3,7 +3,7 @@
 // reliability.test.ts 的 reclaim 簇；此处聚焦 governance 存储逻辑的唯一覆盖。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -124,4 +124,64 @@ test("loadRuntimeConfig rejects unknown governance keys", async () => {
 test("prunePersistedData is a no-op when retentionDays is unset", async () => {
   const ws = await mkdtemp(path.join(os.tmpdir(), "cbx-gov-prune-"));
   assert.equal(await prunePersistedData(ws), 0);
+});
+
+// ---- prunePersistedData: delivery-failures.ndjson 分支覆盖 ----
+// pruneDeliveryFailureArtifact 是内部函数，通过 prunePersistedData 间接调用。
+// 覆盖目标：过期记录删除、畸形记录保留、缺失时间戳保留、全部删除后写空文件。
+
+// 注意：database() 首次打开时会将 delivery-failures.ndjson 导入 SQLite delivery_failures 表。
+// prunePersistedData 先从 SQLite DELETE 旧行，再从 ndjson 文件删除旧记录——两源各删一次。
+// 因此返回值 = SQLite 删除数 + ndjson 删除数，预期值需包含两部分。
+
+test("prunePersistedData: 过期记录删除 + 近期记录和畸形记录保留", async () => {
+  const ws = await mkdtemp(path.join(os.tmpdir(), "cbx-prune-art-"));
+  const cbxDir = path.join(ws, ".cbx");
+  await mkdir(cbxDir, { recursive: true });
+  const old = new Date(Date.now() - 10 * 86_400_000).toISOString();
+  const recent = new Date().toISOString();
+  const lines = [
+    JSON.stringify({ at: old, reason: "old-fail" }),        // 过期 → ndjson+SQLite 各删1
+    JSON.stringify({ createdAt: recent, reason: "recent" }),// 近期 → 保留（SQLite 导入时 at 缺失→now()）
+    JSON.stringify({ at: old, reason: "old-fail-2" }),      // 过期 → ndjson+SQLite 各删1
+    "not-json-at-all",                                      // 畸形 → ndjson 保留；SQLite 导入跳过
+    JSON.stringify({ reason: "no-timestamp" }),              // 缺时间戳 → 保留；SQLite at 缺失→now()
+    "",
+  ];
+  await writeFile(path.join(cbxDir, "delivery-failures.ndjson"), lines.join("\n") + "\n", "utf8");
+  const removed = await prunePersistedData(ws, 3);
+  // SQLite 删除 2（at=old 的记录）+ ndjson 删除 2 = 4
+  assert.equal(removed, 4);
+  const remaining = await readFile(path.join(cbxDir, "delivery-failures.ndjson"), "utf8");
+  assert.ok(remaining.includes("recent"));
+  assert.ok(remaining.includes("not-json-at-all"));
+  assert.ok(remaining.includes("no-timestamp"));
+  assert.ok(!remaining.includes("old-fail"));
+});
+
+test("prunePersistedData: 全部过期时写空文件", async () => {
+  const ws = await mkdtemp(path.join(os.tmpdir(), "cbx-prune-all-"));
+  const cbxDir = path.join(ws, ".cbx");
+  await mkdir(cbxDir, { recursive: true });
+  const old = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  await writeFile(
+    path.join(cbxDir, "delivery-failures.ndjson"),
+    JSON.stringify({ at: old }) + "\n" + JSON.stringify({ createdAt: old }) + "\n",
+    "utf8",
+  );
+  const removed = await prunePersistedData(ws, 1);
+  // 第1行 at=old → SQLite created_at=old → 删除（SQLite 1）
+  // 第2行 at 缺失→createdAt=old，SQLite 导入时 at 缺失→now() → 不删（SQLite 0）
+  // ndjson: 两行都 old → 删除 2
+  // 总计 = 1 + 2 = 3
+  assert.equal(removed, 3);
+  const remaining = await readFile(path.join(cbxDir, "delivery-failures.ndjson"), "utf8");
+  assert.equal(remaining, "");
+});
+
+test("prunePersistedData: 文件不存在时返回 0（isMissing 路径）", async () => {
+  const ws = await mkdtemp(path.join(os.tmpdir(), "cbx-prune-missing-"));
+  // 不创建 delivery-failures.ndjson → createReadStream 抛 ENOENT → isMissing → return 0
+  const removed = await prunePersistedData(ws, 7);
+  assert.equal(removed, 0);
 });

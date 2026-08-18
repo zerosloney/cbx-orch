@@ -158,6 +158,34 @@ test("TUI with seeded job and events exits cleanly (event stream path)", async (
   // 事件流路径不崩溃、正常退出即可；增量游标逻辑由 readEventsIncremental 单测覆盖。
 });
 
+test("TUI pause/resume triggers queueAction and exits cleanly", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-tui-pause-"));
+  const originalWrite = process.stdout.write;
+  const originalLog = console.log;
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  console.log = () => {};
+  let phase: "pause" | "resume" | "quit" = "pause";
+  const timer = setInterval(() => {
+    if (phase === "pause") {
+      process.stdin.emit("keypress", "", { name: "p", ctrl: false });
+      phase = "resume";
+    } else if (phase === "resume") {
+      process.stdin.emit("keypress", "", { name: "u", ctrl: false });
+      phase = "quit";
+    } else {
+      process.stdin.emit("keypress", "", { name: "q", ctrl: false });
+    }
+  }, 50);
+  try {
+    await startTui(workspace, 100);
+  } finally {
+    clearInterval(timer);
+    process.stdout.write = originalWrite;
+    console.log = originalLog;
+  }
+  // queueAction pause→resume 路径覆盖：TUI 正常退出即可
+});
+
 test("buildTimeline returns empty stages for a job with no events", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-ui-"));
   const jobId = "job-empty";
