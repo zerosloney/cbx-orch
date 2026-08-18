@@ -1,12 +1,9 @@
 import { existsSync } from "node:fs";
 import { CbxError } from "./errors.js";
 import path from "node:path";
-import {
-  loadJson,
-  loadJobContext,
-  now,
-  withFileLock,
-} from "./storage.js";
+import { loadJson, now } from "./storage.js";
+import { loadJobContext } from "./context-schema.js";
+import { withFileLock } from "./lock.js";
 import {
   loadState,
   loadConfig,

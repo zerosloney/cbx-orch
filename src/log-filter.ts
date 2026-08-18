@@ -1,4 +1,4 @@
-import type { LogEventKind, StreamLogEvent } from "./types.js";
+import type { StreamLogEvent } from "./types.js";
 
 export interface LogFilterContext {
   jobId: string;

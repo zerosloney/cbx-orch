@@ -9,6 +9,8 @@ import path from "node:path";
 import {
   redactText,
   redactSensitive,
+} from "../src/redaction.js";
+import {
   loadRuntimeConfig,
   prunePersistedData,
 } from "../src/storage.js";

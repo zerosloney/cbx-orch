@@ -8,12 +8,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-// 测试补充（Windows/Node 24 实测 lines 76.5% / branch 61.72% / functions 78.11%），按 ~3% 跨平台余量上调
-// floor 防 flaky；后续补测应继续同步上调。
-// v0.16.0 调整：mcp-server inputSchema 描述已拆分至 src/mcp-schemas/ JSON 文件，
-// JSON 文件运行时加载不计入 ts 覆盖率分母。lines% 实测 64.20，
-// 阈值维持 64/58/71。后续计划补测 callTool handler 未覆盖分支以继续上调。
-const thresholds = { lines: 64, branch: 58, functions: 71 };
+// MCP coverage 补测后（Windows/Node 24 实测 lines 77.42% / branch 66.97% / functions 83.66%），
+// 按 ~3% 跨平台余量上调 floor 防 flaky；后续补测应继续同步上调。
+// mcp-server.ts 分支覆盖从 56.3% 提升至 84.9%，新增 tests/mcp-coverage.test.ts（27 个测试）。
+const thresholds = { lines: 74, branch: 64, functions: 80 };
 
 const testsDirectory = path.join(root, "dist", "tests");
 let testFiles;

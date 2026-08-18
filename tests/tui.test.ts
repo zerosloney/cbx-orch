@@ -17,6 +17,7 @@ import { handleTuiKey } from "../src/tui/index.js";
 // 这里强制启用颜色（basic level），使着色逻辑可被断言；chalk 是单例，全局生效。
 chalk.level = 1;
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: 断言输出需要剥离 ANSI 转义序列
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 function makeJob(overrides: Partial<JobState> = {}): JobState {

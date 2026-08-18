@@ -1,48 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import {
-  fakeAgent,
   setupFake,
-  createAdaptiveJob,
-  initializeGitWorkspace,
-  approveJob,
-  cancelJob,
   createJob,
   executeJob,
-  health,
-  listJobs,
   listQueue,
-  loadConfig,
   loadState,
-  mergeConfig,
   pauseQueue,
   readArtifact,
-  readEventsIncremental,
   resumeQueue,
   retryQueueJob,
-  serveQueue,
   startBackground,
-  runReviewGate,
-  stopReviewGateHook,
-  acquireServiceLease,
-  loadPersistedQueue,
   loadPersistedState,
-  savePersistedStateAndQueue,
-  BUILTIN_EXECUTORS,
-  resolveExecutor,
-  parseNextAction,
-  CONTEXT_PACK_MAX_CHARS,
-  parseContextPack,
-  createHumanGate,
-  extendRoundLimit,
-  parseHumanGate,
-  resolveHumanGate,
   type JobState,
 } from "./helpers.js";
 
@@ -88,13 +62,13 @@ test("mid-chain stage failure preserves earlier stage reports in result.json", a
   process.env.FAKE_COUNTER_FILE = counter;
   process.env.FAKE_EXIT_SEQUENCE = "0,0,1";
   process.env.FAKE_JOB_DIR = job.directory;
-  let state;
+  let state: JobState | undefined;
   try {
     state = await executeJob(workspace, job.jobId);
   } finally {
     delete process.env.CBX_OPENCODE;
   }
-  assert.equal(state.status, "failed");
+  assert.equal(state?.status, "failed");
   const result = JSON.parse(
     await readArtifact(workspace, job.jobId, "result.json"),
   );

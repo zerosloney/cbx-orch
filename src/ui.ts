@@ -29,7 +29,8 @@ import {
   startBackground,
 } from "./core.js";
 import { captureAsync } from "./process-runner.js";
-import { constantTimeEqual, processAlive } from "./storage.js";
+import { constantTimeEqual } from "./storage.js";
+import { processAlive } from "./lock.js";
 import { httpStatusForError } from "./errors.js";
 import {
   hasJsonContentType,
@@ -617,8 +618,8 @@ function startEventTailer(
         await fd.read(buf, 0, buf.length, size);
         buffer += buf.toString("utf8");
         size = s.size;
-        let idx: number;
-        while ((idx = buffer.indexOf("\n")) >= 0) {
+        let idx = buffer.indexOf("\n");
+        while (idx >= 0) {
           const line = buffer.slice(0, idx).trim();
           buffer = buffer.slice(idx + 1);
           if (line) {
@@ -628,6 +629,7 @@ function startEventTailer(
               /* partial/corrupt line */
             }
           }
+          idx = buffer.indexOf("\n");
         }
       } finally {
         await fd.close();

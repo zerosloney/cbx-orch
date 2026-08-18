@@ -431,7 +431,7 @@ function trimContract(
  *  必须在完整角色包（含 current）组装后调用，否则 stage.task/reviewRules/criteria 不计入预算。 */
 function applyBudget<T extends CommonContextPack>(pack: T, budget: number): T {
   if (estimatePackTokens(pack) <= budget) return pack;
-  let working = { ...pack };
+  const working = { ...pack };
   let truncated = false;
   // 阶段 1：裁剪 taskContract 低优先字段。
   const [contract, contractTrimmed] = trimContract(

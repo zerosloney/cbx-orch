@@ -1,49 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import {
-  fakeAgent,
   setupFake,
-  createAdaptiveJob,
-  initializeGitWorkspace,
-  approveJob,
-  cancelJob,
   createJob,
   executeJob,
-  health,
-  listJobs,
   listQueue,
-  loadConfig,
   loadState,
-  mergeConfig,
   pauseQueue,
   readArtifact,
-  readEventsIncremental,
-  resumeQueue,
   retryQueueJob,
-  serveQueue,
   startBackground,
-  runReviewGate,
-  stopReviewGateHook,
-  acquireServiceLease,
-  loadPersistedQueue,
-  loadPersistedState,
-  savePersistedStateAndQueue,
-  BUILTIN_EXECUTORS,
-  resolveExecutor,
-  parseNextAction,
-  CONTEXT_PACK_MAX_CHARS,
-  parseContextPack,
-  createHumanGate,
-  extendRoundLimit,
-  parseHumanGate,
-  resolveHumanGate,
-  type JobState,
 } from "./helpers.js";
 
 test("semantic review failures pause without automatic implementation retries", async () => {
@@ -103,28 +73,26 @@ test("corrupt queue is surfaced and dead queue locks are recovered", async () =>
   assert.equal((await pauseQueue(workspace)).paused, true);
 });
 
-test("a live queue lock is not reclaimed", async () => {
-  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-live-lock-"));
+test("a concurrent queue tx lock surfaces E_QUEUE_BUSY", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-tx-busy-"));
   await mkdir(path.join(workspace, ".cbx"), { recursive: true });
-  await writeFile(
-    path.join(workspace, ".cbx", "queue.lock"),
-    JSON.stringify({
-      pid: process.pid,
-      acquiredAt: "2000-01-01T00:00:00.000Z",
-      token: "live",
-    }),
-    "utf8",
-  );
-  await assert.rejects(
-    () => pauseQueue(workspace),
-    /队列正在被另一个调度器更新/,
-  );
-  assert.equal(
-    JSON.parse(
-      await readFile(path.join(workspace, ".cbx", "queue.lock"), "utf8"),
-    ).token,
-    "live",
-  );
+  const { database: getDb } = await import("../src/storage.js");
+  const cachedDb = await getDb(workspace);
+  cachedDb.pragma("busy_timeout = 200");
+  const { default: Database } = await import("better-sqlite3");
+  const holdDb = new Database(path.join(workspace, ".cbx", "state.sqlite"));
+  holdDb.pragma("busy_timeout = 100");
+  holdDb.exec("BEGIN IMMEDIATE");
+  try {
+    await assert.rejects(
+      () => pauseQueue(workspace),
+      /队列正在被另一个调度器更新/,
+    );
+  } finally {
+    holdDb.exec("ROLLBACK");
+    holdDb.close();
+    cachedDb.pragma("busy_timeout = 5000");
+  }
 });
 
 test("stale job lock and a dead running queue entry recover after a crash", async () => {

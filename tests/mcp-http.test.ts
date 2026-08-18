@@ -374,3 +374,154 @@ test("MCP HTTP: 超过 1MB 的请求体返回 413", async () => {
     await server.close();
   }
 });
+
+function requestOptions(port: number): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      { host: "127.0.0.1", port, path: "/mcp", method: "OPTIONS" },
+      (res) => resolve({ status: res.statusCode ?? 0 }),
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+function requestPlain(port: number, body: string): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/mcp",
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+      },
+      (res) => {
+        let raw = "";
+        res.on("data", (c: Buffer) => (raw += c.toString("utf8")));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, text: raw }));
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+function requestPath(port: number, pathname: string): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      { host: "127.0.0.1", port, path: pathname, method: "GET" },
+      (res) => resolve({ status: res.statusCode ?? 0 }),
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+test("MCP HTTP: OPTIONS 预检返回 204", async () => {
+  const server = await runMcpHttpServer({ port: 0, host: "127.0.0.1" });
+  try {
+    const res = await requestOptions(server.port);
+    assert.equal(res.status, 204);
+  } finally {
+    await server.close();
+  }
+});
+
+test("MCP HTTP: POST /mcp 非 application/json 返回 415", async () => {
+  const server = await runMcpHttpServer({ port: 0, host: "127.0.0.1" });
+  try {
+    const res = await requestPlain(
+      server.port,
+      JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+    );
+    assert.equal(res.status, 415);
+  } finally {
+    await server.close();
+  }
+});
+
+test("MCP HTTP: 未知路径返回 404", async () => {
+  const server = await runMcpHttpServer({ port: 0, host: "127.0.0.1" });
+  try {
+    const notFound = await requestPath(server.port, "/unknown");
+    assert.equal(notFound.status, 404);
+  } finally {
+    await server.close();
+  }
+});
+
+test("MCP HTTP: resources/subscribe 与 unsubscribe 生命周期", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-sub-unsub-"));
+  await createJob({
+    workspace,
+    task: "sub-unsub 测试",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "sub-unsub-1",
+  });
+  const server = await runMcpHttpServer({ port: 0, host: "127.0.0.1" });
+  const eventsUri = `cbx://job/sub-unsub-1/events?workspace=${encodeURIComponent(workspace)}`;
+  try {
+    const subRes = await postJson(server.port, "/mcp", {
+      jsonrpc: "2.0",
+      id: 10,
+      method: "resources/subscribe",
+      params: { uri: eventsUri },
+    });
+    assert.equal(subRes.status, 200);
+    assert.deepEqual(subRes.body.result, {});
+
+    const unsubRes = await postJson(server.port, "/mcp", {
+      jsonrpc: "2.0",
+      id: 11,
+      method: "resources/unsubscribe",
+      params: { uri: eventsUri },
+    });
+    assert.equal(unsubRes.status, 200);
+    assert.deepEqual(unsubRes.body.result, {});
+  } finally {
+    await server.close();
+  }
+});
+
+test("MCP HTTP: dispatch 未知 JSON-RPC 方法返回 error", async () => {
+  const server = await runMcpHttpServer({ port: 0, host: "127.0.0.1" });
+  try {
+    const res = await postJson(server.port, "/mcp", {
+      jsonrpc: "2.0",
+      id: 12,
+      method: "unknown/method",
+    });
+    assert.equal(res.status, 200);
+    assert.ok(res.body.error);
+    const errorMessage = String((res.body.error as { message?: string }).message ?? "");
+    assert.match(errorMessage, /未知方法/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("MCP HTTP: resources/read 对不存在 job 返回空增量", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-mcp-read-missing-"));
+  const server = await runMcpHttpServer({ port: 0, host: "127.0.0.1" });
+  const uri = `cbx://job/missing-job/events?workspace=${encodeURIComponent(workspace)}`;
+  try {
+    const res = await postJson(server.port, "/mcp", {
+      jsonrpc: "2.0",
+      id: 13,
+      method: "resources/read",
+      params: { uri },
+    });
+    assert.equal(res.status, 200);
+    const contents = (res.body.result as { contents: Array<{ text: string }> }).contents;
+    const parsed = JSON.parse(contents[0].text) as { events: unknown[]; next_offset: number };
+    assert.deepEqual(parsed.events, []);
+    assert.equal(parsed.next_offset, 0);
+  } finally {
+    await server.close();
+  }
+});
+

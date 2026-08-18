@@ -18,7 +18,8 @@ export function truncateDisplay(s: string, width: number): string {
   if (displayWidth(s) <= width) return s;
   const limit = Math.max(0, width - 1); // 留 1 给省略号
   // intentional-simple: 正则切分 ANSI(组1) 与 非ANSI 文本(组2)，按显示顺序交替。
-  const tokens = s.match(/\x1b\[[0-9;]*m|[^]/g) ?? [];
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: \x1b 是 ANSI 转义序列的起始字节
+  const tokens = s.match(/\x1b\[[0-9;]*m|[\s\S]/g) ?? [];
   let result = "";
   let w = 0;
   for (const tok of tokens) {

@@ -6,9 +6,12 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import {
+  capture,
+  captureAsync,
   FORCE_SETTLE_MS,
   killTree,
   runProcess,
+  terminateTree,
 } from "../src/process-runner.js";
 
 function pidAlive(pid: number): boolean {
@@ -139,4 +142,34 @@ test("runProcess 超时触发树杀并结算，close 被逃逸孙进程阻塞时
       }
     }
   }
+});
+
+test("capture 返回非零退出码与 stderr", () => {
+  const result = capture([process.execPath, "-e", "process.stderr.write('boom'); process.exit(7)"], ".", 5_000);
+  assert.equal(result.code, 7);
+  assert.match(result.stderr, /boom/);
+});
+
+test("captureAsync 正常捕获 stdout", async () => {
+  const result = await captureAsync([process.execPath, "-e", "console.log('hello async')"], ".", 5_000);
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /hello async/);
+});
+
+test("killTree 对已死进程不抛错且返回合理结果", () => {
+  // 使用极大 pid，几乎不可能存在
+  const result = killTree(999_999, "SIGKILL");
+  assert.equal(typeof result, "boolean");
+});
+
+test("terminateTree 对已死进程直接返回 true", async () => {
+  const ok = await terminateTree(999_999, 100, 100);
+  assert.equal(ok, true);
+});
+
+test("runProcess 对不存在的命令抛出 ENOENT", async () => {
+  await assert.rejects(
+    runProcess("this-binary-does-not-exist-42", ["arg"], ".", 5_000),
+    /ENOENT/,
+  );
 });

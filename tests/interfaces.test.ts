@@ -747,7 +747,12 @@ test("timed out executor plugins are killed before they can mutate later", async
   const plugin = path.join(workspace, "slow-plugin.mjs");
   await writeFile(
     plugin,
-    `export default { async run(request) { await new Promise(r => setTimeout(r, 5000)); await (await import("node:fs/promises")).writeFile(request.workdir + "/late-change.txt", "late"); return { code: 0 }; } };\n`,
+    `export default { manifest: { name: "slow-plugin", version: "1.0.0", apiVersion: "cbx.executor/v1", capabilities: ["execute"] }, async run(request) { await new Promise(r => setTimeout(r, 5000)); await (await import("node:fs/promises")).writeFile(request.workdir + "/late-change.txt", "late"); return { code: 0 }; } };\n`,
+    "utf8",
+  );
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({ plugins: { enforce: true, allowPaths: [plugin] } }),
     "utf8",
   );
   const job = await createJob({
@@ -1189,6 +1194,11 @@ export default {
 `,
     "utf8",
   );
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({ plugins: { enforce: true, allowPaths: [plugin] } }),
+    "utf8",
+  );
   const job = await createJob({
     workspace,
     task: "e2e test task",
@@ -1247,6 +1257,11 @@ export default {
 `,
     "utf8",
   );
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({ plugins: { enforce: true, allowPaths: [plugin] } }),
+    "utf8",
+  );
   const job = await createJob({
     workspace,
     task: "multi-stage task",
@@ -1303,6 +1318,11 @@ export default {
   }
 };
 `,
+    "utf8",
+  );
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({ plugins: { enforce: true, allowPaths: [plugin] } }),
     "utf8",
   );
   const job = await createJob({

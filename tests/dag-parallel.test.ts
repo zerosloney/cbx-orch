@@ -1,8 +1,5 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import path from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
-import os from "node:os";
 import { groupStagesByDependency } from "../src/execution.js";
 import type { TaskStage } from "../src/types.js";
 

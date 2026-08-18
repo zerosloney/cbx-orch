@@ -8,7 +8,6 @@ import { createJob } from "../src/core.js";
 import { runMcpHttpServer } from "../src/mcp-server.js";
 import { createWebUiServer } from "../src/ui.js";
 import {
-  hasJsonContentType,
   isLoopbackHostHeader,
   isSameLoopbackOrigin,
 } from "../src/http-guard.js";

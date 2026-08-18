@@ -31,7 +31,7 @@ export function promptFor(phase: string, extra = "", _label: string, contextPack
 }
 
 import { createLogEventFilter } from "./log-filter.js";
-import { redactSensitive, redactText } from "./storage.js";
+import { redactSensitive, redactText } from "./redaction.js";
 import type { StreamLogEvent } from "./types.js";
 
 /** governance.redactFields/redactPatterns 的最小化投影；未配置 governance 时为 undefined（零开销直写）。 */
@@ -223,10 +223,14 @@ export async function invokeExecutor(executor: string, workspace: string, direct
       redaction,
       runner,
     );
-  const identity = await inspectExecutorPlugin(executor, workspace, config.plugins);
-  if (!config.plugins?.enforce) {
-    // 默认不强制插件白名单：显式告警并落审计事件，提醒生产环境启用 plugins.enforce。
-    const warning = `executor 指向插件 ${identity.path}，但 plugins.enforce 未启用，插件未经路径/SHA 白名单校验即被加载；生产环境请配置 plugins.enforce=true 与 allowPaths/allowSha256。`;
+  const identity = await inspectExecutorPlugin(
+    executor,
+    workspace,
+    config.plugins ?? { enforce: true },
+  );
+  if (config.plugins?.enforce === false) {
+    // 显式禁用 enforce 时告警留痕：插件已加载，但未经路径/SHA 白名单校验。
+    const warning = `executor 指向插件 ${identity.path}，但 plugins.enforce=false，插件未经路径/SHA 白名单校验即被加载；生产环境请配置 plugins.enforce=true 与 allowPaths/allowSha256。`;
     console.error(`cbx: ${warning}`);
     appendEvent(eventsFile, { event: "plugin_policy_warning", executor: identity.name, path: identity.path, sha256: identity.sha256, enforce: false, at: new Date().toISOString() }, redaction);
   }

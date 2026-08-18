@@ -31,7 +31,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test --test-concurrency=2 dist/tests/*.test.js",
-    "lint": "tsc --noEmit -p tsconfig.json && tsc -p ui/tsconfig.json",
+    "lint": "tsc --noEmit -p tsconfig.json && tsc -p ui/tsconfig.json && biome check",
     "format": "prettier --write --ignore-unknown package.json README.md README.en.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/core.*.test.ts tests/helpers.ts",
     "format:check": "prettier --check --ignore-unknown package.json README.md README.en.md LICENSE SECURITY.md CHANGELOG.md .github/workflows/*.yml src/executor.ts src/plugin-host.ts plugins/example-executor.mjs tests/core.*.test.ts tests/helpers.ts",
     "check": "npm run lint && npm run format:check && npm test",
@@ -45,6 +45,7 @@
     "node": ">=22"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.9",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "prettier": "^3.6.2",

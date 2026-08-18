@@ -6,9 +6,9 @@ import {
   saveJson,
   savePersistedState,
   loadPersistedState,
-  redactText,
   now,
 } from "./storage.js";
+import { redactText } from "./redaction.js";
 import { loadConfig, jobDir } from "./state.js";
 import {
   validateWorkspace,

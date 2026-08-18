@@ -362,7 +362,7 @@ node dist/src/cli.js health --workspace .
 { "executor": "./plugins/example-executor.mjs" }
 ```
 
-默认兼容历史的仅 `run` 插件。生产环境可启用严格治理：`plugins.enforce=true` 时必须为插件配置 `allowPaths` 或 `allowSha256`，并且每个已配置的 allowlist 都必须匹配；缺少 manifest、未批准路径或摘要都会被拒绝。任务事件只记录内置适配器来源/版本，或插件名称、版本、能力和 SHA-256，不记录环境变量值。
+默认启用严格治理：只要声明 `plugins`（或未声明但使用 executor 插件），`enforce` 即默认为 `true`，必须为插件配置 `allowPaths` 或 `allowSha256`，并且每个已配置的 allowlist 都必须匹配；缺少 manifest、未批准路径或摘要都会被拒绝。如需显式回退到旧行为，可设置 `plugins.enforce=false`（会打印安全告警并记录审计事件）。任务事件只记录内置适配器来源/版本，或插件名称、版本、能力和 SHA-256，不记录环境变量值。
 
 ```json
 {

@@ -22,6 +22,7 @@ import type { JobState } from "../src/types.js";
 // 这里强制启用颜色（basic level），使着色逻辑可被断言；chalk 是单例，全局生效。
 chalk.level = 1;
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: 断言输出需要剥离 ANSI 转义序列
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 function makeJob(overrides: Partial<JobState> = {}): JobState {
@@ -306,6 +307,7 @@ test("renderHealth: failedJobs>0 和 deliveryFailures>0 着红", () => {
     },
   });
   // 红色 ANSI 至少出现 2 次（failedJobs + deliveryFailures）
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: 计数红色 ANSI 转义正是断言目的
   const redCount = (out.match(/\x1b\[31m/g) ?? []).length;
   assert.ok(redCount >= 2, `期望 >=2 处红色，实际 ${redCount}`);
 });

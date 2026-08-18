@@ -1,51 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import {
-  fakeAgent,
   setupFake,
-  createAdaptiveJob,
-  initializeGitWorkspace,
-  approveJob,
-  cancelJob,
   createJob,
-  executeJob,
   health,
   listJobs,
   listQueue,
   loadConfig,
   loadState,
-  mergeConfig,
   pauseQueue,
   readArtifact,
-  readEventsIncremental,
-  resumeQueue,
-  retryQueueJob,
   serveQueue,
-  startBackground,
-  runReviewGate,
-  stopReviewGateHook,
   acquireServiceLease,
   loadPersistedQueue,
-  loadPersistedState,
   savePersistedStateAndQueue,
   BUILTIN_EXECUTORS,
   findExecutable,
-  resolveExecutor,
-  parseNextAction,
-  CONTEXT_PACK_MAX_CHARS,
-  parseContextPack,
-  createHumanGate,
-  extendRoundLimit,
-  parseHumanGate,
-  resolveHumanGate,
-  type JobState,
 } from "./helpers.js";
 
 test("persistent serve loop reclaims dead workers on startup and stops cleanly", async () => {
@@ -304,8 +280,9 @@ test("paired state and queue write rolls back both records when queue update fai
     updatedAt: "",
   });
   const db = new Database(path.join(workspace, ".cbx", "state.sqlite"));
+  // 故障注入点跟随存储模型迁移：queue 落在 queue_meta（v4 行级拆分后），挂在旧 queue_state 表不再生效。
   db.exec(
-    "CREATE TRIGGER fail_atomic_queue BEFORE UPDATE ON queue_state BEGIN SELECT RAISE(ABORT, 'injected queue failure'); END",
+    "CREATE TRIGGER fail_atomic_queue BEFORE UPDATE ON queue_meta BEGIN SELECT RAISE(ABORT, 'injected queue failure'); END",
   );
   try {
     await assert.rejects(

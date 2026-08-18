@@ -95,6 +95,7 @@ test("truncateDisplay strips ANSI when measuring width but preserves escapes", (
   const out = truncateDisplay(colored, 9);
   assert.equal(out, "\x1b[31mabcdefgh…");
   // 截断结果显示宽度应 = width（省略号占 1，文本占 width-1）
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: 断言输出需要剥离 ANSI 转义序列
   const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
   assert.equal(stripAnsi(out).length, 9);
 });

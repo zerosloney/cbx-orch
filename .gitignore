@@ -24,4 +24,5 @@ coverage/
 test-results.txt
 cbx-debug.mjs
 architecture-review/
+architecture-review-*/
 .trae-html-share-packages/

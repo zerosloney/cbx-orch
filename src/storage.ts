@@ -12,8 +12,8 @@ import path from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import Database from "better-sqlite3";
 import { normalizeAdaptiveOptions } from "./adaptive-manager.js";
-import { CbxError, type CbxErrorCode } from "./errors.js";
-import type { JobContext } from "./types.js";
+import { CbxError } from "./errors.js";
+import { processAlive } from "./lock.js";
 
 export function now(): string {
   return new Date().toISOString();
@@ -220,6 +220,8 @@ export async function loadRuntimeConfig(
     const value = object(config.plugins, "plugins");
     known(value, "plugins", ["enforce", "allowPaths", "allowSha256"]);
     optionalBoolean(value.enforce, "plugins.enforce");
+    // 收紧默认策略：显式声明 plugins 即表示使用 executor 插件，默认强制校验。
+    if (value.enforce === undefined) value.enforce = true;
     for (const key of ["allowPaths", "allowSha256"] as const)
       if (
         value[key] !== undefined &&
@@ -375,61 +377,60 @@ export async function loadRuntimeConfig(
   return config as RuntimeConfig;
 }
 
-export function redactSensitive(
-  value: unknown,
-  fields: readonly string[] = [],
-): unknown {
-  const sensitive = new Set(fields.map((field) => field.toLowerCase()));
-  const visit = (item: unknown): unknown => {
-    if (Array.isArray(item)) return item.map(visit);
-    if (!item || typeof item !== "object") return item;
-    return Object.fromEntries(
-      Object.entries(item as Record<string, unknown>).map(([key, child]) => [
-        key,
-        sensitive.has(key.toLowerCase()) ? "[REDACTED]" : visit(child),
-      ]),
-    );
-  };
-  return visit(value);
-}
-
-// intentional-simple: 行级键名匹配用单一正则覆盖 `key: v` / `- key: v` / `key = v` 三种形态。
-// 抓不到句中内嵌密钥（如 "use sk-xxx here"）；由 redactPatterns 全文正则兜底。
-const KEY_LINE =
-  /^\s*([-*]\s+)?([\p{L}\p{N}_][\p{L}\p{N}_\s-]*?)\s*[:=]\s*(.+)$/u;
-
-export function redactText(
-  text: string,
-  fields: readonly string[] = [],
-  patterns: readonly string[] = [],
-): string {
-  const sensitive = new Set(fields.map((field) => field.toLowerCase()));
-  let out = text;
-  if (sensitive.size > 0) {
-    out = text
-      .split("\n")
-      .map((line) => {
-        const match = line.match(KEY_LINE);
-        if (!match) return line;
-        const key = match[2].trim().toLowerCase();
-        return sensitive.has(key)
-          ? `${match[1] ?? ""}${match[2].trim()}: [REDACTED]`
-          : line;
-      })
-      .join("\n");
-  }
-  for (const pattern of patterns)
-    out = out.replace(new RegExp(pattern, "g"), "[REDACTED]");
-  return out;
-}
-
-type CbxDatabase = Database.Database;
+export type CbxDatabase = Database.Database;
 // intentional-simple: Promise 缓存保证同 workspace 并发只创建一次连接；创建失败时 reject，
 // 不缓存坏 promise，允许下次调用重试。
 const databases = new Map<string, Promise<CbxDatabase>>();
 // 只读连接：WAL 模式下可安全并发读，不与写连接争抢 prepare/transaction 锁。
 const readonlyDatabases = new Map<string, Promise<CbxDatabase>>();
-const SCHEMA_VERSION = 3;
+
+/** 关闭指定 workspace 的 SQLite 连接并从缓存中移除；连接可能仍在异步创建中，
+ *  因此等待创建完成后再关闭。未打开的 workspace 不抛错。 */
+export async function closeDatabase(workspaceInput: string): Promise<void> {
+  const workspace = path.resolve(workspaceInput);
+  const rwPromise = databases.get(workspace);
+  if (rwPromise) {
+    databases.delete(workspace);
+    try {
+      const db = await rwPromise;
+      db.close();
+    } catch {
+      /* 创建失败的 promise 已在 database() 中清理；此处忽略残留坏 promise */
+    }
+  }
+  const roPromise = readonlyDatabases.get(workspace);
+  if (roPromise) {
+    readonlyDatabases.delete(workspace);
+    try {
+      const db = await roPromise;
+      db.close();
+    } catch {
+      /* 同上 */
+    }
+  }
+}
+
+/** 关闭所有缓存的 SQLite 连接；供进程退出清理使用。 */
+export async function closeAllDatabases(): Promise<void> {
+  const workspaces = new Set([
+    ...databases.keys(),
+    ...readonlyDatabases.keys(),
+  ]);
+  await Promise.all([...workspaces].map((workspace) => closeDatabase(workspace)));
+}
+
+let exitFlushInstalled = false;
+function installDatabaseExitFlush(): void {
+  if (exitFlushInstalled) return;
+  exitFlushInstalled = true;
+  // beforeExit 在事件循环即将为空时触发，允许异步关闭连接；
+  // 显式 process.exit()/致命错误不走此路径，属于可接受的最佳努力清理。
+  process.once("beforeExit", () => {
+    closeAllDatabases().catch(() => undefined);
+  });
+}
+installDatabaseExitFlush();
+const SCHEMA_VERSION = 4;
 function databaseFile(workspace: string): string {
   return path.join(workspace, ".cbx", "state.sqlite");
 }
@@ -474,10 +475,37 @@ function migrate(db: CbxDatabase): void {
         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
       ).run(3, now());
     })();
+  if (version < 4)
+    db.transaction(() => {
+      db.exec(
+        "CREATE TABLE queue_entries (queue_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, workspace TEXT, extra TEXT, status TEXT NOT NULL, priority REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, pid INTEGER, reclaim_count INTEGER, error TEXT, updated_at TEXT NOT NULL); CREATE INDEX queue_entries_job_idx ON queue_entries(job_id); CREATE TABLE queue_meta (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), max_concurrent INTEGER, paused INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
+      );
+      // v3 及之前的 queue_state 整 blob 一次性拆行迁移；blob 原样保留（仅作降级快照，新代码不再读取）。
+      const hasQueueState = db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'queue_state'",
+        )
+        .get();
+      if (hasQueueState) {
+        const legacy = db
+          .prepare("SELECT state_json FROM queue_state WHERE singleton = 1")
+          .get() as { state_json: string } | undefined;
+        if (legacy) {
+          try {
+            writeQueueRows(db, JSON.parse(legacy.state_json), now());
+          } catch {
+            /* 损坏 blob：保留原状，加载路径走 queue.json / fallback */
+          }
+        }
+      }
+      db.prepare(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+      ).run(4, now());
+    })();
   if (version > SCHEMA_VERSION)
     throw new Error("state.sqlite 的 schema 版本高于当前 cbx，拒绝降级运行。");
 }
-async function database(workspaceInput: string): Promise<CbxDatabase> {
+export async function database(workspaceInput: string): Promise<CbxDatabase> {
   const workspace = path.resolve(workspaceInput);
   let promise = databases.get(workspace);
   if (!promise) {
@@ -497,6 +525,35 @@ async function database(workspaceInput: string): Promise<CbxDatabase> {
   } catch (error) {
     // 创建失败时不缓存坏 promise，允许后续调用重试。
     databases.delete(workspace);
+    throw error;
+  }
+}
+
+/**
+ * SQLite BEGIN IMMEDIATE 事务锁：替代文件锁实现队列写互斥。
+ * busy_timeout=5000 提供跨进程等待；SQLITE_BUSY 转换为 E_QUEUE_BUSY 保持兼容。
+ * callback 内禁止调用自身开启 db.transaction() 的函数（如 savePersistedQueue），
+ * 应直接调用 readQueueRows / writeQueueRows 或内联 SQL。
+ */
+export async function withQueueTxLock<T>(
+  workspace: string,
+  action: (db: CbxDatabase) => T,
+): Promise<T> {
+  const db = await database(workspace);
+  try {
+    db.exec("BEGIN IMMEDIATE");
+  } catch (error) {
+    if (error instanceof Error && (error as { code?: string }).code === "SQLITE_BUSY") {
+      throw new CbxError("E_QUEUE_BUSY", "队列正在被另一个调度器更新，请稍后重试。");
+    }
+    throw error;
+  }
+  try {
+    const result = action(db);
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch { /* transaction may already be rolled back */ }
     throw error;
   }
 }
@@ -628,26 +685,113 @@ async function importLegacyData(
     );
   })();
 }
-async function legacyQueue(
-  workspace: string,
+/** queue 行级持久化的宽松形状：storage 层不依赖 queue.ts 的具体类型（避免循环 import）。 */
+export interface PersistedQueueLike {
+  entries?: Array<Record<string, unknown>>;
+  paused?: boolean;
+  maxConcurrent?: number;
+  updatedAt?: string;
+}
+
+interface QueueEntryRow {
+  queue_id: string;
+  job_id: string;
+  workspace: string | null;
+  extra: string | null;
+  status: string;
+  priority: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  pid: number | null;
+  reclaim_count: number | null;
+  error: string | null;
+}
+
+const UPSERT_QUEUE_ENTRY =
+  "INSERT INTO queue_entries(queue_id, job_id, workspace, extra, status, priority, created_at, started_at, finished_at, pid, reclaim_count, error, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(queue_id) DO UPDATE SET job_id = excluded.job_id, workspace = excluded.workspace, extra = excluded.extra, status = excluded.status, priority = excluded.priority, created_at = excluded.created_at, started_at = excluded.started_at, finished_at = excluded.finished_at, pid = excluded.pid, reclaim_count = excluded.reclaim_count, error = excluded.error, updated_at = excluded.updated_at";
+
+/**
+ * queue 行级全量写回：meta UPSERT + 逐行 UPSERT + 删除列表外残留行（截断/forget 生效路径）。
+ * 须在调用方事务内执行；跳过缺失 queueId 的损坏行（与 listPersistedStates 跳过策略一致）。
+ */
+export function writeQueueRows(
   db: CbxDatabase,
-  fallback: unknown,
-): Promise<unknown> {
-  const existing = db
-    .prepare("SELECT state_json FROM queue_state WHERE singleton = 1")
-    .get() as { state_json: string } | undefined;
-  if (existing) return JSON.parse(existing.state_json);
-  const file = path.join(workspace, ".cbx", "queue.json");
-  let value = fallback;
-  try {
-    value = JSON.parse(await readFile(file, "utf8"));
-  } catch (error) {
-    if (!isMissing(error)) throw error;
-  }
+  queue: PersistedQueueLike,
+  timestamp: string,
+): void {
+  const entries = (Array.isArray(queue.entries) ? queue.entries : []).filter(
+    (entry) => typeof entry.queueId === "string" && entry.queueId,
+  );
   db.prepare(
-    "INSERT INTO queue_state(singleton, state_json, updated_at) VALUES (1, ?, ?)",
-  ).run(JSON.stringify(value), now());
-  return value;
+    "INSERT INTO queue_meta(singleton, max_concurrent, paused, updated_at) VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET max_concurrent = excluded.max_concurrent, paused = excluded.paused, updated_at = excluded.updated_at",
+  ).run(
+    typeof queue.maxConcurrent === "number" ? queue.maxConcurrent : null,
+    queue.paused ? 1 : 0,
+    typeof queue.updatedAt === "string" ? queue.updatedAt : timestamp,
+  );
+  const upsert = db.prepare(UPSERT_QUEUE_ENTRY);
+  for (const entry of entries) {
+    upsert.run(
+      entry.queueId as string,
+      String(entry.jobId ?? ""),
+      typeof entry.workspace === "string" ? entry.workspace : null,
+      typeof entry.extra === "string" ? entry.extra : null,
+      String(entry.status ?? "queued"),
+      Number(entry.priority ?? 0) || 0,
+      typeof entry.createdAt === "string" ? entry.createdAt : timestamp,
+      typeof entry.startedAt === "string" ? entry.startedAt : null,
+      typeof entry.finishedAt === "string" ? entry.finishedAt : null,
+      typeof entry.pid === "number" ? entry.pid : null,
+      typeof entry.reclaimCount === "number" ? entry.reclaimCount : null,
+      typeof entry.error === "string" ? entry.error : null,
+      timestamp,
+    );
+  }
+  const ids = entries.map((entry) => entry.queueId as string);
+  if (ids.length === 0) db.prepare("DELETE FROM queue_entries").run();
+  else {
+    const placeholders = ids.map(() => "?").join(", ");
+    db.prepare(
+      `DELETE FROM queue_entries WHERE queue_id NOT IN (${placeholders})`,
+    ).run(...ids);
+  }
+}
+
+/** 读行级表组装 queue 对象；库中无任何 queue 数据时返回 undefined（调用方走 queue.json/fallback）。 */
+export function readQueueRows(db: CbxDatabase): PersistedQueueLike | undefined {
+  const meta = db
+    .prepare(
+      "SELECT max_concurrent, paused, updated_at FROM queue_meta WHERE singleton = 1",
+    )
+    .get() as
+    | { max_concurrent: number | null; paused: number; updated_at: string }
+    | undefined;
+  const rows = db
+    .prepare(
+      "SELECT queue_id, job_id, workspace, extra, status, priority, created_at, started_at, finished_at, pid, reclaim_count, error FROM queue_entries ORDER BY created_at ASC, queue_id ASC",
+    )
+    .all() as QueueEntryRow[];
+  if (!meta && rows.length === 0) return undefined;
+  return {
+    maxConcurrent: meta?.max_concurrent ?? undefined,
+    paused: meta?.paused === 1,
+    updatedAt: meta?.updated_at,
+    entries: rows.map((row) => ({
+      queueId: row.queue_id,
+      jobId: row.job_id,
+      workspace: row.workspace ?? "",
+      extra: row.extra ?? "",
+      status: row.status,
+      priority: row.priority,
+      createdAt: row.created_at,
+      startedAt: row.started_at ?? undefined,
+      finishedAt: row.finished_at ?? undefined,
+      pid: row.pid ?? undefined,
+      reclaimCount: row.reclaim_count ?? undefined,
+      error: row.error ?? undefined,
+    })),
+  };
 }
 
 export async function loadPersistedState<T>(
@@ -699,10 +843,10 @@ export async function listPersistedStates<T>(
 }
 
 /**
- * 单事务删除 jobId 在持久化层（jobs 表 + queue_state entries）的全部记录。
+ * 单事务删除 jobId 在持久化层（jobs 表 + queue_entries 行）的全部记录。
  *
  * 与 `queue.cancelQueueEntries` 不同：cancel 是把 active entries 标 cancelled（审计可见），
- * forget 是把同 jobId 的所有 entries 物理过滤掉。两者串联——上层先 cancel 杀活 worker
+ * forget 是把同 jobId 的所有 entries 物理删除。两者串联——上层先 cancel 杀活 worker
  * 并持久化 cancelled 状态，再 forget 清掉 entries 残留，**单事务**确保 jobs 行删和
  * queue entries 删要么都成功要么都回滚，避免 listJobs 看不见但 queue 还残留的撕裂状态。
  *
@@ -713,34 +857,17 @@ export async function forgetPersistedJob(
   jobId: string,
 ): Promise<{ deletedJob: boolean; remainingEntries: number }> {
   const workspace = path.resolve(workspaceInput);
-  const db = await database(workspace);
-  return withQueueLock(workspace, async () => {
-    let deletedJob = false;
-    let remainingEntries = 0;
-    db.transaction(() => {
-      const result = db
-        .prepare("DELETE FROM jobs WHERE job_id = ?")
-        .run(jobId);
-      deletedJob = result.changes > 0;
-      const row = db
-        .prepare("SELECT state_json FROM queue_state WHERE singleton = 1")
-        .get() as { state_json: string } | undefined;
-      if (row) {
-        const queue = JSON.parse(row.state_json) as {
-          entries?: Array<{ jobId?: string; [k: string]: unknown }>;
-        };
-        const before = queue.entries?.length ?? 0;
-        const filtered = (queue.entries ?? []).filter(
-          (entry) => entry.jobId !== jobId,
-        );
-        remainingEntries = filtered.length;
-        if (before !== filtered.length) {
-          db.prepare(
-            "UPDATE queue_state SET state_json = ?, updated_at = ? WHERE singleton = 1",
-          ).run(JSON.stringify({ ...queue, entries: filtered }), now());
-        }
-      }
-    })();
+  return withQueueTxLock(workspace, (db) => {
+    const result = db
+      .prepare("DELETE FROM jobs WHERE job_id = ?")
+      .run(jobId);
+    const deletedJob = result.changes > 0;
+    db.prepare("DELETE FROM queue_entries WHERE job_id = ?").run(jobId);
+    const remainingEntries = (
+      db
+        .prepare("SELECT COUNT(*) AS count FROM queue_entries")
+        .get() as { count: number }
+    ).count;
     return { deletedJob, remainingEntries };
   });
 }
@@ -749,22 +876,31 @@ export async function loadPersistedQueue<T>(
   workspace: string,
   fallback: T,
 ): Promise<T> {
-  return (await legacyQueue(
-    path.resolve(workspace),
-    await database(workspace),
-    fallback,
-  )) as T;
+  const resolved = path.resolve(workspace);
+  const db = await database(resolved);
+  const stored = readQueueRows(db);
+  if (stored) return stored as T;
+  // 更早版本（SQLite 之前）的 queue.json 一次性导入行级表。
+  const file = path.join(resolved, ".cbx", "queue.json");
+  try {
+    const imported = JSON.parse(
+      await readFile(file, "utf8"),
+    ) as PersistedQueueLike;
+    db.transaction(() => writeQueueRows(db, imported, now()))();
+    return imported as T;
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
+  return fallback;
 }
-// intentional-simple: queue_state 整 blob 读写（每次入队/状态变更全量反序列化+序列化+写回）。
-// 单 workspace 队列规模小（通常 <100 entry），开销可忽略；升级路径：queue 条目独立行存储 + 增量更新。
 export async function savePersistedQueue(
   workspace: string,
   value: unknown,
 ): Promise<void> {
   const db = await database(workspace);
-  db.prepare(
-    "INSERT INTO queue_state(singleton, state_json, updated_at) VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at",
-  ).run(JSON.stringify(value), now());
+  db.transaction(() =>
+    writeQueueRows(db, value as PersistedQueueLike, now()),
+  )();
 }
 export async function savePersistedStateAndQueue(
   workspace: string,
@@ -773,16 +909,54 @@ export async function savePersistedStateAndQueue(
   queue: unknown,
 ): Promise<void> {
   const db = await database(workspace);
-  await legacyQueue(path.resolve(workspace), db, { entries: [] });
   db.transaction(() => {
-    db.prepare(
-      "INSERT INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at",
-    ).run(jobId, JSON.stringify(state), now());
-    db.prepare(
-      "UPDATE queue_state SET state_json = ?, updated_at = ? WHERE singleton = 1",
-    ).run(JSON.stringify(queue), now());
+    upsertJobStateRow(db, jobId, JSON.stringify(state));
+    writeQueueRows(db, queue as PersistedQueueLike, now());
   })();
 }
+
+const UPSERT_JOB_SQL =
+  "INSERT INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at";
+
+export function upsertJobStateRow(
+  db: CbxDatabase,
+  jobId: string,
+  stateJson: string,
+): void {
+  db.prepare(UPSERT_JOB_SQL).run(jobId, stateJson, now());
+}
+
+export function finishQueueEntryRow(
+  db: CbxDatabase,
+  queueId: string,
+  queueStatus: string,
+): void {
+  db.prepare(
+    "UPDATE queue_entries SET status = ?, finished_at = ?, pid = NULL, updated_at = ? WHERE queue_id = ?",
+  ).run(queueStatus, now(), now(), queueId);
+}
+
+export function resolveApprovalQueueRow(
+  db: CbxDatabase,
+  jobId: string,
+  queueStatus: "done" | "failed",
+): void {
+  db.prepare(
+    "UPDATE queue_entries SET status = ?, finished_at = ?, pid = NULL, updated_at = ? WHERE job_id = ? AND status = 'awaiting_approval'",
+  ).run(queueStatus, now(), now(), jobId);
+}
+
+export function mapStateToQueueStatus(state: Record<string, unknown>): string {
+  const status = String(state.status);
+  return status === "done"
+    ? "done"
+    : status === "cancelled"
+      ? "cancelled"
+      : status === "awaiting_approval"
+        ? "awaiting_approval"
+        : "failed";
+}
+
 export async function savePersistedStateAndFinishQueue(
   workspace: string,
   jobId: string,
@@ -790,34 +964,9 @@ export async function savePersistedStateAndFinishQueue(
   queueId: string,
 ): Promise<void> {
   const db = await database(workspace);
-  await legacyQueue(path.resolve(workspace), db, { entries: [] });
   db.transaction(() => {
-    const row = db
-      .prepare("SELECT state_json FROM queue_state WHERE singleton = 1")
-      .get() as { state_json: string };
-    const queue = JSON.parse(row.state_json) as {
-      entries?: Array<Record<string, unknown>>;
-    };
-    const entry = queue.entries?.find((item) => item.queueId === queueId);
-    if (entry) {
-      const status = String(state.status);
-      entry.status =
-        status === "done"
-          ? "done"
-          : status === "cancelled"
-            ? "cancelled"
-            : status === "awaiting_approval"
-              ? "awaiting_approval"
-              : "failed";
-      entry.finishedAt = now();
-      entry.pid = undefined;
-    }
-    db.prepare(
-      "INSERT INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at",
-    ).run(jobId, JSON.stringify(state), now());
-    db.prepare(
-      "UPDATE queue_state SET state_json = ?, updated_at = ? WHERE singleton = 1",
-    ).run(JSON.stringify(queue), now());
+    finishQueueEntryRow(db, queueId, mapStateToQueueStatus(state));
+    upsertJobStateRow(db, jobId, JSON.stringify(state));
   })();
 }
 export async function savePersistedStateAndResolveApprovalQueue(
@@ -827,37 +976,10 @@ export async function savePersistedStateAndResolveApprovalQueue(
   queueStatus: "done" | "failed",
 ): Promise<void> {
   const db = await database(workspace);
-  await legacyQueue(path.resolve(workspace), db, { entries: [] });
   db.transaction(() => {
-    const row = db
-      .prepare("SELECT state_json FROM queue_state WHERE singleton = 1")
-      .get() as { state_json: string };
-    const queue = JSON.parse(row.state_json) as {
-      entries?: Array<Record<string, unknown>>;
-    };
-    for (const entry of queue.entries ?? []) {
-      if (entry.jobId === jobId && entry.status === "awaiting_approval") {
-        entry.status = queueStatus;
-        entry.finishedAt = now();
-        entry.pid = undefined;
-      }
-    }
-    db.prepare(
-      "INSERT INTO jobs(job_id, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at",
-    ).run(jobId, JSON.stringify(state), now());
-    db.prepare(
-      "UPDATE queue_state SET state_json = ?, updated_at = ? WHERE singleton = 1",
-    ).run(JSON.stringify(queue), now());
+    resolveApprovalQueueRow(db, jobId, queueStatus);
+    upsertJobStateRow(db, jobId, JSON.stringify(state));
   })();
-}
-export async function recordDeliveryFailure(
-  workspace: string,
-  value: unknown,
-): Promise<void> {
-  const db = await database(workspace);
-  db.prepare(
-    "INSERT INTO delivery_failures(created_at, record_json) VALUES (?, ?)",
-  ).run(now(), JSON.stringify(value));
 }
 
 /** 读取 metadata 表中 key 对应的字符串值；不存在返回 undefined。 */
@@ -901,113 +1023,6 @@ export async function nextEventSeq(workspace: string): Promise<number> {
     if (!row) throw new Error("event_seq 分配失败：metadata 表可能已损坏。");
     return Number(row.seq);
   })();
-}
-
-export interface PendingDelivery {
-  id: number;
-  channel: "webhook" | "otlp";
-  endpoint: string;
-  body: unknown;
-  config: { timeoutMs?: number; maxRetries?: number; retryBaseMs?: number };
-  attempts: number;
-}
-
-export async function enqueueDelivery(
-  workspace: string,
-  delivery: Omit<PendingDelivery, "id" | "attempts">,
-): Promise<number> {
-  const db = await database(workspace);
-  const result = db
-    .prepare(
-      "INSERT INTO delivery_outbox(created_at, channel, endpoint, body_json, config_json, attempts, available_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
-    )
-    .run(
-      now(),
-      delivery.channel,
-      delivery.endpoint,
-      JSON.stringify(delivery.body),
-      JSON.stringify(delivery.config),
-      Date.now(),
-    );
-  return Number(result.lastInsertRowid);
-}
-
-export async function claimPendingDelivery(
-  workspace: string,
-  owner: string,
-  lockMs = 30_000,
-): Promise<PendingDelivery | undefined> {
-  const db = await database(workspace);
-  return db.transaction(() => {
-    const current = Date.now();
-    const row = db
-      .prepare(
-        "SELECT id, channel, endpoint, body_json, config_json, attempts FROM delivery_outbox WHERE available_at <= ? AND (locked_until IS NULL OR locked_until < ?) ORDER BY id LIMIT 1",
-      )
-      .get(current, current) as
-      | {
-          id: number;
-          channel: "webhook" | "otlp";
-          endpoint: string;
-          body_json: string;
-          config_json: string;
-          attempts: number;
-        }
-      | undefined;
-    if (!row) return undefined;
-    const claimed = db
-      .prepare(
-        "UPDATE delivery_outbox SET locked_by = ?, locked_until = ? WHERE id = ? AND (locked_until IS NULL OR locked_until < ?)",
-      )
-      .run(owner, current + lockMs, row.id, current).changes;
-    if (!claimed) return undefined;
-    return {
-      id: row.id,
-      channel: row.channel,
-      endpoint: row.endpoint,
-      body: JSON.parse(row.body_json),
-      config: JSON.parse(row.config_json),
-      attempts: row.attempts,
-    };
-  })();
-}
-
-export async function rescheduleDelivery(
-  workspace: string,
-  id: number,
-  owner: string,
-  attempts: number,
-  availableAt: number,
-  error: string,
-): Promise<void> {
-  const db = await database(workspace);
-  db.prepare(
-    "UPDATE delivery_outbox SET attempts = ?, available_at = ?, last_error = ?, locked_by = NULL, locked_until = NULL WHERE id = ? AND locked_by = ?",
-  ).run(attempts, availableAt, error, id, owner);
-}
-
-export async function completeDelivery(
-  workspace: string,
-  id: number,
-  owner: string,
-): Promise<void> {
-  const db = await database(workspace);
-  db.prepare("DELETE FROM delivery_outbox WHERE id = ? AND locked_by = ?").run(
-    id,
-    owner,
-  );
-}
-
-export async function nextPendingDeliveryAt(
-  workspace: string,
-): Promise<number | undefined> {
-  const db = await database(workspace);
-  const row = db
-    .prepare(
-      "SELECT MIN(CASE WHEN locked_until IS NOT NULL AND locked_until > ? THEN locked_until ELSE available_at END) AS available_at FROM delivery_outbox",
-    )
-    .get(Date.now()) as { available_at: number | null };
-  return row.available_at ?? undefined;
 }
 async function pruneDeliveryFailureArtifact(
   workspace: string,
@@ -1091,9 +1106,7 @@ export async function persistedMetrics(workspace: string): Promise<{
     jobsByStatus[status] = (jobsByStatus[status] ?? 0) + 1;
     if (state.phase === "retrying") retryingJobs += 1;
   }
-  const queue = (await legacyQueue(path.resolve(workspace), db, {
-    entries: [],
-  })) as { entries?: Array<{ status?: string }> };
+  const queue = readQueueRows(db) ?? { entries: [] };
   return {
     jobsByStatus,
     queueDepth: (queue.entries ?? []).filter((entry) =>
@@ -1230,319 +1243,9 @@ export async function loadJson<T>(file: string, fallback?: T): Promise<T> {
   }
 }
 
-export function processAlive(pid?: number): boolean {
-  if (!pid || !Number.isSafeInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException)?.code === "EPERM";
-  }
-}
-
-interface LockRecord {
-  pid?: number;
-  acquiredAt?: string;
-  token?: string;
-}
-
-/** 判定锁文件是否可回收：存活 pid 永远持有锁；死 pid 或超龄（acquiredAt 缺失时退回 mtime）视为过期。导出供测试覆盖各分支。 */
-export async function staleLock(
-  file: string,
-  staleAfterMs: number,
-): Promise<boolean> {
-  let record: LockRecord = {};
-  let modifiedAt = 0;
-  try {
-    const [body, info] = await Promise.all([
-      readFile(file, "utf8"),
-      stat(file),
-    ]);
-    modifiedAt = info.mtimeMs;
-    record = JSON.parse(body) as LockRecord;
-  } catch (error) {
-    if (isMissing(error)) return false;
-    try {
-      modifiedAt = (await stat(file)).mtimeMs;
-    } catch {
-      return false;
-    }
-  }
-  // A live PID always owns the lock, even if a long-running operation exceeds staleAfterMs.
-  if (processAlive(record.pid)) return false;
-  const acquiredAt = Date.parse(String(record.acquiredAt ?? ""));
-  const ageBase = Number.isFinite(acquiredAt) ? acquiredAt : modifiedAt;
-  return Boolean(record.pid) || Date.now() - ageBase >= staleAfterMs;
-}
-
-async function reclaimLock(file: string): Promise<boolean> {
-  const staleName = `${file}.stale.${process.pid}.${randomBytes(5).toString("hex")}`;
-  try {
-    await rename(file, staleName);
-  } catch (error) {
-    if (isMissing(error)) return true; // file 已被他人回收，外层立即重试 open(wx)
-    return false;
-  }
-  // 防双持有：rename 后重新校验锁内容——若显示活 pid（staleLock→reclaim 间被他人重新 acquire），
-  // 放回原位放弃回收。把双持有窗口从含 await 的 staleLock→reclaim 缩小到本地 read+pid 探测。
-  // 最坏情况是 lockfile 内容短暂错乱（被旧死锁记录覆盖），后续 staleLock 自愈，不导致双持有。
-  try {
-    const record = JSON.parse(await readFile(staleName, "utf8")) as LockRecord;
-    if (processAlive(record.pid)) {
-      try {
-        await rename(staleName, file);
-      } catch {
-        await unlink(staleName).catch(() => undefined);
-      }
-      return false;
-    }
-  } catch {
-    /* 内容缺失/损坏：按可回收处理 */
-  }
-  await unlink(staleName).catch(() => undefined);
-  return true;
-}
-
-// intentional-simple: SIGKILL（不可捕获信号）后锁文件残留，依赖 staleAfterMs（默认 30s）回收——
-// 文件锁固有局限；完全消除需改用 flock 或 SQLite 事务（跨进程互斥由内核/DB 保证）。
-export async function withFileLock<T>(
-  file: string,
-  action: () => Promise<T>,
-  options: {
-    retries?: number;
-    retryDelayMs?: number;
-    staleAfterMs?: number;
-    busyMessage?: string;
-    busyCode?: CbxErrorCode;
-  } = {},
-): Promise<T> {
-  const retries = options.retries ?? 40;
-  const retryDelayMs = options.retryDelayMs ?? 50;
-  const staleAfterMs = options.staleAfterMs ?? 30_000;
-  await mkdir(path.dirname(file), { recursive: true });
-  const token = randomBytes(12).toString("hex");
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  for (let attempt = 0; !handle; attempt += 1) {
-    try {
-      handle = await open(file, "wx", 0o600);
-      await handle.writeFile(
-        JSON.stringify({ pid: process.pid, acquiredAt: now(), token }),
-        "utf8",
-      );
-      await handle.sync();
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if ((await staleLock(file, staleAfterMs)) && (await reclaimLock(file)))
-        continue;
-      if (attempt >= retries)
-        throw new CbxError(
-          options.busyCode ?? "E_LOCK_BUSY",
-          options.busyMessage ?? "锁正在被另一个进程持有，请稍后重试。",
-        );
-      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-    }
-  }
-  try {
-    return await action();
-  } finally {
-    await handle.close();
-    try {
-      const current = JSON.parse(await readFile(file, "utf8")) as LockRecord;
-      if (current.token === token) await unlink(file);
-    } catch {
-      /* replaced or already released */
-    }
-  }
-}
-
-/** 队列写互斥的唯一来源：调度器整 blob 写回与 worker 终态双写必须共用同一把锁，否则会互相覆盖。 */
-export function queueLockFile(workspace: string): string {
-  return path.join(workspace, ".cbx", "queue.lock");
-}
-export function withQueueLock<T>(
-  workspace: string,
-  action: () => Promise<T>,
-  options: { retries?: number } = {},
-): Promise<T> {
-  return withFileLock(queueLockFile(workspace), action, {
-    retries: options.retries ?? 40,
-    busyMessage: "队列正在被另一个调度器更新，请稍后重试。",
-    busyCode: "E_QUEUE_BUSY",
-  });
-}
-
 /** 常量时间字符串比较：两侧先各取 SHA-256 再 timingSafeEqual，同时规避长度泄漏与逐字节时序差异。 */
 export function constantTimeEqual(actual: string, expected: string): boolean {
   const left = createHash("sha256").update(actual, "utf8").digest();
   const right = createHash("sha256").update(expected, "utf8").digest();
   return timingSafeEqual(left, right);
-}
-
-// ---- context.json schema 校验：必填字段缺失或类型错误即拒绝加载，避免半损坏上下文在执行中途引发不可预期行为 ----
-
-function contextFieldError(field: string, expectation: string): CbxError {
-  return new CbxError(
-    "E_INVALID_CONTEXT",
-    `context.json 无效：${field} ${expectation}。`,
-  );
-}
-function requireContextString(
-  raw: Record<string, unknown>,
-  field: string,
-): void {
-  const value = raw[field];
-  if (typeof value !== "string" || !value.trim())
-    throw contextFieldError(field, "必须是非空字符串");
-}
-function requireContextBoolean(
-  raw: Record<string, unknown>,
-  field: string,
-): void {
-  if (typeof raw[field] !== "boolean")
-    throw contextFieldError(field, "必须是布尔值");
-}
-function requireContextNumber(
-  raw: Record<string, unknown>,
-  field: string,
-): void {
-  const value = raw[field];
-  if (typeof value !== "number" || !Number.isFinite(value))
-    throw contextFieldError(field, "必须是有限数字");
-}
-function requireContextNonNegInt(
-  raw: Record<string, unknown>,
-  field: string,
-  minimum = 0,
-): void {
-  const value = raw[field];
-  if (typeof value !== "number" || !Number.isInteger(value) || value < minimum)
-    throw contextFieldError(field, `必须是不小于 ${minimum} 的整数`);
-}
-function optionalContextString(
-  raw: Record<string, unknown>,
-  field: string,
-): void {
-  const value = raw[field];
-  // 允许空字符串：git status 等来源合法地产生 ""；仅拒绝非字符串类型。
-  if (value !== undefined && typeof value !== "string")
-    throw contextFieldError(field, "缺省或为字符串");
-}
-function optionalContextBoolean(
-  raw: Record<string, unknown>,
-  field: string,
-): void {
-  const value = raw[field];
-  if (value !== undefined && typeof value !== "boolean")
-    throw contextFieldError(field, "缺省或为布尔值");
-}
-function optionalContextNumber(
-  raw: Record<string, unknown>,
-  field: string,
-): void {
-  const value = raw[field];
-  if (
-    value !== undefined &&
-    (typeof value !== "number" || !Number.isFinite(value))
-  )
-    throw contextFieldError(field, "缺省或为有限数字");
-}
-function optionalContextNonNegInt(
-  raw: Record<string, unknown>,
-  field: string,
-): void {
-  const value = raw[field];
-  if (
-    value !== undefined &&
-    (typeof value !== "number" || !Number.isInteger(value) || value < 0)
-  )
-    throw contextFieldError(field, "缺省或为非负整数");
-}
-function optionalContextObject(
-  raw: Record<string, unknown>,
-  field: string,
-): void {
-  const value = raw[field];
-  if (
-    value !== undefined &&
-    (!value || typeof value !== "object" || Array.isArray(value))
-  )
-    throw contextFieldError(field, "缺省或为对象");
-}
-
-/** 校验 context.json 内容：核心必填字段齐全且类型正确；后期版本新增字段（trustMode、executionRetries 等）
- * 存在时做类型检查但不强制要求，保持旧 job 跨版本续跑不被硬阻断（消费方均有 ?? 兜底）。未知字段容忍（前向兼容）。 */
-export function validateJobContext(value: unknown): JobContext {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new CbxError("E_INVALID_CONTEXT", "context.json 无效：必须是对象。");
-  const raw = value as Record<string, unknown>;
-  for (const field of [
-    "appVersion",
-    "jobId",
-    "workspace",
-    "createdAt",
-    "permissionMode",
-    "executor",
-  ])
-    requireContextString(raw, field);
-  for (const field of ["reviewRequested", "isolated"])
-    requireContextBoolean(raw, field);
-  requireContextNonNegInt(raw, "maxTurns", 1);
-  requireContextNumber(raw, "timeoutMs");
-  requireContextNonNegInt(raw, "maxRetries", 0);
-  for (const field of [
-    "testCommand",
-    "reviewRules",
-    "reviewExecutor",
-    "commitMessage",
-    "baseCommit",
-    "baseBranch",
-    "baseStatus",
-    "dirtyFingerprint",
-    "gitRoot",
-  ])
-    optionalContextString(raw, field);
-  for (const field of [
-    "keepWorktree",
-    "approvalBeforeRun",
-    "approvalBeforeComplete",
-    "autoBranch",
-    "autoCommit",
-    "baseDirty",
-    "dependencyGuard",
-  ])
-    optionalContextBoolean(raw, field);
-  for (const field of ["executionRetries", "fixRetries"])
-    optionalContextNonNegInt(raw, field);
-  if (
-    raw.trustMode !== undefined &&
-    raw.trustMode !== "trusted" &&
-    raw.trustMode !== "untrusted"
-  )
-    throw contextFieldError("trustMode", "缺省或为 trusted/untrusted");
-  optionalContextObject(raw, "taskContract");
-  optionalContextObject(raw, "adaptive");
-  optionalContextObject(raw, "contextBudget");
-  return value as JobContext;
-}
-
-/** 读取并校验任务的 context.json；schema 损坏时抛出带 E_INVALID_CONTEXT 错误码的异常（文件缺失则按 loadJson 原样抛 ENOENT），不返回半成品。 */
-export async function loadJobContext(directory: string): Promise<JobContext> {
-  return validateJobContext(
-    await loadJson<unknown>(path.join(directory, "context.json")),
-  );
-}
-
-export async function updateJobContext(
-  workspace: string,
-  jobId: string,
-  updates: Record<string, unknown>,
-): Promise<void> {
-  const directory = path.join(workspace, ".cbx", "jobs", jobId);
-  const file = path.join(directory, "context.json");
-  const current = { ...(await loadJobContext(directory)) } as Record<
-    string,
-    unknown
-  >;
-  Object.assign(current, updates);
-  await saveJson(file, current);
 }

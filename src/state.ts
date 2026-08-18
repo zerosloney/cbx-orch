@@ -9,13 +9,14 @@ import {
   forgetPersistedJob,
   prunePersistedData,
   savePersistedState,
-  savePersistedStateAndFinishQueue,
-  savePersistedStateAndResolveApprovalQueue,
+  withQueueTxLock,
+  finishQueueEntryRow,
+  resolveApprovalQueueRow,
+  upsertJobStateRow,
+  mapStateToQueueStatus,
   setMetadata,
   saveJson,
   now,
-  withQueueLock,
-  type RuntimeConfig,
 } from "./storage.js";
 import { assertJobId } from "./validation.js";
 import { CbxError } from "./errors.js";
@@ -340,12 +341,10 @@ export async function writeState(
   Object.assign(state, updates, { updatedAt: now() });
   // 终态双写与调度器整 blob 写回共用队列锁：否则两者并发时 worker 的终态会被调度器的旧快照覆盖。
   if (queueEntryId)
-    await withQueueLock(
-      workspace,
-      () =>
-        savePersistedStateAndFinishQueue(workspace, jobId, state, queueEntryId),
-      { retries: 120 },
-    );
+    await withQueueTxLock(workspace, (db) => {
+      finishQueueEntryRow(db, queueEntryId, mapStateToQueueStatus(state));
+      upsertJobStateRow(db, jobId, JSON.stringify(state));
+    });
   else await savePersistedState(workspace, jobId, state);
   await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
   try {
@@ -424,17 +423,10 @@ export async function writeApprovalState(
   const previousStatus = state.status;
   Object.assign(state, updates, { updatedAt: now() });
   // 审批终态同样并入队列锁，避免与调度器整 blob 写回互相覆盖。
-  await withQueueLock(
-    workspace,
-    () =>
-      savePersistedStateAndResolveApprovalQueue(
-        workspace,
-        jobId,
-        state,
-        queueStatus,
-      ),
-    { retries: 120 },
-  );
+  await withQueueTxLock(workspace, (db) => {
+    resolveApprovalQueueRow(db, jobId, queueStatus);
+    upsertJobStateRow(db, jobId, JSON.stringify(state));
+  });
   await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
   try {
     await publishEvent(workspace, "job.state_changed", {

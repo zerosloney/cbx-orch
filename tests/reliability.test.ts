@@ -190,6 +190,7 @@ test("per-stage retry budget allows stage 2 to retry even after stage 1 consumed
   // 回归：重试预算按 stage 独立记账，stage 1 消耗完预算后 stage 2 仍拥有全新预算。
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-stage-retry-"));
   const plugin = path.join(workspace, "stage-retry-executor.mjs");
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ plugins: { enforce: true, allowPaths: [plugin] } }), "utf8");
   await writeFile(plugin, `
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -259,6 +260,7 @@ test("plugin without enforce emits a policy warning event; enforce suppresses it
   const pluginSrc = path.resolve(process.cwd(), "plugins", "example-executor.mjs");
   const plugin = path.join(workspace, "my-plugin.mjs");
   await copyFile(pluginSrc, plugin);
+  await writeFile(path.join(workspace, ".cbx.json"), JSON.stringify({ plugins: { enforce: false } }), "utf8");
   const warnJob = await createJob({ workspace, task: "插件告警", review: false, isolated: false, executor: plugin, permissionMode: "auto", maxTurns: 5, timeoutMs: 2_000, maxRetries: 0, jobId: "plugin-warn" });
   assert.equal((await executeJob(workspace, warnJob.jobId)).status, "done");
   assert.match(await readFile(path.join(warnJob.directory, "events.ndjson"), "utf8"), /"event":"plugin_policy_warning"/);

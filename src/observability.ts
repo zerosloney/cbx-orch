@@ -2,18 +2,20 @@ import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import {
+  loadRuntimeConfig,
+  nextEventSeq,
+  type RuntimeConfig,
+} from "./storage.js";
+import {
   claimPendingDelivery,
   completeDelivery,
   enqueueDelivery,
-  loadRuntimeConfig,
-  nextEventSeq,
   nextPendingDeliveryAt,
   recordDeliveryFailure,
-  redactSensitive,
   rescheduleDelivery,
   type PendingDelivery,
-  type RuntimeConfig,
-} from "./storage.js";
+} from "./outbox.js";
+import { redactSensitive } from "./redaction.js";
 
 interface DeliveryConfig {
   timeoutMs?: number;

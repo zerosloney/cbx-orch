@@ -23,6 +23,7 @@ export function isInteractive(): boolean {
 }
 
 function stripAnsi(s: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: 剥离 ANSI 转义序列正是该函数的目的
   return s.replace(/\u001b\[[0-9;]*m/g, "");
 }
 

@@ -1,11 +1,12 @@
-import { existsSync } from "node:fs";
+
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadConfig, loadState, jobDir, logJobEvent } from "./state.js";
-import { redactText, saveJson, now } from "./storage.js";
+import { now } from "./storage.js";
+import { redactText } from "./redaction.js";
 import { pruneAfterTerminal } from "./state.js";
 import { refreshBaseline } from "./baseline.js";
-import { prepareContinuation } from "./execution.js";
+import { prepareContinuation } from "./approval-gate.js";
 import {
   enqueueJob,
   listQueue,

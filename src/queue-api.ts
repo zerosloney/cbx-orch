@@ -2,20 +2,16 @@ import path from "node:path";
 import * as queue from "./queue.js";
 import type { QueueEntry, QueueFile, QueueRuntime } from "./queue.js";
 import {
-  loadPersistedQueue,
   savePersistedStateAndFinishQueue,
   savePersistedStateAndQueue,
-  savePersistedStateAndResolveApprovalQueue,
   persistedMetrics,
   prunePersistedData,
-  withFileLock,
 } from "./storage.js";
 import {
   loadConfig,
   loadState,
   writeState,
   jobDir,
-  logJobEvent,
   pruneExpiredJobs,
 } from "./state.js";
 import { saveJson } from "./storage.js";

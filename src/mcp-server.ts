@@ -510,7 +510,7 @@ async function dispatch(
       if (match[2] === "events") {
         // 事件流资源：返回 readEventsIncremental 增量（含 next_offset 游标）。
         // 尚无 events.ndjson 的任务返回空增量，不当作错误。
-        let incremental;
+        let incremental: Awaited<ReturnType<typeof readEventsIncremental>>;
         try {
           incremental = await readEventsIncremental(root, match[1], 0);
         } catch (error) {

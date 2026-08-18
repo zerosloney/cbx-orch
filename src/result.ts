@@ -2,11 +2,12 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { saveJson, loadJobContext, now } from "./storage.js";
+import { saveJson, now } from "./storage.js";
+import { loadJobContext } from "./context-schema.js";
 import { jobDir, pruneAfterTerminal, writeApprovalState, writeState } from "./state.js";
 import { listArtifacts } from "./artifacts.js";
-import { criterionDefinitions, reconcileVerifiedProgress, type StructuredAudit, type VerifiedProgress } from "./progress.js";
-import { structuredAuditRequested, evidenceHashes } from "./evidence.js";
+import { criterionDefinitions, type VerifiedProgress } from "./progress.js";
+import { structuredAuditRequested, } from "./evidence.js";
 import { estimateTokens } from "./context-pack.js";
 import type { JobState } from "./types.js";
 

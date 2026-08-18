@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { loadJobContext, loadJson, saveJson } from "./storage.js";
+import { loadJson, saveJson } from "./storage.js";
+import { loadJobContext } from "./context-schema.js";
 import {
   snapshotGitBaseline,
   gitDirtyFingerprint,
   snapshotDiff,
-  gitRoot,
 } from "./git-ops.js";
 import { loadState, writeState, logJobEvent } from "./state.js";
 import { invokeExecutor, promptFor } from "./runner.js";

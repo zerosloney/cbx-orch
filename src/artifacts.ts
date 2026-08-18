@@ -1,11 +1,12 @@
-import { existsSync } from "node:fs";
+import { existsSync, type Stats } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { listPersistedStates, redactText, type RuntimeConfig } from "./storage.js";
+import { listPersistedStates, type RuntimeConfig } from "./storage.js";
+import { redactText } from "./redaction.js";
 import { jobDir } from "./state.js";
 import { assertJobId } from "./validation.js";
 import { CbxError } from "./errors.js";
-import type { JobState, JobContext } from "./types.js";
+import type { JobState, } from "./types.js";
 import type { ContextArtifact } from "./context-pack.js";
 
 export const ARTIFACTS = new Set(["request.md", "context-snapshot.md", "context-contract.json", "understanding.json", "context.json", "state.json", "events.ndjson", "agent.log", "handback.md", "review.md", "review.json", "audit.json", "verified-progress.json", "manager-context.json", "executor-context.json", "auditor-context.json", "test.log", "git-status.txt", "diff.patch", "complete.patch", "untracked-files.txt", "result.json"]);
@@ -48,7 +49,7 @@ export async function discoverWorkspaces(
   for (const name of names) {
     if (name.startsWith(".") || name === "node_modules") continue;
     const candidate = path.join(resolvedRoot, name);
-    let dirStat;
+    let dirStat: Stats;
     try {
       dirStat = await stat(candidate);
     } catch {

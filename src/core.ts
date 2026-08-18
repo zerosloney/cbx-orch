@@ -31,10 +31,12 @@ export { promptFor, invokeExecutor, runTest } from "./runner.js";
 export { semanticReviewFailure, evaluateBaselineDrift, refreshBaseline, performContextHandshake } from "./baseline.js";
 
 // Stage execution
-export { ManagerWorktreeMutationError, ManagerDecisionError, ManagerInvocationError, requestAdaptiveAction, runStage } from "./stage-runner.js";
+export { runStage } from "./stage-runner.js";
+export { ManagerWorktreeMutationError, ManagerDecisionError, ManagerInvocationError, requestAdaptiveAction } from "./adaptive-action.js";
 
 // Job execution orchestration
-export { executeJob, prepareContinuation } from "./execution.js";
+export { executeJob } from "./execution.js";
+export { prepareContinuation } from "./approval-gate.js";
 
 // Approval
 export { approveJob, approveJobAndStart } from "./approval.js";

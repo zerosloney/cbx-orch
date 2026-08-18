@@ -1,14 +1,10 @@
 import { existsSync } from "node:fs";
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import {
-  loadJobContext,
-  loadJson,
-  saveJson,
-  now,
-  updateJobContext,
-  withFileLock,
-} from "./storage.js";
+import { loadJson, now } from "./storage.js";
+import { loadJobContext, updateJobContext } from "./context-schema.js";
+import { withFileLock } from "./lock.js";
+import { prepareContinuation } from "./approval-gate.js";
 import { finishSpan, startSpan } from "./observability.js";
 import {
   loadState,
@@ -21,30 +17,27 @@ import {
 import { finalizeState, writeResult } from "./result.js";
 import {
   evaluateBaselineDrift,
-  refreshBaseline,
   performContextHandshake,
 } from "./baseline.js";
-import { runStage, requestAdaptiveAction, ManagerWorktreeMutationError, ManagerDecisionError } from "./stage-runner.js";
+import { runStage } from "./stage-runner.js";
+import { requestAdaptiveAction, ManagerWorktreeMutationError, ManagerDecisionError } from "./adaptive-action.js";
 import {
   runDependencyLayers,
   groupStagesByDependency,
   collectDependencyHandbacks,
 } from "./parallel-stages.js";
 import { flushEventBuffer } from "./runner.js";
-import { contextRedactor, contextArtifacts } from "./artifacts.js";
+import { contextRedactor, } from "./artifacts.js";
 import { prepareWorktree, snapshotDiff, commitWorktree } from "./git-ops.js";
 import { assertExecutionPolicy } from "./validation.js";
 import {
   createHumanGate,
   parseHumanGate,
-  resolveHumanGate,
-  extendRoundLimit,
   trackFailure,
 } from "./human-gate.js";
 import {
   evidenceHashes,
   completionEvidenceValid,
-  parsePendingCompletion,
   worktreeSha256,
   structuredAuditRequested,
   type PendingCompletion,
@@ -809,72 +802,6 @@ async function executeJobLocked(
     reviewExitCode: 0,
     testExitCode: 0,
   });
-}
-
-async function prepareContinuationUnlocked(
-  workspace: string,
-  jobId: string,
-  instructions: string,
-  extraRounds = 0,
-): Promise<{ instructions: string; blocked?: JobState }> {
-  if (!Number.isInteger(extraRounds) || extraRounds < 0)
-    throw new Error("extra_rounds 必须是非负整数。");
-  const state = await loadState(workspace, jobId);
-  const config = await loadConfig(workspace);
-  const redact = contextRedactor(config.governance);
-  const safeInstructions = redact(instructions);
-  if (!state.humanGate) {
-    if (extraRounds) throw new Error("当前任务没有等待追加轮次的 Human Gate。");
-    return { instructions: safeInstructions };
-  }
-  const gate = parseHumanGate(state.humanGate);
-  if (gate.status === "resolved") {
-    if (extraRounds) throw new Error("当前 Human Gate 已解决，不能追加轮次。");
-    return { instructions: safeInstructions };
-  }
-  if (gate.reason === "before_run" || gate.reason === "completion")
-    return { instructions: safeInstructions, blocked: state };
-  if (gate.reason === "max_rounds") {
-    if (!extraRounds) return { instructions: safeInstructions, blocked: state };
-    const directory = jobDir(workspace, jobId);
-    const context = await loadJobContext(directory);
-    if (!context.adaptive?.enabled)
-      throw new Error("max_rounds gate 缺少 Adaptive 配置。");
-    context.adaptive.maxRounds = extendRoundLimit(
-      context.adaptive.maxRounds,
-      extraRounds,
-    );
-    await saveJson(path.join(directory, "context.json"), context);
-  } else if (extraRounds) {
-    throw new Error("extra_rounds 只能用于 max_rounds Human Gate。");
-  }
-  const humanGate = resolveHumanGate(gate, safeInstructions, redact);
-  // 用户已针对 gate 给出纠偏：重置失败计数与重试预算，避免旧 error/旧计数在续跑时被重复计入或预算过早耗尽。
-  await writeState(workspace, jobId, {
-    humanGate,
-    continuationInstructions: humanGate.instructions ?? null,
-    blockingQuestions: null,
-    blockedReason: null,
-    failureTracker: null,
-    executionUsed: 0,
-    fixUsed: 0,
-    stageRetries: {},
-  });
-  return { instructions: safeInstructions };
-}
-
-async function prepareContinuation(
-  workspace: string,
-  jobId: string,
-  instructions: string,
-  extraRounds = 0,
-): Promise<{ instructions: string; blocked?: JobState }> {
-  return withFileLock(
-    path.join(jobDir(workspace, jobId), "gate.lock"),
-    () =>
-      prepareContinuationUnlocked(workspace, jobId, instructions, extraRounds),
-    { retries: 0, busyMessage: `Human Gate 正在更新：${jobId}` },
-  );
 }
 
 export async function executeJob(

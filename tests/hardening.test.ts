@@ -10,17 +10,18 @@ import { parseCliArgs } from "../src/cli-args.js";
 import { CbxError, isCbxError } from "../src/errors.js";
 import {
   constantTimeEqual,
-  loadJobContext,
   loadPersistedQueue,
   now,
-  queueLockFile,
-  redactText,
   savePersistedQueue,
+} from "../src/storage.js";
+import { loadJobContext, updateJobContext } from "../src/context-schema.js";
+import {
+  queueLockFile,
   staleLock,
-  updateJobContext,
   withFileLock,
   withQueueLock,
-} from "../src/storage.js";
+} from "../src/lock.js";
+import { redactText } from "../src/redaction.js";
 import { assertJobId, normalizeJobId } from "../src/validation.js";
 import { snapshotDiff } from "../src/git-ops.js";
 import { capture, captureAsync } from "../src/process-runner.js";
