@@ -10,8 +10,8 @@ export interface BuildArgsOptions {
 }
 
 export interface BuiltinExecutor {
-  /** 注册名，写入 .cbx.json 的 executor 字段或 --executor */
-  name: "codebuddy" | "opencode" | "omp" | "cline" | "qwen";
+  /** 注册名，写入 .cbx.json 的 executor 字段或 --executor；内置 5 个之外可由 agent-registry 注册文件 spec */
+  name: string;
   /** 别名，resolveExecutor 同样命中（oh-my-pi 指向 omp，非独立二进制） */
   aliases: string[];
   /** 显示名，注入到提示词与用户可见的错误消息中 */
@@ -25,7 +25,7 @@ export interface BuiltinExecutor {
 }
 
 // permissionMode 中表示「自动放行」的语义值：opencode 用 --auto、cline 用 --auto-approve true 表达。
-const AUTO_MODES = new Set(["auto", "dontAsk"]);
+export const AUTO_MODES = new Set(["auto", "dontAsk"]);
 
 export const BUILTIN_EXECUTORS: readonly BuiltinExecutor[] = [
   {

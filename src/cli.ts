@@ -32,9 +32,11 @@ import { runReviewGate, stopReviewGateHook } from "./review-gate.js";
 import { runTui, startWebUi, summarizeWorkspace } from "./ui.js";
 import { parseCliArgs, type CliArgs } from "./cli-args.js";
 import { runBatch } from "./batch.js";
+import { discoverAgents } from "./agent-registry.js";
 import { APP_VERSION } from "./version.js";
 import {
   isInteractive,
+  renderAgentsTable,
   renderExport,
   renderHealth,
   renderJobDetail,
@@ -306,6 +308,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         console.log(renderQueueTable(q));
       else print(q);
     }
+    return;
+  }
+  if (command === "agents") {
+    const { probes, errors } = await discoverAgents(workspace);
+    if (isInteractive() && !parsed.has("--json"))
+      console.log(renderAgentsTable(probes, errors));
+    else print({ agents: probes, errors });
     return;
   }
   if (command === "dispatch") {

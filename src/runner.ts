@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from "./executor.js";
 import { findExecutable, resolveExecutor, type BuiltinExecutor } from "./executors/builtin.js";
+import { resolveRegisteredExecutor } from "./agent-registry.js";
 import { runViaRunner, resolveRunnerPlugin, type RunnerPlugin } from "./runner-plugin.js";
 import { MAX_CAPTURE_BYTES } from "./process-runner.js";
 import { bumpInvocationCount, loadConfig } from "./state.js";
@@ -208,7 +209,9 @@ export async function invokeExecutor(executor: string, workspace: string, direct
       }, redaction);
     }
   }
-  const builtin = resolveExecutor(executor);
+  // 先查内置注册表，再查 agent-registry 的文件 spec（.cbx/agents/*.json），都未命中才走 ESM 插件路径。
+  const builtin =
+    resolveExecutor(executor) ?? (await resolveRegisteredExecutor(executor, workspace));
   if (builtin)
     return invokeBuiltin(
       builtin,

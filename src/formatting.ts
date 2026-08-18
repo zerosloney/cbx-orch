@@ -163,6 +163,44 @@ export function renderJobsTable(jobs: JobState[]): string {
   ].join("\n");
 }
 
+export function renderAgentsTable(
+  probes: Array<{
+    name: string;
+    label: string;
+    source: string;
+    aliases: string[];
+    available: boolean;
+    command: string[] | null;
+  }>,
+  errors: string[],
+): string {
+  const headers = ["Agent", "Label", "Source", "Binary", "Path"];
+  const rows = probes.map((p) => [
+    p.aliases.length ? `${p.name} (${p.aliases.join(",")})` : p.name,
+    p.label,
+    p.source,
+    p.available ? chalk.green("ok") : chalk.red("missing"),
+    p.command ? p.command.join(" ") : "—",
+  ]);
+  const widths = headers.map((h, i) =>
+    Math.max(h.length, ...rows.map((r) => displayWidth(String(r[i])))),
+  );
+  const line = (cells: string[]) =>
+    cells.map((c, i) => padDisplayEnd(String(c), widths[i])).join("  ");
+  const table = [
+    chalk.bold(line(headers)),
+    widths.map((w) => "─".repeat(w)).join("──"),
+    ...rows.map((r) => line(r)),
+  ].join("\n");
+  const hints = [
+    table,
+    chalk.gray("新增 agent：在 .cbx/agents/（项目）或 ~/.cbx/agents/（用户）放置 spec JSON，无需修改代码。"),
+  ];
+  if (errors.length)
+    hints.push(chalk.yellow(`以下 spec 注册失败：\n${errors.map((e) => `  - ${e}`).join("\n")}`));
+  return hints.join("\n");
+}
+
 export function renderQueueTable(queue: QueueFile): string {
   const header = `Queue: ${queue.paused ? chalk.yellow("PAUSED") : chalk.green("running")} · maxConcurrent=${queue.maxConcurrent}`;
   const entries = queue.entries ?? [];
