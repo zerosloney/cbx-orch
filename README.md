@@ -305,6 +305,7 @@ curl http://127.0.0.1:4173/api/jobs/<id>/agent.log?since=0 # agent.log 增量(�
 curl http://127.0.0.1:4173/api/queue # 队列状态
 curl http://127.0.0.1:4173/healthz # 健康检查
 curl http://127.0.0.1:4173/api/metrics # 运行指标
+curl http://127.0.0.1:4173/openapi.json # OpenAPI 3.1 文档（全部端点的机器可读说明书，无需鉴权）
 
 # Web UI 写操作（POST，需鉴权；浏览器自动携带 HttpOnly cookie，curl 需 Authorization: Bearer <token>）
 
@@ -337,7 +338,17 @@ node dist/src/cli.js health --workspace .
 
 ````
 
-`ui` 命令支持 token 鉴权：通过 `--ui-token <token>` 或 `.cbx.json` 的 `ui.token` 配置。启用后浏览器首次加载首页会收到 `cbx_token` HttpOnly cookie（`SameSite=Strict`），同源 API/SSE 请求自动携带——token 不进入页面 JS 作用域、不出现在 URL 查询串，降低 XSS 与浏览器历史泄露面。curl/API 客户端仍可用 `Authorization: Bearer <token>` 请求头；SSE 兼容旧客户端可传 `?token=<token>` 查询参数。`/healthz` 健康检查和 `/` 首页无需 token。
+`ui` 命令支持 token 鉴权：通过 `--ui-token <token>` 或 `.cbx.json` 的 `ui.token` 配置。启用后浏览器首次加载首页会收到 `cbx_token` HttpOnly cookie（`SameSite=Strict`），同源 API/SSE 请求自动携带——token 不进入页面 JS 作用域、不出现在 URL 查询串，降低 XSS 与浏览器历史泄露面。curl/API 客户端仍可用 `Authorization: Bearer <token>` 请求头；SSE 兼容旧客户端可传 `?token=<token>` 查询参数。`/healthz` 健康检查、`/` 首页与 `/openapi.json` 无需 token。
+
+### OpenAPI 文档
+
+`cbx ui` 启动的 server 在 `/openapi.json` 暴露 OpenAPI 3.1 文档，覆盖全部 REST 端点（路径/入参/响应/鉴权方式）。可直接粘进 [Swagger Editor](https://editor.swagger.io) 浏览，或用生成器产出客户端 SDK：
+
+```powershell
+npx @openapitools/openapi-generator-cli generate -i http://127.0.0.1:4173/openapi.json -g python -o ./cbx-client
+```
+
+文档与 `ui.ts` 路由的一致性由 `tests/openapi.test.ts` 保证：文档声明的端点必须真实可响应、未声明的路径返回 404，新增端点时两边同步更新。
 
 ### SSE 事件回放
 

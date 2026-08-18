@@ -30,6 +30,7 @@ import {
 } from "./core.js";
 import { captureAsync } from "./process-runner.js";
 import { discoverAgents } from "./agent-registry.js";
+import { buildOpenApiDocument } from "./openapi.js";
 import { constantTimeEqual } from "./storage.js";
 import { processAlive } from "./lock.js";
 import { httpStatusForError } from "./errors.js";
@@ -152,7 +153,7 @@ const TERMINAL_STATUSES = new Set([
   "cancelled",
 ]);
 
-const PUBLIC_UI_PATHS = new Set(["/", "/style.css", "/app.js", "/healthz"]);
+const PUBLIC_UI_PATHS = new Set(["/", "/style.css", "/app.js", "/healthz", "/openapi.json"]);
 
 /**
  * 从 events.ndjson 推导阶段时间线。兼容两套事件:
@@ -827,6 +828,8 @@ export function createWebUiServer(
         return json(res, await discoverAgents(ws));
       if (url.pathname === "/healthz" || url.pathname === "/api/metrics")
         return json(res, await health(ws));
+      if (url.pathname === "/openapi.json")
+        return json(res, buildOpenApiDocument(host, port));
       const job = /^\/api\/jobs\/([^/]+)$/.exec(url.pathname);
       if (job) return json(res, await loadState(ws, job[1]));
       const artifacts = /^\/api\/jobs\/([^/]+)\/artifacts$/.exec(url.pathname);
