@@ -450,24 +450,113 @@ document.querySelector('#btn-resume').addEventListener('click',async function(){
   catch(e){alert('恢复失败：'+(e instanceof Error?e.message:String(e)));}
   finally{btn.disabled=false;}
 });
-// 创建任务：POST /api/jobs（与 CLI `cbx start` 语义一致，后台执行）。
-document.querySelector('#btn-create').addEventListener('click',async function(){
+// 创建任务：快捷输入框 → 打开高级 Modal（预填 task）。
+document.querySelector('#btn-create').addEventListener('click',function(){
   var input=document.querySelector('#new-task');
-  var task=(input.value||'').trim();
-  if(!task){input.focus();return;}
-  var btn=this;btn.disabled=true;
-  try{
-    var ws=encodeURIComponent(currentWorkspace||'');
-    var res=await cbxPost('/api/jobs?workspace='+ws,{task:task});
-    if(!res.ok){var err=await res.json();throw new Error(err.error||('HTTP '+res.status));}
-    input.value='';
-    refresh();
-  }catch(e){alert('创建失败：'+(e instanceof Error?e.message:String(e)));}
-  finally{btn.disabled=false;}
+  document.querySelector('#form-task').value=input.value||'';
+  openCreateModal();
 });
 document.querySelector('#new-task').addEventListener('keydown',function(e){
   if(e.key==='Enter')document.querySelector('#btn-create').click();
 });
+
+// ---- 视图切换 ----
+var currentView='jobs';
+function switchView(view){
+  if(view===currentView)return;
+  currentView=view;
+  document.querySelectorAll('.nav-tab').forEach(function(t){t.classList.toggle('active',t.dataset.view===view);});
+  document.querySelector('#view-jobs').hidden=view!=='jobs';
+  document.querySelector('#view-agents').hidden=view!=='agents';
+  if(view==='agents')loadAgents();
+}
+document.querySelectorAll('.nav-tab').forEach(function(t){
+  t.addEventListener('click',function(){switchView(t.dataset.view);});
+});
+
+// ---- Agents 管理 ----
+async function loadAgents(){
+  var body=document.querySelector('#agents-body');
+  body.innerHTML='<tr><td colspan="5" style="text-align:center;color:#555;padding:16px">加载中…</td></tr>';
+  try{
+    var ws=encodeURIComponent(currentWorkspace||'');
+    var data=await cbxFetch('/api/agents?workspace='+ws).then(function(r){return r.json();});
+    var agents=data.agents||[];
+    var errors=data.errors||[];
+    var errEl=document.querySelector('#agents-errors');
+    if(errors.length){
+      errEl.hidden=false;
+      errEl.innerHTML=errors.map(function(e){return '<div class="agents-error">'+esc(e)+'</div>';}).join('');
+    }else{errEl.hidden=true;errEl.innerHTML='';}
+    if(!agents.length){
+      body.innerHTML='<tr><td colspan="5" style="text-align:center;color:#555;padding:16px">未注册任何 agent。</td></tr>';
+      return;
+    }
+    body.innerHTML=agents.map(function(a){
+      var name=a.aliases&&a.aliases.length?a.name+' ('+a.aliases.join(',')+')':a.name;
+      var avail=a.available;
+      var cls=avail?'agent-ok':'agent-missing';
+      var bin=avail?'ok':'missing';
+      var path=a.command?a.command.join(' '):'—';
+      return '<tr><td>'+esc(name)+'</td><td>'+esc(a.label)+'</td><td>'+esc(a.source)+'</td><td class="'+cls+'">'+bin+'</td><td>'+esc(path)+'</td></tr>';
+    }).join('');
+    // 同步更新创建表单 executor 下拉（只列可用 agent）
+    var sel=document.querySelector('#form-executor');
+    if(sel){
+      var opts='<option value="">默认（codebuddy）</option>';
+      agents.filter(function(a){return a.available;}).forEach(function(a){
+        opts+='<option value="'+esc(a.name)+'">'+esc(a.label)+' ('+esc(a.name)+')</option>';
+      });
+      sel.innerHTML=opts;
+    }
+  }catch(e){
+    body.innerHTML='<tr><td colspan="5" style="text-align:center;color:#ff8d8d;padding:16px">加载失败：'+esc(e instanceof Error?e.message:String(e))+'</td></tr>';
+  }
+}
+document.querySelector('#btn-refresh-agents').addEventListener('click',loadAgents);
+
+// ---- 增强创建任务（Modal）----
+function openCreateModal(){
+  document.querySelector('#create-modal').hidden=false;
+  document.querySelector('#form-task').focus();
+}
+function closeCreateModal(){
+  document.querySelector('#create-modal').hidden=true;
+  document.querySelector('#form-task').value='';
+  document.querySelector('#form-executor').value='';
+  document.querySelector('#form-permission').value='auto';
+  document.querySelector('#form-review').checked=false;
+  document.querySelector('#form-isolated').checked=false;
+  document.querySelector('#form-maxturns').value='5';
+  document.querySelector('#new-task').value='';
+}
+document.querySelector('#btn-form-cancel').addEventListener('click',closeCreateModal);
+document.querySelector('.modal-backdrop').addEventListener('click',closeCreateModal);
+document.querySelector('#btn-form-create').addEventListener('click',async function(){
+  var btn=this;btn.disabled=true;
+  try{
+    var task=(document.querySelector('#form-task').value||'').trim();
+    if(!task){document.querySelector('#form-task').focus();return;}
+    var body={task:task};
+    var ex=document.querySelector('#form-executor').value;
+    if(ex)body.executor=ex;
+    body.permission_mode=document.querySelector('#form-permission').value;
+    if(document.querySelector('#form-review').checked)body.review=true;
+    if(document.querySelector('#form-isolated').checked)body.isolated=true;
+    var mt=Number(document.querySelector('#form-maxturns').value);
+    if(Number.isFinite(mt)&&mt>0)body.max_turns=mt;
+    var ws=encodeURIComponent(currentWorkspace||'');
+    var res=await cbxPost('/api/jobs?workspace='+ws,body);
+    if(!res.ok){var err=await res.json();throw new Error(err.error||('HTTP '+res.status));}
+    closeCreateModal();
+    refresh();
+  }catch(e){alert('创建失败：'+(e instanceof Error?e.message:String(e)));}
+  finally{btn.disabled=false;}
+});
+document.querySelector('#create-modal').addEventListener('keydown',function(e){
+  if(e.key==='Escape')closeCreateModal();
+});
+
 loadWorkspaces().then(refresh);
 // intentional-simple: 全量轮询 refresh 与 SSE 增量推送并存——SSE 写入 DOM 后 refresh 会重建，存在冗余渲染。
 // 单用户本地 UI 的带宽/CPU 可忽略；升级路径：SSE 只更新内存状态，由轻量定时器统一渲染。

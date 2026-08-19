@@ -2,27 +2,66 @@
 <html lang="zh-CN"><head><meta charset="utf-8"><title>CBX Orchestrator</title>
 <link rel="stylesheet" href="/style.css">
 </head><body>
-<div class="topbar"><h1>CBX Orchestrator</h1><span class="ws-pill"><span class="ws-name" id="ws-name">—</span><span class="ws-count" id="ws-count"></span></span></div>
-<div class="ws-list" id="ws-list" hidden></div>
-<div class="dist-bar" id="dist-bar" hidden></div>
-<div class="filter-bar" id="filter-bar" hidden><span id="filter-label"></span><button type="button" id="btn-clear-filter" class="job-action">清除筛选</button></div>
-<div class="filter-bar" id="trunc-hint" hidden>任务较多，仅显示最近 300 条。完整列表请用 <code>cbx list --limit N</code>。</div>
-<div class="cards" id="cards">
-  <div class="card" data-filter=""><div class="card-label">总任务</div><div class="card-value" id="c-total">—</div></div>
-  <div class="card" data-filter="running"><div class="card-label">运行中 / 并发</div><div class="card-value" id="c-running">—</div></div>
-  <div class="card" data-filter="queued"><div class="card-label">排队</div><div class="card-value" id="c-queued">—</div></div>
-  <div class="card" data-filter="awaiting_approval"><div class="card-label">待审批</div><div class="card-value" id="c-approval">—</div></div>
-  <div class="card" data-filter="failed"><div class="card-label">失败</div><div class="card-value" id="c-failed">—</div></div>
-  <div class="card" data-filter="needs_fix"><div class="card-label">返工</div><div class="card-value" id="c-needs-fix">—</div></div>
-  <div class="card" data-filter="done"><div class="card-label">完成</div><div class="card-value" id="c-done">—</div></div>
-  <div class="card" data-filter=""><div class="card-label">最后活动</div><div class="card-value" id="c-last">—</div></div>
-  <div class="card" data-filter=""><div class="card-label">健康</div><div class="card-value" id="c-health">—</div></div>
+<div class="topbar">
+  <h1>CBX Orchestrator</h1>
+  <nav class="nav-tabs">
+    <button type="button" class="nav-tab active" data-view="jobs">任务</button>
+    <button type="button" class="nav-tab" data-view="agents">Agents</button>
+  </nav>
+  <span class="ws-pill"><span class="ws-name" id="ws-name">—</span><span class="ws-count" id="ws-count"></span></span>
 </div>
-<div class="bar" id="bar"><button type="button" id="btn-pause" class="job-action">暂停队列</button><button type="button" id="btn-resume" class="job-action">恢复队列</button><span class="create"><input id="new-task" type="text" placeholder="输入任务描述后创建…" autocomplete="off"><button type="button" id="btn-create" class="job-action">创建任务</button></span></div>
-<table><thead><tr><th scope="col">Job</th><th scope="col">Status</th><th scope="col">Phase</th><th scope="col">Attempt</th><th scope="col">Review</th><th scope="col">Elapsed</th><th scope="col">Updated</th></tr></thead>
-<tbody id="jobs"></tbody></table>
-<div id="detail-panel"><h2 style="margin-top:0">任务详情</h2><div id="detail-body"><p class="hint">点击上方任务行查看详情</p></div></div>
-<h2>事件流</h2>
-<div id="stream"></div>
+<div class="ws-list" id="ws-list" hidden></div>
+<!-- ===== Jobs View ===== -->
+<div id="view-jobs">
+  <div class="dist-bar" id="dist-bar" hidden></div>
+  <div class="filter-bar" id="filter-bar" hidden><span id="filter-label"></span><button type="button" id="btn-clear-filter" class="job-action">清除筛选</button></div>
+  <div class="filter-bar" id="trunc-hint" hidden>任务较多，仅显示最近 300 条。完整列表请用 <code>cbx list --limit N</code>。</div>
+  <div class="cards" id="cards">
+    <div class="card" data-filter=""><div class="card-label">总任务</div><div class="card-value" id="c-total">—</div></div>
+    <div class="card" data-filter="running"><div class="card-label">运行中 / 并发</div><div class="card-value" id="c-running">—</div></div>
+    <div class="card" data-filter="queued"><div class="card-label">排队</div><div class="card-value" id="c-queued">—</div></div>
+    <div class="card" data-filter="awaiting_approval"><div class="card-label">待审批</div><div class="card-value" id="c-approval">—</div></div>
+    <div class="card" data-filter="failed"><div class="card-label">失败</div><div class="card-value" id="c-failed">—</div></div>
+    <div class="card" data-filter="needs_fix"><div class="card-label">返工</div><div class="card-value" id="c-needs-fix">—</div></div>
+    <div class="card" data-filter="done"><div class="card-label">完成</div><div class="card-value" id="c-done">—</div></div>
+    <div class="card" data-filter=""><div class="card-label">最后活动</div><div class="card-value" id="c-last">—</div></div>
+    <div class="card" data-filter=""><div class="card-label">健康</div><div class="card-value" id="c-health">—</div></div>
+  </div>
+  <div class="bar" id="bar"><button type="button" id="btn-pause" class="job-action">暂停队列</button><button type="button" id="btn-resume" class="job-action">恢复队列</button><span class="create"><input id="new-task" type="text" placeholder="输入任务描述后创建…" autocomplete="off"><button type="button" id="btn-create" class="job-action">创建任务</button></span></div>
+  <table><thead><tr><th scope="col">Job</th><th scope="col">Status</th><th scope="col">Phase</th><th scope="col">Attempt</th><th scope="col">Review</th><th scope="col">Elapsed</th><th scope="col">Updated</th></tr></thead>
+  <tbody id="jobs"></tbody></table>
+  <div id="detail-panel"><h2 style="margin-top:0">任务详情</h2><div id="detail-body"><p class="hint">点击上方任务行查看详情</p></div></div>
+  <h2>事件流</h2>
+  <div id="stream"></div>
+</div>
+<!-- ===== Agents View ===== -->
+<div id="view-agents" hidden>
+  <div class="agents-toolbar">
+    <p class="hint">新增 agent：在 <code>.cbx/agents/</code>（项目）或 <code>~/.cbx/agents/</code>（用户）放置 JSON spec，无需修改代码。</p>
+    <button type="button" id="btn-refresh-agents" class="job-action">刷新</button>
+  </div>
+  <div id="agents-errors" class="agents-errors" hidden></div>
+  <table class="agents-table"><thead><tr><th>Agent</th><th>Label</th><th>Source</th><th>Binary</th><th>Path</th></tr></thead>
+  <tbody id="agents-body"></tbody></table>
+</div>
+<!-- ===== Create Job Modal ===== -->
+<div id="create-modal" class="modal" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-content">
+    <h3 style="margin-top:0">创建任务</h3>
+    <div class="form-row"><label>任务描述</label><input id="form-task" type="text" placeholder="描述要做什么…" autocomplete="off"></div>
+    <div class="form-row"><label>执行器</label><select id="form-executor"><option value="">默认（codebuddy）</option></select></div>
+    <div class="form-row"><label>权限模式</label><select id="form-permission"><option value="auto">auto（自动放行）</option><option value="plan">plan（方案审批）</option><option value="dontAsk">dontAsk（不问）</option></select></div>
+    <div class="form-row form-inline">
+      <label><input id="form-review" type="checkbox"> 启用审查</label>
+      <label><input id="form-isolated" type="checkbox"> 隔离模式</label>
+    </div>
+    <div class="form-row"><label>maxTurns</label><input id="form-maxturns" type="number" value="5" min="1" max="100"></div>
+    <div class="form-actions">
+      <button type="button" id="btn-form-cancel" class="job-action">取消</button>
+      <button type="button" id="btn-form-create" class="job-action">创建</button>
+    </div>
+  </div>
+</div>
 <script src="/app.js"></script>
 </body></html>
