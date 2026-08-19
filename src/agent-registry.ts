@@ -4,6 +4,7 @@ import { access, readdir, readFile } from "node:fs/promises";
 import {
   BUILTIN_EXECUTORS,
   findExecutable,
+  notFoundMessage,
   resolveExecutor,
   type BuiltinExecutor,
 } from "./executors/builtin.js";
@@ -200,7 +201,7 @@ async function probeAgent({ spec, source }: RegisteredAgent): Promise<AgentProbe
     ...base,
     available: false,
     command: null,
-    error: `找不到 ${spec.label} (${spec.candidates.join("/")})。请安装 ${spec.label}，或设置 ${spec.envVar}。`,
+    error: notFoundMessage(spec),
   };
 }
 

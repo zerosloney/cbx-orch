@@ -46,18 +46,47 @@ function wrapCommand(candidate: string): string[] {
 }
 
 /**
- * 返回 [command, ...rest] 形式的可执行命令：
- * - 优先采用 envVar 指定的覆盖路径（不检查存在性，由探测阶段给出更友好的错误）；
- * - 其次按 PATH×PATHEXT 展开探测 candidates（与 agent 探测共用 locate.ts 的同一算法）；
- * - 兜底直接把首个候选名交给 spawn，由 spawn 报错；
+ * .cmd/.bat 处理：Node 20+ 出于安全（CVE-2024-27980）禁止无 shell 直接 spawn，
+ * 会抛 EINVAL。npm 全局安装的 shim 三件套（无扩展/.cmd/.ps1）同目录必有 .ps1，
+ * 重定向到 .ps1 走 powershell 包装（参数由 spawn 数组传递，无 cmd 转义/注入问题）；
+ * 旁边没有 .ps1 的自定义 .cmd 保持原样（调用方需自行通过 envVar 指向 .ps1/.exe）。
+ */
+async function resolveShim(candidate: string): Promise<string[]> {
+  const lower = candidate.toLowerCase();
+  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
+    const ps1 = `${candidate.slice(0, -4)}.ps1`;
+    if (await firstExisting([ps1])) return wrapCommand(ps1);
+  }
+  return wrapCommand(candidate);
+}
+
+/** 二进制未找到时的统一指引（探测与执行路径共用同一模板，避免口径漂移）。 */
+export function notFoundMessage(spec: BuiltinExecutor): string {
+  return `找不到 ${spec.label} (${spec.candidates.join("/")})。请安装 ${spec.label}，或设置 ${spec.envVar}。`;
+}
+
+/**
+ * 定位可执行命令，未找到返回 null（区别于 findExecutable 的裸名兜底）：
+ * - envVar 覆盖路径必须真实存在；
+ * - candidates 按 PATH×PATHEXT 展开探测（与 agent 探测共用 locate.ts 的同一算法）；
  * - .ps1/.js/.mjs/.cjs 会被包装成 powershell/node 调用。
  */
-export async function findExecutable(spec: BuiltinExecutor): Promise<string[]> {
+export async function locateExecutable(spec: BuiltinExecutor): Promise<string[] | null> {
   const configured = process.env[spec.envVar];
-  if (configured) return wrapCommand(configured);
+  if (configured) {
+    return (await firstExisting([configured])) ? resolveShim(configured) : null;
+  }
   for (const name of spec.candidates) {
     const found = await firstExisting(expandPathCandidates(name));
-    if (found) return wrapCommand(found);
+    if (found) return resolveShim(found);
   }
-  return wrapCommand(spec.candidates[0]);
+  return null;
+}
+
+/**
+ * 返回 [command, ...rest] 形式的可执行命令；未定位到时兜底返回首个候选名，
+ * 交给 spawn 报错（调用方需要确定性失败时应优先使用 locateExecutable）。
+ */
+export async function findExecutable(spec: BuiltinExecutor): Promise<string[]> {
+  return (await locateExecutable(spec)) ?? wrapCommand(spec.candidates[0]);
 }

@@ -246,8 +246,10 @@ export {
 export {
   BUILTIN_EXECUTORS,
   findExecutable,
+  locateExecutable,
   resolveExecutor,
 } from "../src/executors/builtin.js";
+export { invokeExecutor } from "../src/runner.js";
 export { parseNextAction } from "../src/adaptive-manager.js";
 export {
   CONTEXT_PACK_MAX_CHARS,
