@@ -117,3 +117,29 @@ pre.art-view{white-space:pre-wrap;background:#080b11;padding:10px;border-radius:
 .form-inline label{display:flex;align-items:center;gap:6px;color:#e8edf5;cursor:pointer}
 .form-inline input[type=checkbox]{width:auto;margin:0}
 .form-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+/* ---- 队列可视化 ---- */
+#queue-panel{margin-bottom:12px;background:#0a0e14;border:1px solid #2a3140;border-radius:8px;overflow:hidden}
+.queue-header{padding:8px 12px;background:#111a25;border-bottom:1px solid #2a3140;font-size:12px;color:#888;display:flex;align-items:center;gap:8px}
+.queue-count{background:#1c2840;color:#9ecbff;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.queue-list{max-height:200px;overflow-y:auto}
+.queue-item{padding:6px 12px;border-bottom:1px solid #1a2230;display:flex;align-items:center;gap:12px;font-size:12px;cursor:pointer}
+.queue-item:hover{background:#0f1620}
+.queue-item:last-child{border-bottom:0}
+.q-job{color:#9ecbff;font-weight:600;min-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.q-status{padding:1px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase}
+.q-queued .q-status{background:#1c2840;color:#9ecbff}
+.q-running .q-status{background:#0d3b1a;color:#70e090}
+.q-awaiting_approval .q-status{background:#3a2a0a;color:#fbbf24}
+.q-pri{color:#888;font-size:11px}
+.q-time{color:#666;font-size:11px;margin-left:auto}
+.q-pid{color:#555;font-size:11px;font-family:ui-monospace,monospace}
+.q-error{color:#ff8d8d;font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* ---- 事件流过滤 ---- */
+.stream-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:20px 0 12px;flex-wrap:wrap}
+.stream-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.stream-filters{display:flex;gap:4px}
+.stream-filter{padding:4px 10px;border-radius:5px;border:1px solid #2a3140;background:#080b11;color:#888;font-size:12px;cursor:pointer}
+.stream-filter:hover{border-color:#3a4a60;color:#ccc}
+.stream-filter.active{background:#1c2840;border-color:#1c2840;color:#9ecbff;font-weight:600}
+.stream-search{padding:5px 10px;border-radius:5px;border:1px solid #2a3648;background:#080b11;color:#e6edf3;font-size:12px;width:160px}
+.stream-search:focus{outline:none;border-color:#9ecbff}

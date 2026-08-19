@@ -28,10 +28,28 @@
     <div class="card" data-filter=""><div class="card-label">健康</div><div class="card-value" id="c-health">—</div></div>
   </div>
   <div class="bar" id="bar"><button type="button" id="btn-pause" class="job-action">暂停队列</button><button type="button" id="btn-resume" class="job-action">恢复队列</button><span class="create"><input id="new-task" type="text" placeholder="输入任务描述后创建…" autocomplete="off"><button type="button" id="btn-create" class="job-action">创建任务</button></span></div>
+  <!-- 队列可视化：活跃条目（queued/running/awaiting_approval） -->
+  <div id="queue-panel" hidden>
+    <div class="queue-header">活跃队列 <span class="queue-count" id="queue-count">0</span></div>
+    <div class="queue-list" id="queue-list"></div>
+  </div>
   <table><thead><tr><th scope="col">Job</th><th scope="col">Status</th><th scope="col">Phase</th><th scope="col">Attempt</th><th scope="col">Review</th><th scope="col">Elapsed</th><th scope="col">Updated</th></tr></thead>
   <tbody id="jobs"></tbody></table>
   <div id="detail-panel"><h2 style="margin-top:0">任务详情</h2><div id="detail-body"><p class="hint">点击上方任务行查看详情</p></div></div>
-  <h2>事件流</h2>
+  <div class="stream-header">
+    <h2 style="margin:0">事件流</h2>
+    <div class="stream-controls">
+      <div class="stream-filters">
+        <button type="button" class="stream-filter active" data-filter="all">全部</button>
+        <button type="button" class="stream-filter" data-filter="status">状态变更</button>
+        <button type="button" class="stream-filter" data-filter="stream">执行器流</button>
+        <button type="button" class="stream-filter" data-filter="thought">Thought</button>
+        <button type="button" class="stream-filter" data-filter="tool_use">Tool</button>
+        <button type="button" class="stream-filter" data-filter="error">Error</button>
+      </div>
+      <input type="text" class="stream-search" id="stream-search" placeholder="搜索事件…">
+    </div>
+  </div>
   <div id="stream"></div>
 </div>
 <!-- ===== Agents View ===== -->

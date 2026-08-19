@@ -39,6 +39,7 @@ async function refresh(){
   var jobs=await cbxFetch('/api/jobs?workspace='+ws+'&limit='+UI_JOBS_LIMIT).then(function(r){return r.json()});
   var q=await cbxFetch('/api/queue?workspace='+ws).then(function(r){return r.json()});
   updateCards(jobs,q);
+  renderQueue(q);
   var filtered=filterStatus?jobs.filter(matchesFilter):jobs;
   document.querySelector('#jobs').innerHTML=filtered.map(rowHtml).join('');
   if(filtered.length===0)document.querySelector('#jobs').innerHTML='<tr><td colspan="7" style="text-align:center;color:#555;padding:16px;font-size:13px">没有匹配的'+(filterStatus?'':(jobs.length===0?'任务：创建第一个任务吧。':'任务。'))+'</td></tr>';
@@ -275,6 +276,7 @@ async function loadDetail(id){
 function renderStreamEventCard(evt) {
   var div = document.createElement('div');
   div.className = 'evt-card';
+  div.dataset.eventType = evt.kind || 'text';
   var kind = evt.kind || 'text';
   var content = evt.content || '';
   var meta = evt.meta || {};
@@ -583,6 +585,7 @@ es.onmessage=function(e){
     var card=renderStreamEventCard(p.event?p:d);
     if(card){
       stream.appendChild(card);
+      applyStreamFilter();
       stream.scrollTop=stream.scrollHeight;
       while(stream.children.length>200)stream.removeChild(stream.firstChild);
     }
@@ -591,6 +594,7 @@ es.onmessage=function(e){
   var status=p.status||'';
   var div=document.createElement('div');
   div.className='evt';
+  div.dataset.eventType='status';
   var sStatus=esc(status);
   var txt='<span class="t">'+fmt(d.at||new Date().toISOString())+'</span>';
   if(p.jobId)txt+='<span class="s-'+sStatus+'"><b>'+esc(p.jobId)+'</b></span> ';
@@ -599,8 +603,67 @@ es.onmessage=function(e){
   if(p.phase)txt+=' · '+esc(p.phase);
   div.innerHTML=txt;
   stream.appendChild(div);
+  applyStreamFilter();
   stream.scrollTop=stream.scrollHeight;
   while(stream.children.length>200)stream.removeChild(stream.firstChild);
 };
 if(window.addEventListener){window.addEventListener('beforeunload',function(){es.close();});}
+
+// ---- 事件流过滤 / 搜索 ----
+var streamFilter='all',streamQuery='';
+function applyStreamFilter(){
+  var q=streamQuery.toLowerCase();
+  document.querySelectorAll('#stream .evt, #stream .evt-card').forEach(function(el){
+    var type=el.dataset.eventType||'';
+    var visible=true;
+    if(streamFilter!=='all'){
+      if(streamFilter==='status')visible=type==='status';
+      else if(streamFilter==='stream')visible=type==='thought'||type==='tool_use'||type==='error'||type==='text';
+      else visible=type===streamFilter;
+    }
+    if(visible&&q){visible=(el.textContent||'').toLowerCase().indexOf(q)>=0;}
+    el.style.display=visible?'':'none';
+  });
+}
+document.querySelectorAll('.stream-filter').forEach(function(btn){
+  btn.addEventListener('click',function(){
+    document.querySelectorAll('.stream-filter').forEach(function(b){b.classList.remove('active');});
+    btn.classList.add('active');
+    streamFilter=btn.dataset.filter;
+    applyStreamFilter();
+  });
+});
+document.querySelector('#stream-search').addEventListener('input',function(e){
+  streamQuery=e.target.value;
+  applyStreamFilter();
+});
+
+// ---- 队列可视化 ----
+function renderQueue(q){
+  var panel=document.querySelector('#queue-panel');
+  var list=document.querySelector('#queue-list');
+  var countEl=document.querySelector('#queue-count');
+  var active=(q.entries||[]).filter(function(e){return ['queued','running','awaiting_approval'].indexOf(e.status)>=0;});
+  countEl.textContent=active.length;
+  if(!active.length){panel.hidden=true;return;}
+  panel.hidden=false;
+  list.innerHTML=active.map(function(e){
+    var elapsed=e.startedAt?fmtElapsed(e.startedAt):fmtElapsed(e.createdAt);
+    var cls='q-'+e.status;
+    var extra=e.error?'<span class="q-error" title="'+esc(e.error)+'">'+esc(e.error.slice(0,40))+(e.error.length>40?'…':'')+'</span>':'';
+    return '<div class="queue-item '+cls+'" data-job="'+esc(e.jobId)+'">'+
+      '<span class="q-job">'+esc(e.jobId)+'</span>'+
+      '<span class="q-status">'+esc(e.status)+'</span>'+
+      '<span class="q-pri">P'+esc(String(e.priority))+'</span>'+
+      '<span class="q-time">'+elapsed+'</span>'+
+      (e.pid?'<span class="q-pid">pid:'+esc(String(e.pid))+'</span>':'')+
+      extra+'</div>';
+  }).join('');
+  list.querySelectorAll('.queue-item').forEach(function(item){
+    item.addEventListener('click',function(){
+      var jobId=item.dataset.job;
+      if(jobId){selected=jobId;refresh();}
+    });
+  });
+}
 
