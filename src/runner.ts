@@ -7,7 +7,7 @@ import { findExecutable, locateExecutable, notFoundMessage, resolveExecutor, typ
 import { resolveRegisteredExecutor } from "./agent-registry.js";
 import { runViaRunner, resolveRunnerPlugin, type RunnerPlugin } from "./runner-plugin.js";
 import { MAX_CAPTURE_BYTES } from "./process-runner.js";
-import { bumpInvocationCount, loadConfig } from "./state.js";
+import { bumpInvocationCount, bumpTokenUsage, loadConfig } from "./state.js";
 import { runProcess, runShell, type ProcessResult } from "./process-runner.js";
 import { saveJson } from "./storage.js";
 import { APP_VERSION } from "./version.js";
@@ -180,16 +180,34 @@ async function invokeBuiltin(
     executor: spec.name,
     stageName: invocationMeta?.stageIndex !== undefined ? `stage_${invocationMeta.stageIndex}` : undefined,
   };
+  // token 用量：usage 汇总事件（filter.flush）经 onLogEvent 累计，进程结束后一次性落 state。
+  let usageTokens = 0;
   const streamOptions = {
     filter,
     filterContext,
     onLogEvent: (evt: StreamLogEvent) => {
+      if (evt.meta?.tokensNum) usageTokens += evt.meta.tokensNum;
       appendEvent(eventsFile, { event: "executor_stream_event", ...evt }, redaction);
     },
   };
 
   const result = await runProcess(command, args, workdir, timeoutMs, outputLog, path.join(directory, "active.pid"), streamOptions);
   appendEvent(eventsFile, { event: "process_finished", returncode: result.code, timedOut: result.timedOut, at: new Date().toISOString() }, redaction);
+  if (usageTokens > 0 && invocationMeta?.jobId) {
+    try {
+      await bumpTokenUsage(workspace, invocationMeta.jobId, usageTokens);
+    } catch (error) {
+      // 用量记账失败不阻塞执行结果；落审计事件便于排障。
+      appendEvent(eventsFile, {
+        event: "token_usage_record_failed",
+        role: invocationMeta.role,
+        stageIndex: invocationMeta.stageIndex,
+        tokens: usageTokens,
+        error: error instanceof Error ? error.message : String(error),
+        at: new Date().toISOString(),
+      }, redaction);
+    }
+  }
   return result;
 }
 

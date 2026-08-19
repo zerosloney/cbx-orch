@@ -400,6 +400,27 @@ export async function bumpInvocationCount(
   await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
 }
 
+/**
+ * 轻量级累计 token 用量：执行器调用结束后把该次流内解析到的 usage 汇入 state。
+ * 与 bumpInvocationCount 同锁假设（调用方持 run.lock 串行）、同写法（不发事件，
+ * 直接同步 SQLite + state.json）。usage 不可解析时调用方不调用，保持 0/缺省。
+ */
+export async function bumpTokenUsage(
+  workspace: string,
+  jobId: string,
+  tokens: number,
+): Promise<void> {
+  if (!Number.isFinite(tokens) || tokens <= 0) return;
+  const state = await loadState(workspace, jobId);
+  const current =
+    typeof state.tokenUsage === "number" && Number.isFinite(state.tokenUsage)
+      ? state.tokenUsage
+      : 0;
+  Object.assign(state, { tokenUsage: current + tokens, updatedAt: now() });
+  await savePersistedState(workspace, jobId, state);
+  await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
+}
+
 /** 任务创建时记录 configuredMaxTurns；Stage 独立覆盖时由 stage-runner 在 stage 启动时写。 */
 export async function recordConfiguredMaxTurns(
   workspace: string,

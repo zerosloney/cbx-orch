@@ -520,6 +520,7 @@ export async function persistedMetrics(workspace: string): Promise<{
   queueDepth: number;
   failedJobs: number;
   retryingJobs: number;
+  tokensUsed: number;
   deliveryFailures: number;
   pendingDeliveries: number;
 }> {
@@ -529,14 +530,18 @@ export async function persistedMetrics(workspace: string): Promise<{
   }>;
   const jobsByStatus: Record<string, number> = {};
   let retryingJobs = 0;
+  let tokensUsed = 0;
   for (const row of rows) {
     const state = JSON.parse(row.state_json) as {
       status?: string;
       phase?: string;
+      tokenUsage?: number;
     };
     const status = state.status ?? "unknown";
     jobsByStatus[status] = (jobsByStatus[status] ?? 0) + 1;
     if (state.phase === "retrying") retryingJobs += 1;
+    if (typeof state.tokenUsage === "number" && Number.isFinite(state.tokenUsage))
+      tokensUsed += state.tokenUsage;
   }
   const queue = readQueueRows(db) ?? { entries: [] };
   return {
@@ -546,6 +551,7 @@ export async function persistedMetrics(workspace: string): Promise<{
     ).length,
     failedJobs: jobsByStatus.failed ?? 0,
     retryingJobs,
+    tokensUsed,
     deliveryFailures: Number(
       (
         db.prepare("SELECT COUNT(*) AS count FROM delivery_failures").get() as {

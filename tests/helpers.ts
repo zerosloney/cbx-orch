@@ -62,6 +62,13 @@ if (jobDir) {
     }
     if (process.env.FAKE_REVIEW_MUTATE === "1") await writeFile(process.cwd() + "/reviewer-change.txt", "untested reviewer change\\n");
   } else {
+    // token usage 观测：FAKE_TOKEN_USAGE=1 时模拟 codebuddy 流（逐消息 usage + 会话汇总 result）。
+    // message_start/message_delta 的逐消息 usage 应被跳过（与会话总量叠加会重复计数）。
+    if (process.env.FAKE_TOKEN_USAGE === "1") {
+      console.log(JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 100, output_tokens: 1 } } }));
+      console.log(JSON.stringify({ type: "message_delta", delta: { type: "text_delta", text: "x" }, usage: { output_tokens: 42 } }));
+      console.log(JSON.stringify({ type: "result", usage: { input_tokens: 30, output_tokens: 20 } }));
+    }
     console.log("fake executor output");
     await writeFile(jobDir + "/handback.md", "fake handback\\n");
     // 并行 stage 模式：按 prompt 中的 "stage <idx>: <name>" 写独立文件 / 指定冲突文件 / 按名失败。
@@ -171,6 +178,7 @@ export async function setupFake(): Promise<{
   delete process.env.FAKE_REQUIRE_FILES;
   delete process.env.FAKE_WAIT_FOR_FILE;
   delete process.env.FAKE_TOUCH_FILE;
+  delete process.env.FAKE_TOKEN_USAGE;
   return { workspace, script };
 }
 

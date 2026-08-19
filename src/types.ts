@@ -155,6 +155,8 @@ export interface JobState {
   stageRetries?: Record<string, { execution: number; fix: number }>;
   /** 累计执行器调用次数（含 stage / review / adaptive manager 全部角色）。P0-2 引入。 */
   executorInvocations?: number;
+  /** 累计 token 用量（执行器流内 usage 解析汇总；不可解析时缺省）。 */
+  tokenUsage?: number;
   /** per-stage 调用次数，key 为 stageIndex。仅 stage executor 计入；reviewer/manager 不计。 */
   stageInvocations?: Record<string, number>;
   /** 创建时配置的 maxTurns（per stage 默认继承 context.maxTurns）。P0-2 引入，便于 UI/result 暴露实际预算。 */

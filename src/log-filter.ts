@@ -16,9 +16,56 @@ function now(): string {
   return new Date().toISOString();
 }
 
+/** 从流 JSON 行提取 token 用量（尽力而为；不可识别返回 null）。
+ *  只认终态/汇总行，避免重复计数：
+ *  - codebuddy/Claude Code 会话汇总：`{ type: "result", usage: { input_tokens, output_tokens } }`
+ *  - codebuddy 轮汇总：`{ type: "turn_end", tokensNum: N }`
+ *  - OpenAI 兼容（qwen）末块：`{ usage: { prompt_tokens, completion_tokens, total_tokens } }`（choices 为空或缺失）
+ *  message_start/message_delta/assistant_message 等逐消息 usage 与会话总量叠加会重复
+ *  计数，一律跳过（宁缺毋错：解析不到就保持缺省，不产出错误数字）。 */
+function extractUsageTokens(obj: Record<string, unknown>): number | null {
+  const type = String(obj.type ?? "");
+  if (type !== "result" && type !== "turn_end" && type !== "") return null;
+  const usage = obj.usage as Record<string, unknown> | undefined;
+  // OpenAI 兼容末块的 choices 是空数组（include_usage）；带内容的 choices 是逐 delta 块，跳过。
+  const choices = obj.choices as unknown[] | undefined;
+  const hasChoiceContent = Array.isArray(choices) && choices.length > 0;
+  if (usage && typeof usage === "object" && !hasChoiceContent) {
+    const total = Number(usage.total_tokens);
+    if (Number.isFinite(total) && total > 0) return total;
+    const input = Number(usage.input_tokens ?? usage.prompt_tokens);
+    const output = Number(usage.output_tokens ?? usage.completion_tokens);
+    if (Number.isFinite(input) && input > 0 && Number.isFinite(output))
+      return input + output;
+  }
+  const tokensNum = Number(obj.tokensNum);
+  if (Number.isFinite(tokensNum) && tokensNum > 0) return tokensNum;
+  return null;
+}
+
+/** usage 汇总事件在 flush 时发出一次（含 meta.tokensNum），避免逐 chunk 事件刷屏。 */
+function usageFlushEvent(
+  tokens: number,
+  ctx: LogFilterContext,
+): StreamLogEvent[] {
+  return [
+    {
+      jobId: ctx.jobId,
+      stageName: ctx.stageName,
+      executor: ctx.executor,
+      timestamp: now(),
+      kind: "system_notice",
+      content: `Token usage: ${tokens}`,
+      meta: { tokensNum: tokens },
+    },
+  ];
+}
+
 /** CodeBuddy stream-json 格式解析器 */
 export class CodeBuddyStreamFilter implements LogEventFilter {
   readonly name = "codebuddy";
+  /** 本轮调用的累计 token 用量；flush() 汇总发出。 */
+  private usageTokens = 0;
 
   processLine(line: string, ctx: LogFilterContext): StreamLogEvent[] {
     const trimmed = line.trim();
@@ -43,6 +90,7 @@ export class CodeBuddyStreamFilter implements LogEventFilter {
       const timestamp = now();
 
       const type = String(obj.type ?? "");
+      this.usageTokens += extractUsageTokens(obj) ?? 0;
 
       if (type === "content_block_delta") {
         const delta = (obj.delta ?? {}) as Record<string, unknown>;
@@ -129,11 +177,20 @@ export class CodeBuddyStreamFilter implements LogEventFilter {
       ];
     }
   }
+
+  flush(ctx: LogFilterContext): StreamLogEvent[] {
+    if (this.usageTokens <= 0) return [];
+    const events = usageFlushEvent(this.usageTokens, ctx);
+    this.usageTokens = 0;
+    return events;
+  }
 }
 
 /** Qwen Code stream-json 格式解析器 */
 export class QwenStreamFilter implements LogEventFilter {
   readonly name = "qwen";
+  /** 本轮调用的累计 token 用量；flush() 汇总发出。 */
+  private usageTokens = 0;
 
   processLine(line: string, ctx: LogFilterContext): StreamLogEvent[] {
     const trimmed = line.trim();
@@ -156,6 +213,7 @@ export class QwenStreamFilter implements LogEventFilter {
       const obj = JSON.parse(trimmed) as Record<string, unknown>;
       const events: StreamLogEvent[] = [];
       const timestamp = now();
+      this.usageTokens += extractUsageTokens(obj) ?? 0;
 
       if (obj.error) {
         const errObj = obj.error as Record<string, unknown>;
@@ -233,6 +291,13 @@ export class QwenStreamFilter implements LogEventFilter {
         },
       ];
     }
+  }
+
+  flush(ctx: LogFilterContext): StreamLogEvent[] {
+    if (this.usageTokens <= 0) return [];
+    const events = usageFlushEvent(this.usageTokens, ctx);
+    this.usageTokens = 0;
+    return events;
   }
 }
 
