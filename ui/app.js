@@ -39,6 +39,7 @@ async function refresh(){
   var jobs=await cbxFetch('/api/jobs?workspace='+ws+'&limit='+UI_JOBS_LIMIT).then(function(r){return r.json()});
   var q=await cbxFetch('/api/queue?workspace='+ws).then(function(r){return r.json()});
   updateCards(jobs,q);
+  renderQueue(q);
   var filtered=filterStatus?jobs.filter(matchesFilter):jobs;
   document.querySelector('#jobs').innerHTML=filtered.map(rowHtml).join('');
   if(filtered.length===0)document.querySelector('#jobs').innerHTML='<tr><td colspan="7" style="text-align:center;color:#555;padding:16px;font-size:13px">没有匹配的'+(filterStatus?'':(jobs.length===0?'任务：创建第一个任务吧。':'任务。'))+'</td></tr>';
@@ -275,6 +276,7 @@ async function loadDetail(id){
 function renderStreamEventCard(evt) {
   var div = document.createElement('div');
   div.className = 'evt-card';
+  div.dataset.eventType = evt.kind || 'text';
   var kind = evt.kind || 'text';
   var content = evt.content || '';
   var meta = evt.meta || {};
@@ -450,24 +452,113 @@ document.querySelector('#btn-resume').addEventListener('click',async function(){
   catch(e){alert('恢复失败：'+(e instanceof Error?e.message:String(e)));}
   finally{btn.disabled=false;}
 });
-// 创建任务：POST /api/jobs（与 CLI `cbx start` 语义一致，后台执行）。
-document.querySelector('#btn-create').addEventListener('click',async function(){
+// 创建任务：快捷输入框 → 打开高级 Modal（预填 task）。
+document.querySelector('#btn-create').addEventListener('click',function(){
   var input=document.querySelector('#new-task');
-  var task=(input.value||'').trim();
-  if(!task){input.focus();return;}
-  var btn=this;btn.disabled=true;
-  try{
-    var ws=encodeURIComponent(currentWorkspace||'');
-    var res=await cbxPost('/api/jobs?workspace='+ws,{task:task});
-    if(!res.ok){var err=await res.json();throw new Error(err.error||('HTTP '+res.status));}
-    input.value='';
-    refresh();
-  }catch(e){alert('创建失败：'+(e instanceof Error?e.message:String(e)));}
-  finally{btn.disabled=false;}
+  document.querySelector('#form-task').value=input.value||'';
+  openCreateModal();
 });
 document.querySelector('#new-task').addEventListener('keydown',function(e){
   if(e.key==='Enter')document.querySelector('#btn-create').click();
 });
+
+// ---- 视图切换 ----
+var currentView='jobs';
+function switchView(view){
+  if(view===currentView)return;
+  currentView=view;
+  document.querySelectorAll('.nav-tab').forEach(function(t){t.classList.toggle('active',t.dataset.view===view);});
+  document.querySelector('#view-jobs').hidden=view!=='jobs';
+  document.querySelector('#view-agents').hidden=view!=='agents';
+  if(view==='agents')loadAgents();
+}
+document.querySelectorAll('.nav-tab').forEach(function(t){
+  t.addEventListener('click',function(){switchView(t.dataset.view);});
+});
+
+// ---- Agents 管理 ----
+async function loadAgents(){
+  var body=document.querySelector('#agents-body');
+  body.innerHTML='<tr><td colspan="5" style="text-align:center;color:#555;padding:16px">加载中…</td></tr>';
+  try{
+    var ws=encodeURIComponent(currentWorkspace||'');
+    var data=await cbxFetch('/api/agents?workspace='+ws).then(function(r){return r.json();});
+    var agents=data.agents||[];
+    var errors=data.errors||[];
+    var errEl=document.querySelector('#agents-errors');
+    if(errors.length){
+      errEl.hidden=false;
+      errEl.innerHTML=errors.map(function(e){return '<div class="agents-error">'+esc(e)+'</div>';}).join('');
+    }else{errEl.hidden=true;errEl.innerHTML='';}
+    if(!agents.length){
+      body.innerHTML='<tr><td colspan="5" style="text-align:center;color:#555;padding:16px">未注册任何 agent。</td></tr>';
+      return;
+    }
+    body.innerHTML=agents.map(function(a){
+      var name=a.aliases&&a.aliases.length?a.name+' ('+a.aliases.join(',')+')':a.name;
+      var avail=a.available;
+      var cls=avail?'agent-ok':'agent-missing';
+      var bin=avail?'ok':'missing';
+      var path=a.command?a.command.join(' '):'—';
+      return '<tr><td>'+esc(name)+'</td><td>'+esc(a.label)+'</td><td>'+esc(a.source)+'</td><td class="'+cls+'">'+bin+'</td><td>'+esc(path)+'</td></tr>';
+    }).join('');
+    // 同步更新创建表单 executor 下拉（只列可用 agent）
+    var sel=document.querySelector('#form-executor');
+    if(sel){
+      var opts='<option value="">默认（codebuddy）</option>';
+      agents.filter(function(a){return a.available;}).forEach(function(a){
+        opts+='<option value="'+esc(a.name)+'">'+esc(a.label)+' ('+esc(a.name)+')</option>';
+      });
+      sel.innerHTML=opts;
+    }
+  }catch(e){
+    body.innerHTML='<tr><td colspan="5" style="text-align:center;color:#ff8d8d;padding:16px">加载失败：'+esc(e instanceof Error?e.message:String(e))+'</td></tr>';
+  }
+}
+document.querySelector('#btn-refresh-agents').addEventListener('click',loadAgents);
+
+// ---- 增强创建任务（Modal）----
+function openCreateModal(){
+  document.querySelector('#create-modal').hidden=false;
+  document.querySelector('#form-task').focus();
+}
+function closeCreateModal(){
+  document.querySelector('#create-modal').hidden=true;
+  document.querySelector('#form-task').value='';
+  document.querySelector('#form-executor').value='';
+  document.querySelector('#form-permission').value='auto';
+  (/** @type {HTMLInputElement} */ (document.querySelector('#form-review'))).checked=false;
+  (/** @type {HTMLInputElement} */ (document.querySelector('#form-isolated'))).checked=false;
+  document.querySelector('#form-maxturns').value='5';
+  document.querySelector('#new-task').value='';
+}
+document.querySelector('#btn-form-cancel').addEventListener('click',closeCreateModal);
+document.querySelector('.modal-backdrop').addEventListener('click',closeCreateModal);
+document.querySelector('#btn-form-create').addEventListener('click',async function(){
+  var btn=this;btn.disabled=true;
+  try{
+    var task=(document.querySelector('#form-task').value||'').trim();
+    if(!task){document.querySelector('#form-task').focus();return;}
+    var body={task:task};
+    var ex=document.querySelector('#form-executor').value;
+    if(ex)body.executor=ex;
+    body.permission_mode=document.querySelector('#form-permission').value;
+    if((/** @type {HTMLInputElement} */ (document.querySelector('#form-review'))).checked)body.review=true;
+    if((/** @type {HTMLInputElement} */ (document.querySelector('#form-isolated'))).checked)body.isolated=true;
+    var mt=Number(document.querySelector('#form-maxturns').value);
+    if(Number.isFinite(mt)&&mt>0)body.max_turns=mt;
+    var ws=encodeURIComponent(currentWorkspace||'');
+    var res=await cbxPost('/api/jobs?workspace='+ws,body);
+    if(!res.ok){var err=await res.json();throw new Error(err.error||('HTTP '+res.status));}
+    closeCreateModal();
+    refresh();
+  }catch(e){alert('创建失败：'+(e instanceof Error?e.message:String(e)));}
+  finally{btn.disabled=false;}
+});
+document.querySelector('#create-modal').addEventListener('keydown',function(e){
+  if(e.key==='Escape')closeCreateModal();
+});
+
 loadWorkspaces().then(refresh);
 // intentional-simple: 全量轮询 refresh 与 SSE 增量推送并存——SSE 写入 DOM 后 refresh 会重建，存在冗余渲染。
 // 单用户本地 UI 的带宽/CPU 可忽略；升级路径：SSE 只更新内存状态，由轻量定时器统一渲染。
@@ -494,6 +585,7 @@ es.onmessage=function(e){
     var card=renderStreamEventCard(p.event?p:d);
     if(card){
       stream.appendChild(card);
+      applyStreamFilter();
       stream.scrollTop=stream.scrollHeight;
       while(stream.children.length>200)stream.removeChild(stream.firstChild);
     }
@@ -502,6 +594,7 @@ es.onmessage=function(e){
   var status=p.status||'';
   var div=document.createElement('div');
   div.className='evt';
+  div.dataset.eventType='status';
   var sStatus=esc(status);
   var txt='<span class="t">'+fmt(d.at||new Date().toISOString())+'</span>';
   if(p.jobId)txt+='<span class="s-'+sStatus+'"><b>'+esc(p.jobId)+'</b></span> ';
@@ -510,8 +603,67 @@ es.onmessage=function(e){
   if(p.phase)txt+=' · '+esc(p.phase);
   div.innerHTML=txt;
   stream.appendChild(div);
+  applyStreamFilter();
   stream.scrollTop=stream.scrollHeight;
   while(stream.children.length>200)stream.removeChild(stream.firstChild);
 };
 if(window.addEventListener){window.addEventListener('beforeunload',function(){es.close();});}
+
+// ---- 事件流过滤 / 搜索 ----
+var streamFilter='all',streamQuery='';
+function applyStreamFilter(){
+  var q=streamQuery.toLowerCase();
+  document.querySelectorAll('#stream .evt, #stream .evt-card').forEach(function(el){
+    var type=el.dataset.eventType||'';
+    var visible=true;
+    if(streamFilter!=='all'){
+      if(streamFilter==='status')visible=type==='status';
+      else if(streamFilter==='stream')visible=type==='thought'||type==='tool_use'||type==='error'||type==='text';
+      else visible=type===streamFilter;
+    }
+    if(visible&&q){visible=(el.textContent||'').toLowerCase().indexOf(q)>=0;}
+    el.style.display=visible?'':'none';
+  });
+}
+document.querySelectorAll('.stream-filter').forEach(function(btn){
+  btn.addEventListener('click',function(){
+    document.querySelectorAll('.stream-filter').forEach(function(b){b.classList.remove('active');});
+    btn.classList.add('active');
+    streamFilter=btn.dataset.filter;
+    applyStreamFilter();
+  });
+});
+document.querySelector('#stream-search').addEventListener('input',function(e){
+  streamQuery=(/** @type {HTMLInputElement} */ (e.target)).value;
+  applyStreamFilter();
+});
+
+// ---- 队列可视化 ----
+function renderQueue(q){
+  var panel=document.querySelector('#queue-panel');
+  var list=document.querySelector('#queue-list');
+  var countEl=document.querySelector('#queue-count');
+  var active=(q.entries||[]).filter(function(e){return ['queued','running','awaiting_approval'].indexOf(e.status)>=0;});
+  countEl.textContent=active.length;
+  if(!active.length){panel.hidden=true;return;}
+  panel.hidden=false;
+  list.innerHTML=active.map(function(e){
+    var elapsed=e.startedAt?fmtElapsed(e.startedAt):fmtElapsed(e.createdAt);
+    var cls='q-'+e.status;
+    var extra=e.error?'<span class="q-error" title="'+esc(e.error)+'">'+esc(e.error.slice(0,40))+(e.error.length>40?'…':'')+'</span>':'';
+    return '<div class="queue-item '+cls+'" data-job="'+esc(e.jobId)+'">'+
+      '<span class="q-job">'+esc(e.jobId)+'</span>'+
+      '<span class="q-status">'+esc(e.status)+'</span>'+
+      '<span class="q-pri">P'+esc(String(e.priority))+'</span>'+
+      '<span class="q-time">'+elapsed+'</span>'+
+      (e.pid?'<span class="q-pid">pid:'+esc(String(e.pid))+'</span>':'')+
+      extra+'</div>';
+  }).join('');
+  list.querySelectorAll('.queue-item').forEach(function(item){
+    item.addEventListener('click',function(){
+      var jobId=item.dataset.job;
+      if(jobId){selected=jobId;refresh();}
+    });
+  });
+}
 

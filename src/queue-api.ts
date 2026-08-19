@@ -3,7 +3,6 @@ import * as queue from "./queue.js";
 import type { QueueEntry, QueueFile, QueueRuntime } from "./queue.js";
 import {
   savePersistedStateAndFinishQueue,
-  savePersistedStateAndQueue,
   persistedMetrics,
   prunePersistedData,
 } from "./storage.js";
@@ -14,37 +13,13 @@ import {
   jobDir,
   pruneExpiredJobs,
 } from "./state.js";
-import { saveJson } from "./storage.js";
-import { publishEvent } from "./observability.js";
+import { scanOrphanWorktrees, type OrphanWorktree } from "./worktree.js";
 import type { JobState } from "./types.js";
-
-async function saveStateAndQueue(
-  workspace: string,
-  jobId: string,
-  state: Record<string, unknown>,
-  queueFile: QueueFile,
-): Promise<void> {
-  const previousStatus = (await loadState(workspace, jobId)).status;
-  await savePersistedStateAndQueue(workspace, jobId, state, queueFile);
-  await saveJson(path.join(jobDir(workspace, jobId), "state.json"), state);
-  try {
-    await publishEvent(workspace, "job.state_changed", {
-      jobId,
-      previousStatus,
-      status: state.status,
-      phase: state.phase,
-      attempt: state.attempt,
-    });
-  } catch {
-    /* durable state and queue transaction must not depend on delivery */
-  }
-}
 
 const queueRuntime: QueueRuntime = {
   loadConfig,
   loadState,
   writeState,
-  saveStateAndQueue,
   finishQueueEntryPersisted: savePersistedStateAndFinishQueue,
   jobDir,
 };
@@ -60,6 +35,8 @@ export async function health(
 ): Promise<{
   status: "ok";
   metrics: Awaited<ReturnType<typeof persistedMetrics>>;
+  /** 孤儿 worktree（job 已被清理而 worktree 遗留）。清理入口：`cbx clean --orphans`。 */
+  worktreeOrphans: OrphanWorktree[];
 }> {
   const workspace = path.resolve(workspaceInput);
   const governance = (await loadConfig(workspace)).governance;
@@ -68,7 +45,11 @@ export async function health(
   if (governance?.pruneJobs && retentionDays)
     await pruneExpiredJobs(workspace, retentionDays);
   await prunePersistedData(workspace, retentionDays);
-  return { status: "ok", metrics: await persistedMetrics(workspace) };
+  return {
+    status: "ok",
+    metrics: await persistedMetrics(workspace),
+    worktreeOrphans: await scanOrphanWorktrees(workspace),
+  };
 }
 
 export async function serveQueue(

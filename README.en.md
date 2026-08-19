@@ -25,6 +25,8 @@ Job data is stored under `.cbx/jobs/<job-id>/` in the target repo: task spec, st
 
 ## What it does differently
 
+Handing a task to an agent CLI directly is a one-shot session: a crash loses the work, batches need hand-holding, and the agent grades its own homework. cbx turns delegation into a durable, verifiable, concurrent pipeline:
+
 - **Durable by design.** SQLite WAL + versioned migration, monotonic event `seq` with replay, durable delivery outbox, worker heartbeats with reclaim circuit breaker, service leases with fencing tokens. A crash mid-execution leaves a resumable job, not a mystery.
 - **Executor-agnostic.** One orchestrator over five coding CLIs with a plugin system (`executor: "./plugin.mjs"`). Not tied to any single vendor.
 - **Verification gates.** Tests + an independent review pass + a structured completion-evidence gate + optional approval gates (`beforeRun` / `beforeComplete`). `done` means the evidence exists, not just that an agent claimed success.

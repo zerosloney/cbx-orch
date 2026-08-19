@@ -1,17 +1,12 @@
-import { spawnSync } from "node:child_process";
+import { BUILTIN_SPECS, specToBuiltin, type BuildArgsOptions } from "./specs.js";
+import { expandPathCandidates, firstExisting } from "./locate.js";
 
-// 内置执行器适配层：把 codebuddy / opencode / omp / cline / qwen 等编码 CLI 收敛到统一的调用契约。
-// 每个 adapter 描述：发现二进制的方式 + 如何把 (prompt, permissionMode, maxTurns) 翻译成 CLI 参数。
-
-export interface BuildArgsOptions {
-  prompt: string;
-  permissionMode: string;
-  maxTurns: number;
-}
+// 内置执行器适配层：codebuddy / opencode / omp / cline / qwen 的声明式定义见 specs.ts（BUILTIN_SPECS），
+// 本模块负责由 spec 派生执行器表、按名/别名解析、以及二进制查找（envVar 覆盖 → PATH 解析 → 兜底 spawn）。
 
 export interface BuiltinExecutor {
-  /** 注册名，写入 .cbx.json 的 executor 字段或 --executor */
-  name: "codebuddy" | "opencode" | "omp" | "cline" | "qwen";
+  /** 注册名，写入 .cbx.json 的 executor 字段或 --executor；内置之外可由 agent-registry 注册文件 spec */
+  name: string;
   /** 别名，resolveExecutor 同样命中（oh-my-pi 指向 omp，非独立二进制） */
   aliases: string[];
   /** 显示名，注入到提示词与用户可见的错误消息中 */
@@ -20,81 +15,14 @@ export interface BuiltinExecutor {
   envVar: string;
   /** PATH 上依次尝试的二进制名 */
   candidates: string[];
+  /** 路由元数据：auto 路由做任务能力匹配；缺省表示不可作为 auto 候选。 */
+  capabilities?: string[];
   /** 把统一入参翻译成该 CLI 的具体参数序列（不含二进制本身） */
   buildArgs(opts: BuildArgsOptions): string[];
 }
 
-// permissionMode 中表示「自动放行」的语义值：opencode 用 --auto、cline 用 --auto-approve true 表达。
-const AUTO_MODES = new Set(["auto", "dontAsk"]);
-
-export const BUILTIN_EXECUTORS: readonly BuiltinExecutor[] = [
-  {
-    name: "codebuddy",
-    aliases: ["cbc"],
-    label: "CodeBuddy",
-    envVar: "CBX_CODEBUDDY",
-    candidates: ["codebuddy", "cbc"],
-    buildArgs: ({ prompt, permissionMode, maxTurns }) => [
-      "-p",
-      "--output-format", "stream-json",
-      "--max-turns", String(maxTurns),
-      "--permission-mode", permissionMode,
-      prompt,
-    ],
-  },
-  {
-    name: "opencode",
-    aliases: [],
-    label: "OpenCode",
-    envVar: "CBX_OPENCODE",
-    candidates: ["opencode"],
-    buildArgs: ({ prompt, permissionMode }) => {
-      const args = ["run", "--format", "json", prompt];
-      if (AUTO_MODES.has(permissionMode)) args.push("--auto");
-      return args;
-    },
-  },
-  {
-    name: "omp",
-    aliases: ["oh-my-pi"], // oh-my-pi 是 omp 的扩展框架，仍由 omp 二进制执行
-    label: "Oh My Pi",
-    envVar: "CBX_OMP",
-    candidates: ["omp"],
-    // omp 官方 CLI 文档未公开 permission/auto flag；非交互 -p 默认按 omp 自身权限行事。
-    // intentional-simple: 不追加 auto flag，缺已知天花板——待 omp 暴露权限 flag 后补 `-a` 类参数。
-    buildArgs: ({ prompt }) => ["-p", "--mode", "json", prompt],
-  },
-  {
-    name: "cline",
-    aliases: [],
-    label: "Cline",
-    envVar: "CBX_CLINE",
-    candidates: ["cline"],
-    buildArgs: ({ prompt, permissionMode }) => {
-      const args = ["--json", prompt, "--auto-approve", String(AUTO_MODES.has(permissionMode))];
-      if (permissionMode === "plan") args.push("--plan");
-      return args;
-    },
-  },
-  {
-    name: "qwen",
-    aliases: [],
-    label: "Qwen Code",
-    envVar: "CBX_QWEN",
-    candidates: ["qwen"],
-    // qwen 非交互模式（--prompt）按官方 headless 文档映射（https://qwenlm.github.io/qwen-code-docs/zh/users/features/headless/）：
-    // - maxTurns → --max-session-turns（交互轮数预算）
-    // - plan → --approval-mode plan；auto/dontAsk → --yolo（auto-approve all）
-    // 不传 --sandbox：cbx 需执行器在 worktree 内自由读写，沙箱会阻碍任务执行。
-    // 无人值守场景建议在宿主环境设 QWEN_CODE_UNATTENDED_RETRY=1（子进程经 runProcess 继承 process.env）。
-    buildArgs: ({ prompt, permissionMode, maxTurns }) => {
-      const args = ["--prompt", prompt, "--output-format", "stream-json", "--max-session-turns", String(maxTurns)];
-      if (permissionMode === "plan") args.push("--approval-mode", "plan");
-      else if (AUTO_MODES.has(permissionMode)) args.push("--yolo");
-      return args;
-    },
-  },
-];
+export const BUILTIN_EXECUTORS: readonly BuiltinExecutor[] =
+  BUILTIN_SPECS.map(specToBuiltin);
 
 const BY_NAME: ReadonlyMap<string, BuiltinExecutor> = (() => {
   const map = new Map<string, BuiltinExecutor>();
@@ -110,37 +38,57 @@ export function resolveExecutor(name: string): BuiltinExecutor | undefined {
   return BY_NAME.get(name);
 }
 
-// intentional-simple: 进程级缓存，只对单进程内重复调用生效。环境变量/安装变更需重启进程。
-const resolvedPathCache = new Map<string, string>();
+function wrapCommand(candidate: string): string[] {
+  const lower = candidate.toLowerCase();
+  if (lower.endsWith(".ps1"))
+    return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", candidate];
+  if (lower.endsWith(".mjs") || lower.endsWith(".cjs") || lower.endsWith(".js"))
+    return [process.execPath, candidate];
+  return [candidate];
+}
 
 /**
- * 返回 [command, ...rest] 形式的可执行命令：
- * - 优先采用 envVar 指定的覆盖路径；
- * - Windows 上用 PowerShell Get-Command 解析 bin 名的真实来源（结果缓存，避免每次 spawn 同步阻塞事件循环）；
- * - 兜底直接把候选名交给 spawn；
+ * .cmd/.bat 处理：Node 20+ 出于安全（CVE-2024-27980）禁止无 shell 直接 spawn，
+ * 会抛 EINVAL。npm 全局安装的 shim 三件套（无扩展/.cmd/.ps1）同目录必有 .ps1，
+ * 重定向到 .ps1 走 powershell 包装（参数由 spawn 数组传递，无 cmd 转义/注入问题）；
+ * 旁边没有 .ps1 的自定义 .cmd 保持原样（调用方需自行通过 envVar 指向 .ps1/.exe）。
+ */
+async function resolveShim(candidate: string): Promise<string[]> {
+  const lower = candidate.toLowerCase();
+  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
+    const ps1 = `${candidate.slice(0, -4)}.ps1`;
+    if (await firstExisting([ps1])) return wrapCommand(ps1);
+  }
+  return wrapCommand(candidate);
+}
+
+/** 二进制未找到时的统一指引（探测与执行路径共用同一模板，避免口径漂移）。 */
+export function notFoundMessage(spec: BuiltinExecutor): string {
+  return `找不到 ${spec.label} (${spec.candidates.join("/")})。请安装 ${spec.label}，或设置 ${spec.envVar}。`;
+}
+
+/**
+ * 定位可执行命令，未找到返回 null（区别于 findExecutable 的裸名兜底）：
+ * - envVar 覆盖路径必须真实存在；
+ * - candidates 按 PATH×PATHEXT 展开探测（与 agent 探测共用 locate.ts 的同一算法）；
  * - .ps1/.js/.mjs/.cjs 会被包装成 powershell/node 调用。
  */
-export function findExecutable(spec: BuiltinExecutor): string[] {
+export async function locateExecutable(spec: BuiltinExecutor): Promise<string[] | null> {
   const configured = process.env[spec.envVar];
-  const candidates: string[] = [];
-  if (configured) candidates.push(configured);
-  if (process.platform === "win32") {
-    const primary = spec.candidates[0];
-    let resolved = resolvedPathCache.get(primary);
-    if (resolved === undefined) {
-      const ps = spawnSync("powershell.exe", ["-NoProfile", "-Command", `(Get-Command ${primary}).Source`], { encoding: "utf8", windowsHide: true });
-      resolved = ps.status === 0 ? String(ps.stdout).trim() : "";
-      resolvedPathCache.set(primary, resolved);
-    }
-    if (resolved) candidates.push(resolved);
+  if (configured) {
+    return (await firstExisting([configured])) ? resolveShim(configured) : null;
   }
-  candidates.push(...spec.candidates);
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    const lower = candidate.toLowerCase();
-    if (lower.endsWith(".ps1")) return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", candidate];
-    if (lower.endsWith(".mjs") || lower.endsWith(".cjs") || lower.endsWith(".js")) return [process.execPath, candidate];
-    return [candidate];
+  for (const name of spec.candidates) {
+    const found = await firstExisting(expandPathCandidates(name));
+    if (found) return resolveShim(found);
   }
-  throw new Error(`找不到 ${spec.label} (${spec.candidates.join("/")})。请安装 ${spec.label}，或设置 ${spec.envVar}。`);
+  return null;
+}
+
+/**
+ * 返回 [command, ...rest] 形式的可执行命令；未定位到时兜底返回首个候选名，
+ * 交给 spawn 报错（调用方需要确定性失败时应优先使用 locateExecutable）。
+ */
+export async function findExecutable(spec: BuiltinExecutor): Promise<string[]> {
+  return (await locateExecutable(spec)) ?? wrapCommand(spec.candidates[0]);
 }

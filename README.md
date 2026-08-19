@@ -10,6 +10,19 @@
 
 任务状态、事件流、测试日志、diff、审查报告全部落盘，进程崩溃后仍可恢复与续跑。
 
+## 为什么需要 cbx
+
+直接在终端里跑 agent CLI，每次都是一次性会话：进程一崩任务就丢，批量任务只能逐个盯，做完好坏全凭 agent 自评，换一家 CLI 工作流推倒重来。cbx 把委派变成一条可持久化、可验证、可并发的流水线：
+
+- **崩溃可恢复**：SQLite（WAL + 版本化 migration）持久化状态与事件流，worker 心跳 + 回收熔断 + fencing token 租约；执行中途崩溃留下的是可续跑的任务，不是黑盒。
+- **执行器无关**：一个编排器驾驭 5 个内置 CLI 适配器，新 agent 放一个 JSON spec 即接入（`auto` 按能力声明路由），不绑定任何一家厂商。
+- **完成有证据**：测试门 + 独立审查 agent 交叉验证 + SHA-256 完成证据门 + 可选审批门（`beforeRun`/`beforeComplete`）。`done` 意味着证据存在，而不是 agent 宣称完成。
+- **隔离与并发**：默认 git worktree 隔离、脏基线检测；队列 + 并发上限 + 批量波次，`dependsOn` 依赖层在独立 worktree 中物理并行。
+- **治理内建**：严格配置 schema、事件脱敏、插件路径/SHA-256 白名单、依赖锁文件守卫、保留期清理。
+- **agent 原生控制面**：CLI / Web UI / TUI / MCP（stdio + HTTP）/ ZCode·Claude Code 插件五入口共享同一套原语——宿主 agent 可把长任务委派给 detached worker 增量轮询。
+
+边界（有意为之）：`--isolated` 只是 Git worktree 隔离，**不是 OS 沙箱**；OS 级隔离外包给 runner 插件（容器）。单机单用户、仅绑定回环；远程访问须置于带认证的反向代理之后。
+
 ## 快速开始
 
 全局安装（发布到 npm 后）：
@@ -145,6 +158,46 @@ graph LR
 - 通过对应的 env 变量可覆盖二进制路径，常用于测试或指向自定义脚本。
 - 自定义插件：`executor` 指向一个 ESM 模块路径，模块导出 `run(request)`，返回 `{ code, output, timedOut }`。示例见 `plugins/example-executor.mjs`。
 
+### Agent 注册与自动发现
+
+全部 executor（含内置 5 个适配器，声明见 `src/executors/specs.ts` 的 `BUILTIN_SPECS`）共用同一 AgentSpec 契约：新增 CLI 无需改代码，在工作区 `.cbx/agents/`（项目级，可随仓库分发）或 `~/.cbx/agents/`（用户级）放置一个 JSON spec 即可被自动发现并注册。同名时 workspace 覆盖用户级；内置注册名不可被覆盖。
+
+```json
+{
+  "name": "gemini",
+  "aliases": ["gca"],
+  "label": "Gemini CLI",
+  "candidates": ["gemini"],
+  "args": ["-p", "{prompt}", "--output-format", "json"],
+  "autoArgs": ["--yolo"],
+  "planArgs": ["--approval-mode", "plan"],
+  "maxTurnsArg": "--max-turns",
+  "capabilities": ["backend", "python"],
+  "version": "1.0.0"
+}
+```
+
+字段说明：`name`（小写字母/数字/`._-`，不可与内置冲突）、`aliases`（可选，`resolveExecutor` 同样命中）、`label`（显示名，用于阶段日志与错误消息）、`candidates`（PATH 上依次尝试的二进制名）、`args`（参数模板，支持 `{prompt}` / `{maxTurns}` / `{permissionMode}` / `{auto}` 占位符，`{auto}` 在 `auto`/`dontAsk` 模式渲染为 `"true"`、否则 `"false"`）、`autoArgs`（`permissionMode` 为 `auto`/`dontAsk` 时追加）、`planArgs`（`plan` 时追加）、`maxTurnsArg`（设置后追加 `<maxTurnsArg> <maxTurns>`）、`envVar`（可选，缺省由 name 派生为 `CBX_<NAME>`，用于覆盖二进制路径）、`capabilities`（可选，声明该 agent 擅长的领域/技术标签，如 `["frontend","react"]`；供 `auto` 路由做能力匹配，缺省表示不可作为自动路由候选）。
+
+注册后 `--executor gemini` 与 stage 的 `executor: "gemini"` 直接可用。查看注册结果与二进制可用性：
+
+```powershell
+node dist\src\cli.js agents            # 表格视图
+node dist\src\cli.js agents --json     # 机器可读
+curl http://127.0.0.1:4173/api/agents  # Web UI 同款数据
+```
+
+spec 校验失败（缺字段、name 冲突）不会中断其他 agent 的注册，错误会聚合展示在 `cbx agents` 输出与 `/api/agents` 响应的 `errors` 字段中。
+
+### Agent 路由（executor=auto）
+
+除显式声明执行器外，可把 `executor` 或 `review_executor` 设为保留字 `auto`，在执行任务前由路由层自动选 agent：按各 agent 声明的 `capabilities` 与任务文本做确定性能力匹配打分（命中标签越多分越高，大小写不敏感；ASCII 单词用词边界匹配避免误伤子串，中文/短语走整串包含），从已探测可用（`available=true`）的 agent 中选得分最高者。声明式执行器永远优先，路由只兜底「未指定 / 指定 `auto`」的任务（渐进式，向后兼容）。路由决策（选中者、得分、排名、说明）落盘到任务 `context.json` 的 `routing` 字段供审计。
+
+- 无可用 agent 命中能力时回退默认 `codebuddy`。
+- 启用审查且 `review_executor=auto`（或 `executor=auto` 且未显式指定审查者）时，路由一个**避开主执行 agent** 的交叉验证者做独立审查；找不到其它可路由 agent 时回退主执行 agent 自审。
+- 路由打分是纯函数（无 I/O、无 LLM），见 `src/executors/route.ts`。
+- 设计取舍：路由层**不**引入 LLM 打分作为第二档。路由发生在选定执行器之前——LLM 评分自身就得先调起一个 agent（用谁评？这本身就是一个路由决策）；且路由决策落盘 `context.routing` 供审计，LLM 输出不可复现会破坏审计语义，还给每次任务创建增加延迟与外部失败模式。需要 LLM 参与决策时走 adaptive 模式（manager executor 每轮决策），两层职责不混合。
+
 ## 项目配置
 
 在目标仓库根目录放置 `.cbx.json`，命令行参数会覆盖配置文件：
@@ -275,6 +328,7 @@ curl http://127.0.0.1:4173/api/jobs/<id>/agent.log?since=0 # agent.log 增量(�
 curl http://127.0.0.1:4173/api/queue # 队列状态
 curl http://127.0.0.1:4173/healthz # 健康检查
 curl http://127.0.0.1:4173/api/metrics # 运行指标
+curl http://127.0.0.1:4173/openapi.json # OpenAPI 3.1 文档（全部端点的机器可读说明书，无需鉴权）
 
 # Web UI 写操作（POST，需鉴权；浏览器自动携带 HttpOnly cookie，curl 需 Authorization: Bearer <token>）
 
@@ -307,7 +361,17 @@ node dist/src/cli.js health --workspace .
 
 ````
 
-`ui` 命令支持 token 鉴权：通过 `--ui-token <token>` 或 `.cbx.json` 的 `ui.token` 配置。启用后浏览器首次加载首页会收到 `cbx_token` HttpOnly cookie（`SameSite=Strict`），同源 API/SSE 请求自动携带——token 不进入页面 JS 作用域、不出现在 URL 查询串，降低 XSS 与浏览器历史泄露面。curl/API 客户端仍可用 `Authorization: Bearer <token>` 请求头；SSE 兼容旧客户端可传 `?token=<token>` 查询参数。`/healthz` 健康检查和 `/` 首页无需 token。
+`ui` 命令支持 token 鉴权：通过 `--ui-token <token>` 或 `.cbx.json` 的 `ui.token` 配置。启用后浏览器首次加载首页会收到 `cbx_token` HttpOnly cookie（`SameSite=Strict`），同源 API/SSE 请求自动携带——token 不进入页面 JS 作用域、不出现在 URL 查询串，降低 XSS 与浏览器历史泄露面。curl/API 客户端仍可用 `Authorization: Bearer <token>` 请求头；SSE 兼容旧客户端可传 `?token=<token>` 查询参数。`/healthz` 健康检查、`/` 首页与 `/openapi.json` 无需 token。
+
+### OpenAPI 文档
+
+`cbx ui` 启动的 server 在 `/openapi.json` 暴露 OpenAPI 3.1 文档，覆盖全部 REST 端点（路径/入参/响应/鉴权方式）。可直接粘进 [Swagger Editor](https://editor.swagger.io) 浏览，或用生成器产出客户端 SDK：
+
+```powershell
+npx @openapitools/openapi-generator-cli generate -i http://127.0.0.1:4173/openapi.json -g python -o ./cbx-client
+```
+
+文档与 `ui.ts` 路由的一致性由 `tests/openapi.test.ts` 保证：文档声明的端点必须真实可响应、未声明的路径返回 404，新增端点时两边同步更新。
 
 ### SSE 事件回放
 
@@ -352,7 +416,7 @@ node dist/src/cli.js health --workspace .
 
 `notifications.webhook` 接收任务状态事件；事件同时会写入 `.cbx/events.ndjson`。`notifications.filters` 可细分订阅：`events`（事件 type）、`jobIds`（payload.jobId）、`statuses`（payload.status）为可选字符串数组，AND 语义（多条件同时满足才投递）；未配置的维度不限制；不匹配的事件不入 outbox（本地 events.ndjson 仍全量）。webhook 和 OTLP 都支持 `timeoutMs`、`maxRetries`、`retryBaseMs`：待投递消息先进入 SQLite durable outbox，状态写入不等待网络；后台按有限指数退避投递，进程提前退出时由后续 cbx 进程继续处理。最终失败会落到 `.cbx/delivery-failures.ndjson`。任务 span 始终写入 `.cbx/telemetry.ndjson` 供本地排查；启用 `telemetry` 后才会按 OTLP/HTTP JSON ...
 
-任务状态、队列、通知 outbox 和死信的权威数据存储在 `.cbx/state.sqlite`（WAL 模式、版本化 migration）；首次访问会无损导入旧的 `.cbx/jobs/*/state.json`、`queue.json` 和 `delivery-failures.ndjson`。这些 JSON/NDJSON artifact 会继续保留以便人工查看，但不再作为调度一致性的依据；worker 终态与对应队列条目、以及 retry 的状态重置与重新入队，均在同一 SQLite transaction 提交。常驻 `serve` 使用带续期与 fencing token 的工作区单实例租约，发现另一个存活实例会拒绝启动，丢失租约则主动停止。`/healthz` 与 `/api/metrics`、以及 `cbx health` 返回队列深度、任务状态计数、失败/重试、待投递和死信计数，且不包含任务正文。
+任务状态、队列、通知 outbox 和死信的权威数据存储在 `.cbx/state.sqlite`（WAL 模式、版本化 migration）；首次访问会无损导入旧的 `.cbx/jobs/*/state.json`、`queue.json` 和 `delivery-failures.ndjson`。这些 JSON/NDJSON artifact 会继续保留以便人工查看，但不再作为调度一致性的依据；worker 终态与对应队列条目、以及 retry 的状态重置与重新入队，均在同一 SQLite transaction 提交。常驻 `serve` 使用带续期与 fencing token 的工作区单实例租约，发现另一个存活实例会拒绝启动，丢失租约则主动停止。`/healthz` 与 `/api/metrics`、以及 `cbx health` 返回队列深度、任务状态计数、失败/重试、token 用量（`tokensUsed`，汇总执行器流内 usage 汇总行；解析不到的执行器保持缺省）、待投递和死信计数，且不包含任务正文。健康检查同时巡检孤儿 worktree（job 已被清理而 `.<repo>.cbx-worktrees/` 下遗留的目录，含 stage 变体）：发现即列出路径，`cbx clean --orphans` 一键清理（优先 `git worktree remove`，best-effort 删除 `cbx/<jobId>` 分支；jobDir 仍在的终态遗留不受影响，仍走 `cbx clean <jobId>`）。
 
 ## Executor 插件
 

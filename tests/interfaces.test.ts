@@ -112,7 +112,10 @@ test("Web UI exposes read-only local routes without wildcard CORS", async () => 
             scrollTop: 0,
           };
         },
-        querySelectorAll() {
+        querySelectorAll(selector: string) {
+          // 顶层只把事件绑定到 view 标签/过滤器按钮上（在真实 DOM 为空时是 no-op，
+          // 不提供 addEventListener 的 mock 行会抛 TypeError）。elapsed 刷新走 tr.job。
+          if (selector === ".nav-tab" || selector === ".stream-filter") return [];
           return [terminalRow, runningRow];
         },
         createElement() {

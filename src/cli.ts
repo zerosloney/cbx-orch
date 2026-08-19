@@ -6,6 +6,8 @@ import {
   approveJobAndStart,
   cancelJob,
   cleanupWorktree,
+  removeOrphanWorktrees,
+  scanOrphanWorktrees,
   dispatchQueue,
   createJob,
   executeJob,
@@ -32,9 +34,11 @@ import { runReviewGate, stopReviewGateHook } from "./review-gate.js";
 import { runTui, startWebUi, summarizeWorkspace } from "./ui.js";
 import { parseCliArgs, type CliArgs } from "./cli-args.js";
 import { runBatch } from "./batch.js";
+import { discoverAgents } from "./agent-registry.js";
 import { APP_VERSION } from "./version.js";
 import {
   isInteractive,
+  renderAgentsTable,
   renderExport,
   renderHealth,
   renderJobDetail,
@@ -308,6 +312,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     }
     return;
   }
+  if (command === "agents") {
+    const { probes, errors } = await discoverAgents(workspace);
+    if (isInteractive() && !parsed.has("--json"))
+      console.log(renderAgentsTable(probes, errors));
+    else print({ agents: probes, errors });
+    return;
+  }
   if (command === "dispatch") {
     print(await dispatchQueue(workspace));
     return;
@@ -508,6 +519,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     return;
   }
   if (command === "clean") {
+    if (parsed.has("--orphans")) {
+      // 巡检并清理孤儿 worktree（job 已被清理而 worktree 遗留）；只删无 jobDir 的条目。
+      const orphans = await scanOrphanWorktrees(workspace);
+      if (orphans.length === 0) {
+        print({ orphans: 0, removed: [], failed: [] });
+        return;
+      }
+      const { removed, failed } = await removeOrphanWorktrees(workspace, orphans);
+      print({ orphans: orphans.length, removed, failed });
+      return;
+    }
     const jobId = requireJobId(parsed, command);
     print({ jobId, cleaned: await cleanupWorktree(workspace, jobId) });
     return;

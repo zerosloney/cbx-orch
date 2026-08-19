@@ -41,7 +41,6 @@ export interface QueueRuntime {
   loadConfig(workspace: string): Promise<{ maxConcurrent?: number }>;
   loadState(workspace: string, jobId: string): Promise<{ status: string; [key: string]: unknown }>;
   writeState(workspace: string, jobId: string, updates: Record<string, unknown>): Promise<unknown>;
-  saveStateAndQueue(workspace: string, jobId: string, state: Record<string, unknown>, queue: QueueFile): Promise<void>;
   finishQueueEntryPersisted(workspace: string, jobId: string, state: Record<string, unknown>, queueId: string): Promise<void>;
   jobDir(workspace: string, jobId: string): string;
 }

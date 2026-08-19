@@ -8,10 +8,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-// MCP coverage 补测后（Windows/Node 24 实测 lines 77.42% / branch 66.97% / functions 83.66%），
-// 按 ~3% 跨平台余量上调 floor 防 flaky；后续补测应继续同步上调。
-// mcp-server.ts 分支覆盖从 56.3% 提升至 84.9%，新增 tests/mcp-coverage.test.ts（27 个测试）。
-const thresholds = { lines: 74, branch: 64, functions: 80 };
+// 度量口径：--test-coverage-include=dist/** 只统计项目编译产物（src + ui + tests）。
+// 此前未设 include 时，V8 coverage 会把子进程执行的外部脚本一并计入分母——
+// 测试临时目录里的 fake executor fixture（AppData/Local/Temp/cbx-*）与宿主机上
+// 真实 codebuddy 插件 hook（~/.codebuddy/plugins/cache/**）——这些文件随机器环境
+// 变化、不可复现，曾把整体覆盖率虚拉低约 20 个百分点（77% → 97%）。
+// 修正后实测（Windows/Node 22.16，718 测试）：lines 97.07% / branch 88.83% / functions 93.50%，
+// 按 ~3% 跨平台余量设置 floor 防 flaky；后续补测应继续同步上调。
+const thresholds = { lines: 94, branch: 85, functions: 90 };
 
 const testsDirectory = path.join(root, "dist", "tests");
 let testFiles;
@@ -33,6 +37,7 @@ const result = spawnSync(process.execPath, [
   "--test",
   "--test-concurrency=2",
   "--experimental-test-coverage",
+  "--test-coverage-include=dist/**",
   `--test-coverage-lines=${thresholds.lines}`,
   `--test-coverage-branches=${thresholds.branch}`,
   `--test-coverage-functions=${thresholds.functions}`,

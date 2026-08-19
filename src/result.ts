@@ -84,6 +84,7 @@ export async function writeResult(workspace: string, jobId: string, state: JobSt
     // P0-2: 暴露执行器调用预算/实际消耗，让 UI 展示"内外 loop 乘数"实际值。
     configuredMaxTurns: state.configuredMaxTurns ?? context.maxTurns ?? null,
     executorInvocations: state.executorInvocations ?? 0,
+    tokenUsage: state.tokenUsage ?? 0,
     stageInvocations: state.stageInvocations ?? {},
     updatedAt: now(),
   });

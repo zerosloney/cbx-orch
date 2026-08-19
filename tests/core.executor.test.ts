@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -22,6 +22,8 @@ import {
   savePersistedStateAndQueue,
   BUILTIN_EXECUTORS,
   findExecutable,
+  invokeExecutor,
+  locateExecutable,
 } from "./helpers.js";
 
 test("persistent serve loop reclaims dead workers on startup and stops cleanly", async () => {
@@ -440,14 +442,21 @@ test("notifications.filters accepts valid config and rejects invalid shapes", as
   assert.equal((await loadConfig(workspace)).notifications?.filters, undefined);
 });
 
-test("findExecutable wraps .ps1/.js/.mjs/.cjs paths via env override and passes plain binaries as-is", () => {
+test("findExecutable wraps .ps1/.js/.mjs/.cjs paths via env override and passes plain binaries as-is", async () => {
   const spec = BUILTIN_EXECUTORS[0]; // codebuddy
   const envVar = spec.envVar;
   const saved = process.env[envVar];
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cbx-wrap-"));
+  // locateExecutable 要求 envVar 覆盖路径真实存在；不存在的路径由 invokeExecutor 短路报错（另有测试锁定）。
+  const makeFile = async (name: string) => {
+    const file = path.join(dir, name);
+    await writeFile(file, "", "utf8");
+    return file;
+  };
   try {
     // .ps1 → powershell.exe 包装
-    process.env[envVar] = path.join(os.tmpdir(), "fake-codebuddy.ps1");
-    assert.deepEqual(findExecutable(spec), [
+    process.env[envVar] = await makeFile("fake-codebuddy.ps1");
+    assert.deepEqual(await findExecutable(spec), [
       "powershell.exe",
       "-NoProfile",
       "-ExecutionPolicy",
@@ -457,29 +466,29 @@ test("findExecutable wraps .ps1/.js/.mjs/.cjs paths via env override and passes 
     ]);
 
     // 大写扩展名同样识别（lowercase 归一化）
-    process.env[envVar] = "C:\\fake\\CODEBUDDY.PS1";
-    assert.deepEqual(findExecutable(spec), [
+    process.env[envVar] = await makeFile("CODEBUDDY.PS1");
+    assert.deepEqual(await findExecutable(spec), [
       "powershell.exe",
       "-NoProfile",
       "-ExecutionPolicy",
       "Bypass",
       "-File",
-      "C:\\fake\\CODEBUDDY.PS1",
+      process.env[envVar],
     ]);
 
     // .mjs / .cjs / .js → node 包装
     for (const ext of [".mjs", ".cjs", ".js"]) {
-      process.env[envVar] = path.join(os.tmpdir(), `fake-codebuddy${ext}`);
+      process.env[envVar] = await makeFile(`fake-codebuddy${ext}`);
       assert.deepEqual(
-        findExecutable(spec),
+        await findExecutable(spec),
         [process.execPath, process.env[envVar]],
         `${ext} should resolve to node wrapper`,
       );
     }
 
     // 无扩展名 / 未知扩展 → 原样返回
-    process.env[envVar] = "/usr/local/bin/codebuddy";
-    assert.deepEqual(findExecutable(spec), ["/usr/local/bin/codebuddy"]);
+    process.env[envVar] = await makeFile("codebuddy-plain");
+    assert.deepEqual(await findExecutable(spec), [process.env[envVar]]);
   } finally {
     if (saved === undefined) delete process.env[envVar];
     else process.env[envVar] = saved;
@@ -487,10 +496,10 @@ test("findExecutable wraps .ps1/.js/.mjs/.cjs paths via env override and passes 
 });
 
 test(
-  "findExecutable resolves binary via PowerShell Get-Command on win32",
+  "findExecutable resolves binary on PATH via PATHEXT expansion on win32",
   { skip: process.platform !== "win32" },
   async () => {
-    // 临时 .cmd 放进 PATH，验证 Get-Command 解析完整路径 + .cmd 不做包装
+    // 临时 .cmd 放进 PATH，验证 PATH×PATHEXT 展开解析完整路径 + .cmd 不做包装
     const tmpBin = await mkdtemp(path.join(os.tmpdir(), "cbx-fakebin-"));
     const fakePath = path.join(tmpBin, "fakebin.cmd");
     await writeFile(fakePath, "@echo off\r\n", "utf8");
@@ -503,11 +512,11 @@ test(
     const savedPath = process.env.PATH;
     process.env.PATH = tmpBin + path.delimiter + (savedPath ?? "");
     try {
-      const result = findExecutable(spec);
+      const result = await findExecutable(spec);
       assert.equal(
         result[0].toLowerCase(),
         fakePath.toLowerCase(),
-        `expected Get-Command to resolve ${fakePath}, got ${result[0]}`,
+        `expected PATH expansion to resolve ${fakePath}, got ${result[0]}`,
       );
       assert.equal(result.length, 1, ".cmd should pass through unwrapped");
     } finally {
@@ -516,3 +525,98 @@ test(
     }
   },
 );
+
+test("locateExecutable returns null for missing envVar override and PATH misses", async () => {
+  const spec = {
+    ...BUILTIN_EXECUTORS[0],
+    candidates: ["cbx-no-such-bin-xyz"],
+    envVar: "CBX_TEST_LOCATE_MISS",
+  };
+  const saved = process.env[spec.envVar];
+  try {
+    // envVar 指向不存在的路径 → null（区别于 findExecutable 的裸名兜底）
+    process.env[spec.envVar] = path.join(os.tmpdir(), "cbx-no-such-file.xyz");
+    assert.equal(await locateExecutable(spec), null);
+    // envVar 未设置且 PATH 未命中 → null
+    delete process.env[spec.envVar];
+    assert.equal(await locateExecutable(spec), null);
+    // findExecutable 兜底行为不变：返回裸名交给 spawn
+    assert.deepEqual(await findExecutable(spec), ["cbx-no-such-bin-xyz"]);
+  } finally {
+    if (saved === undefined) delete process.env[spec.envVar];
+    else process.env[spec.envVar] = saved;
+  }
+});
+
+test(
+  "locateExecutable redirects npm .cmd shims to sibling .ps1 (win32 spawn EINVAL guard)",
+  { skip: process.platform !== "win32" },
+  async () => {
+    // Node 20+ 无 shell spawn .cmd 抛 EINVAL（CVE-2024-27980）；npm shim 三件套
+    // 同目录必有 .ps1，必须重定向，否则 Windows 上 npm 全局安装的 agent 全部无法本地执行。
+    const tmpBin = await mkdtemp(path.join(os.tmpdir(), "cbx-shim-"));
+    const cmdPath = path.join(tmpBin, "shimagent.cmd");
+    const ps1Path = path.join(tmpBin, "shimagent.ps1");
+    await writeFile(cmdPath, "@echo off\r\n", "utf8");
+    await writeFile(ps1Path, "Write-Output ok\r\n", "utf8");
+    const spec = {
+      ...BUILTIN_EXECUTORS[0],
+      candidates: ["shimagent"],
+      envVar: "CBX_TEST_SHIM_AGENT",
+    };
+    delete process.env[spec.envVar];
+    const savedPath = process.env.PATH;
+    process.env.PATH = tmpBin + path.delimiter + (savedPath ?? "");
+    try {
+      // PATH 命中 .cmd → 重定向到同目录 .ps1 的 powershell 包装
+      assert.deepEqual(await locateExecutable(spec), [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ps1Path,
+      ]);
+      // envVar 直接指向 .cmd → 同样重定向
+      process.env[spec.envVar] = cmdPath;
+      assert.deepEqual((await locateExecutable(spec))![5], ps1Path);
+      // 旁边没有 .ps1 的自定义 .cmd → 保持原样（调用方自行用 envVar 指向 .ps1/.exe）
+      await unlink(ps1Path);
+      assert.deepEqual(await locateExecutable(spec), [cmdPath]);
+    } finally {
+      process.env.PATH = savedPath;
+      delete process.env[spec.envVar];
+    }
+  },
+);
+
+test("invokeExecutor returns friendly Chinese guidance instead of raw ENOENT", async () => {
+  // 本地 spawn 前短路：二进制缺失时不再依赖 spawn 的英文 ENOENT，
+  // 而是返回与 cbx agents 探测一致的中文指引（事件流形状保持 process_started/finished 配对）。
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-enoent-"));
+  const directory = path.join(workspace, ".cbx", "jobs", "enoent-probe");
+  await mkdir(directory, { recursive: true });
+  const spec = BUILTIN_EXECUTORS[0];
+  const saved = process.env[spec.envVar];
+  process.env[spec.envVar] = path.join(workspace, "no-such-binary.cmd");
+  try {
+    const result = await invokeExecutor(
+      "codebuddy",
+      workspace,
+      directory,
+      workspace,
+      "hi",
+      "auto",
+      5,
+      1_000,
+    );
+    assert.equal(result.code, -1);
+    assert.ok(result.output.includes(`${spec.envVar} 指向的路径不存在`), result.output);
+    const events = await readFile(path.join(directory, "events.ndjson"), "utf8");
+    assert.match(events, /"event":"process_started"/);
+    assert.match(events, /"event":"process_finished","returncode":-1/);
+  } finally {
+    if (saved === undefined) delete process.env[spec.envVar];
+    else process.env[spec.envVar] = saved;
+  }
+});

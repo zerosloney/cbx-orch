@@ -3,10 +3,11 @@ import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectExecutorPlugin, type ExecutorResult, type ExecutorRequest } from "./executor.js";
-import { findExecutable, resolveExecutor, type BuiltinExecutor } from "./executors/builtin.js";
+import { findExecutable, locateExecutable, notFoundMessage, resolveExecutor, type BuiltinExecutor } from "./executors/builtin.js";
+import { resolveRegisteredExecutor } from "./agent-registry.js";
 import { runViaRunner, resolveRunnerPlugin, type RunnerPlugin } from "./runner-plugin.js";
 import { MAX_CAPTURE_BYTES } from "./process-runner.js";
-import { bumpInvocationCount, loadConfig } from "./state.js";
+import { bumpInvocationCount, bumpTokenUsage, loadConfig } from "./state.js";
 import { runProcess, runShell, type ProcessResult } from "./process-runner.js";
 import { saveJson } from "./storage.js";
 import { APP_VERSION } from "./version.js";
@@ -126,12 +127,29 @@ async function invokeBuiltin(
   redaction?: EventRedaction,
   runner?: RunnerPlugin,
 ): Promise<ProcessResult> {
-  const executable = findExecutable(spec);
-  const args = [...executable.slice(1), ...spec.buildArgs({ prompt, permissionMode, maxTurns })];
-  const command = executable[0];
+  const located = await locateExecutable(spec);
+  // runner 模式：命令由插件在容器内执行，host 的 PATH 探测不代表容器环境，保持兜底裸名。
+  const executable = located ?? (runner ? await findExecutable(spec) : null);
   const eventsFile = path.join(directory, "events.ndjson");
   const outputLog = path.join(directory, "agent.log");
   appendEvent(eventsFile, { event: "executor_metadata", source: "builtin", name: spec.name, version: APP_VERSION, at: new Date().toISOString() }, redaction);
+  // 本地 spawn 前确认二进制存在：直接短路返回中文指引，而不是让 spawn 报英文 ENOENT。
+  // 事件流形状与 spawn 失败路径一致（process_started + process_finished -1）。
+  if (!executable) {
+    const configured = process.env[spec.envVar];
+    const output = configured
+      ? `${spec.envVar} 指向的路径不存在：${configured}`
+      : notFoundMessage(spec);
+    const args = spec.buildArgs({ prompt, permissionMode, maxTurns });
+    appendEvent(eventsFile, { event: "process_started", command: [spec.candidates[0], ...args], cwd: workdir, at: new Date().toISOString() }, redaction);
+    appendEvent(eventsFile, { event: "process_finished", returncode: -1, timedOut: false, at: new Date().toISOString() }, redaction);
+    // 短路后本路径无后续写入，闭环时立即落盘（常规路径由 process_finished 后的统一 flush 负责）。
+    flushEventBuffer(eventsFile);
+    await appendFile(outputLog, `${output}\n退出码：-1\n超时：false\n`, "utf8");
+    return { code: -1, timedOut: false, output };
+  }
+  const args = [...executable.slice(1), ...spec.buildArgs({ prompt, permissionMode, maxTurns })];
+  const command = executable[0];
   appendEvent(eventsFile, { event: "process_started", command: [command, ...args], cwd: workdir, runner: runner ? runner.manifest.name : undefined, at: new Date().toISOString() }, redaction);
   // runner 模式：命令由插件执行（容器内），host 不 spawn 子进程，无流式事件与 active.pid。
   if (runner) {
@@ -162,16 +180,34 @@ async function invokeBuiltin(
     executor: spec.name,
     stageName: invocationMeta?.stageIndex !== undefined ? `stage_${invocationMeta.stageIndex}` : undefined,
   };
+  // token 用量：usage 汇总事件（filter.flush）经 onLogEvent 累计，进程结束后一次性落 state。
+  let usageTokens = 0;
   const streamOptions = {
     filter,
     filterContext,
     onLogEvent: (evt: StreamLogEvent) => {
+      if (evt.meta?.tokensNum) usageTokens += evt.meta.tokensNum;
       appendEvent(eventsFile, { event: "executor_stream_event", ...evt }, redaction);
     },
   };
 
   const result = await runProcess(command, args, workdir, timeoutMs, outputLog, path.join(directory, "active.pid"), streamOptions);
   appendEvent(eventsFile, { event: "process_finished", returncode: result.code, timedOut: result.timedOut, at: new Date().toISOString() }, redaction);
+  if (usageTokens > 0 && invocationMeta?.jobId) {
+    try {
+      await bumpTokenUsage(workspace, invocationMeta.jobId, usageTokens);
+    } catch (error) {
+      // 用量记账失败不阻塞执行结果；落审计事件便于排障。
+      appendEvent(eventsFile, {
+        event: "token_usage_record_failed",
+        role: invocationMeta.role,
+        stageIndex: invocationMeta.stageIndex,
+        tokens: usageTokens,
+        error: error instanceof Error ? error.message : String(error),
+        at: new Date().toISOString(),
+      }, redaction);
+    }
+  }
   return result;
 }
 
@@ -208,7 +244,9 @@ export async function invokeExecutor(executor: string, workspace: string, direct
       }, redaction);
     }
   }
-  const builtin = resolveExecutor(executor);
+  // 先查内置注册表，再查 agent-registry 的文件 spec（.cbx/agents/*.json），都未命中才走 ESM 插件路径。
+  const builtin =
+    resolveExecutor(executor) ?? (await resolveRegisteredExecutor(executor, workspace));
   if (builtin)
     return invokeBuiltin(
       builtin,

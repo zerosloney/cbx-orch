@@ -13,7 +13,7 @@ import { writeResult } from "./result.js";
 import { createExecutorContextPack } from "./context-pack.js";
 import { createHumanGate } from "./human-gate.js";
 import { contextArtifacts } from "./artifacts.js";
-import { resolveExecutor } from "./executors/builtin.js";
+import { resolveAgentLabel } from "./agent-registry.js";
 import type {
   JobContext,
   JobState,
@@ -98,7 +98,7 @@ export async function performContextHandshake(
   const beforeHandshake = await snapshotDiff(workdir);
   const executor =
     context.taskContract?.stages?.[0]?.executor ?? context.executor;
-  const label = resolveExecutor(executor)?.label ?? "编码代理";
+  const label = await resolveAgentLabel(executor, workspace);
   const handshakeStage = context.taskContract?.stages?.[0] ?? {
     name: "context-handshake",
     executor,
