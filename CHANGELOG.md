@@ -2,7 +2,9 @@
 
 This project follows [Semantic Versioning](https://semver.org/). User-visible behavior changes, security fixes, and migration requirements are recorded here before a release.
 
-## Unreleased
+## 1.0.0 — 2026-08-19
+
+首个稳定版本。核心能力已齐备并经多轮加固：五大入口（CLI/TUI/Web UI/MCP/插件）、多执行器适配与声明式注册、agent capabilities 路由、持久化队列与审批门、token 用量可观测、孤儿 worktree 巡检、多平台 CI（Ubuntu/Windows/macOS）与覆盖率门槛（94/85/90）。
 
 - Feature: **孤儿 worktree 巡检与清理**。worker 崩溃或任务被 purge 后，`.<repo>.cbx-worktrees/` 下可能遗留无主 worktree 目录。`cbx health` / `/healthz` / `/api/metrics` 现巡检并报告（`worktreeOrphans`，`<jobId>-stage-<index>` 条目剥离后缀归属同一 jobId）；`cbx clean --orphans` 一键清理（优先 `git worktree remove --force` 同步 git 元数据，回退 rm -rf；best-effort 删除 `cbx/<jobId>` 分支并 `git worktree prune`）。孤儿判定为保守口径——仅当 `.cbx/jobs/<jobId>` 目录已不存在（job 数据已清理）；jobDir 仍在的终态遗留仍走既有 `cbx clean <jobId>`，不会被误删。
 - Feature: **Token 用量可观测**。执行器流式输出中的 usage 汇总行（codebuddy/Claude Code 会话 `result`、`turn_end` 轮汇总、OpenAI 兼容末块）由 `CodeBuddyStreamFilter`/`QwenStreamFilter` 解析，进程结束时汇总入 `state.tokenUsage` 并经单条 `system_notice` 流事件（`meta.tokensNum`）落盘审计；`result.json` 暴露 `tokenUsage`，`/api/metrics` 与 `cbx health` 聚合 `tokensUsed`。只认终态汇总行——逐消息 usage（`message_start`/`message_delta`）与会话总量叠加会重复计数，一律跳过；解析不到保持缺省，不产出错误数字（多执行器成本对比的口径基础）。
