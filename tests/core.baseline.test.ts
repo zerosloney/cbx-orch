@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { processAlive } from "../src/lock.js";
 import {
   setupFake,
   createJob,
@@ -178,6 +179,21 @@ test("queue pause/resume and retry recover failed work", async () => {
   )
     await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal((await loadState(workspace, job.jobId)).status, "failed");
+  // retry 前等首个 worker 进程真正退出：worker 完成任务后会在自身进程内 dispatchQueue
+  // 接力下一个 queued entry（finishQueueEntry 特性）。若该接力 dispatch 在 retry 事务提交
+  // 后才读队列快照，会以旧 env 快照抢先 spawn 执行进程，retry 后仍读到 FAKE_EXIT_SEQUENCE=1。
+  // 10s 上限兜底 pid 复用导致的 processAlive 误报。
+  const workerPid = Number(
+    await readFile(path.join(job.directory, "pid"), "utf8").catch(() => ""),
+  );
+  const workerExitDeadline = Date.now() + 10_000;
+  while (
+    Number.isSafeInteger(workerPid) &&
+    workerPid > 0 &&
+    Date.now() < workerExitDeadline &&
+    processAlive(workerPid)
+  )
+    await new Promise((resolve) => setTimeout(resolve, 50));
   process.env.FAKE_EXIT_SEQUENCE = "0";
   const retry = await retryQueueJob(workspace, job.jobId, 10);
   assert.equal(retry.priority, 10);

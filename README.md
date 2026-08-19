@@ -10,6 +10,19 @@
 
 任务状态、事件流、测试日志、diff、审查报告全部落盘，进程崩溃后仍可恢复与续跑。
 
+## 为什么需要 cbx
+
+直接在终端里跑 agent CLI，每次都是一次性会话：进程一崩任务就丢，批量任务只能逐个盯，做完好坏全凭 agent 自评，换一家 CLI 工作流推倒重来。cbx 把委派变成一条可持久化、可验证、可并发的流水线：
+
+- **崩溃可恢复**：SQLite（WAL + 版本化 migration）持久化状态与事件流，worker 心跳 + 回收熔断 + fencing token 租约；执行中途崩溃留下的是可续跑的任务，不是黑盒。
+- **执行器无关**：一个编排器驾驭 5 个内置 CLI 适配器，新 agent 放一个 JSON spec 即接入（`auto` 按能力声明路由），不绑定任何一家厂商。
+- **完成有证据**：测试门 + 独立审查 agent 交叉验证 + SHA-256 完成证据门 + 可选审批门（`beforeRun`/`beforeComplete`）。`done` 意味着证据存在，而不是 agent 宣称完成。
+- **隔离与并发**：默认 git worktree 隔离、脏基线检测；队列 + 并发上限 + 批量波次，`dependsOn` 依赖层在独立 worktree 中物理并行。
+- **治理内建**：严格配置 schema、事件脱敏、插件路径/SHA-256 白名单、依赖锁文件守卫、保留期清理。
+- **agent 原生控制面**：CLI / Web UI / TUI / MCP（stdio + HTTP）/ ZCode·Claude Code 插件五入口共享同一套原语——宿主 agent 可把长任务委派给 detached worker 增量轮询。
+
+边界（有意为之）：`--isolated` 只是 Git worktree 隔离，**不是 OS 沙箱**；OS 级隔离外包给 runner 插件（容器）。单机单用户、仅绑定回环；远程访问须置于带认证的反向代理之后。
+
 ## 快速开始
 
 全局安装（发布到 npm 后）：
@@ -183,6 +196,7 @@ spec 校验失败（缺字段、name 冲突）不会中断其他 agent 的注册
 - 无可用 agent 命中能力时回退默认 `codebuddy`。
 - 启用审查且 `review_executor=auto`（或 `executor=auto` 且未显式指定审查者）时，路由一个**避开主执行 agent** 的交叉验证者做独立审查；找不到其它可路由 agent 时回退主执行 agent 自审。
 - 路由打分是纯函数（无 I/O、无 LLM），见 `src/executors/route.ts`。
+- 设计取舍：路由层**不**引入 LLM 打分作为第二档。路由发生在选定执行器之前——LLM 评分自身就得先调起一个 agent（用谁评？这本身就是一个路由决策）；且路由决策落盘 `context.routing` 供审计，LLM 输出不可复现会破坏审计语义，还给每次任务创建增加延迟与外部失败模式。需要 LLM 参与决策时走 adaptive 模式（manager executor 每轮决策），两层职责不混合。
 
 ## 项目配置
 
@@ -402,7 +416,7 @@ npx @openapitools/openapi-generator-cli generate -i http://127.0.0.1:4173/openap
 
 `notifications.webhook` 接收任务状态事件；事件同时会写入 `.cbx/events.ndjson`。`notifications.filters` 可细分订阅：`events`（事件 type）、`jobIds`（payload.jobId）、`statuses`（payload.status）为可选字符串数组，AND 语义（多条件同时满足才投递）；未配置的维度不限制；不匹配的事件不入 outbox（本地 events.ndjson 仍全量）。webhook 和 OTLP 都支持 `timeoutMs`、`maxRetries`、`retryBaseMs`：待投递消息先进入 SQLite durable outbox，状态写入不等待网络；后台按有限指数退避投递，进程提前退出时由后续 cbx 进程继续处理。最终失败会落到 `.cbx/delivery-failures.ndjson`。任务 span 始终写入 `.cbx/telemetry.ndjson` 供本地排查；启用 `telemetry` 后才会按 OTLP/HTTP JSON ...
 
-任务状态、队列、通知 outbox 和死信的权威数据存储在 `.cbx/state.sqlite`（WAL 模式、版本化 migration）；首次访问会无损导入旧的 `.cbx/jobs/*/state.json`、`queue.json` 和 `delivery-failures.ndjson`。这些 JSON/NDJSON artifact 会继续保留以便人工查看，但不再作为调度一致性的依据；worker 终态与对应队列条目、以及 retry 的状态重置与重新入队，均在同一 SQLite transaction 提交。常驻 `serve` 使用带续期与 fencing token 的工作区单实例租约，发现另一个存活实例会拒绝启动，丢失租约则主动停止。`/healthz` 与 `/api/metrics`、以及 `cbx health` 返回队列深度、任务状态计数、失败/重试、待投递和死信计数，且不包含任务正文。
+任务状态、队列、通知 outbox 和死信的权威数据存储在 `.cbx/state.sqlite`（WAL 模式、版本化 migration）；首次访问会无损导入旧的 `.cbx/jobs/*/state.json`、`queue.json` 和 `delivery-failures.ndjson`。这些 JSON/NDJSON artifact 会继续保留以便人工查看，但不再作为调度一致性的依据；worker 终态与对应队列条目、以及 retry 的状态重置与重新入队，均在同一 SQLite transaction 提交。常驻 `serve` 使用带续期与 fencing token 的工作区单实例租约，发现另一个存活实例会拒绝启动，丢失租约则主动停止。`/healthz` 与 `/api/metrics`、以及 `cbx health` 返回队列深度、任务状态计数、失败/重试、token 用量（`tokensUsed`，汇总执行器流内 usage 汇总行；解析不到的执行器保持缺省）、待投递和死信计数，且不包含任务正文。健康检查同时巡检孤儿 worktree（job 已被清理而 `.<repo>.cbx-worktrees/` 下遗留的目录，含 stage 变体）：发现即列出路径，`cbx clean --orphans` 一键清理（优先 `git worktree remove`，best-effort 删除 `cbx/<jobId>` 分支；jobDir 仍在的终态遗留不受影响，仍走 `cbx clean <jobId>`）。
 
 ## Executor 插件
 

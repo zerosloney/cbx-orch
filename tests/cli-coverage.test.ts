@@ -381,3 +381,191 @@ test("cli: continue 默认走后台入队路径", async () => {
   const payload = JSON.parse(stdout);
   assert.equal(payload.status, "queued");
 });
+
+test("cli: run --task 内联创建任务并执行（无 --job-id 分支）", async () => {
+  const { workspace } = await setupFake();
+  // FAKE_JOB_DIR 未指向具体 jobDir：fake 执行器只输出文本退出 0，验证内联 createJob
+  // + flag 解析 + executeJob 主路径被走到（状态以实际输出为准）。
+  const { code, stdout } = run(
+    [
+      "run",
+      "--task",
+      "inline 创建任务",
+      "--test",
+      'node -e "process.exit(0)"',
+      "--workspace",
+      workspace,
+      "--ci",
+    ],
+    { FAKE_JOB_DIR: "" },
+  );
+  assert.ok(code === 0 || code === 2, `unexpected exit: ${code}`);
+  const payload = JSON.parse(stdout);
+  assert.ok(typeof payload.jobId === "string" && payload.jobId.length > 0);
+  assert.ok(typeof payload.status === "string");
+});
+
+test("cli: run --queue-entry-id worker 路径（心跳文件与收尾清理）", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({
+    workspace,
+    task: "worker 路径覆盖",
+    review: false,
+    isolated: false,
+    executor: "codebuddy",
+    permissionMode: "auto",
+    maxTurns: 5,
+    timeoutMs: 30_000,
+    maxRetries: 0,
+    jobId: "cli-cov-worker",
+  });
+  const { code, stdout } = run(
+    [
+      "run",
+      "--job-id",
+      job.jobId,
+      "--queue-entry-id",
+      "qe-cov-1",
+      "--workspace",
+      workspace,
+    ],
+    { FAKE_JOB_DIR: job.directory },
+  );
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(stdout).status, "done");
+});
+
+test("cli: queue pause / resume 子命令", async () => {
+  const workspace = await tempWorkspace();
+  const { code: pauseCode, stdout: pauseOut } = run([
+    "queue",
+    "pause",
+    "--workspace",
+    workspace,
+  ]);
+  assert.equal(pauseCode, 0);
+  assert.equal(JSON.parse(pauseOut).paused, true);
+
+  const { code: resumeCode, stdout: resumeOut } = run([
+    "queue",
+    "resume",
+    "--workspace",
+    workspace,
+  ]);
+  assert.equal(resumeCode, 0);
+  assert.equal(JSON.parse(resumeOut).paused, false);
+
+  const { code: listCode, stdout: listOut } = run([
+    "queue",
+    "--workspace",
+    workspace,
+    "--json",
+  ]);
+  assert.equal(listCode, 0);
+  assert.ok(JSON.parse(listOut).entries);
+});
+
+test("cli: ws 汇总与 batch 参数校验错误路径", async () => {
+  const workspace = await tempWorkspace();
+  const { code: wsCode, stdout: wsOut } = run([
+    "ws",
+    "--workspace",
+    workspace,
+  ]);
+  assert.equal(wsCode, 0);
+  const wsPayload = JSON.parse(wsOut);
+  assert.equal(wsPayload.workspaces.length, 1);
+  assert.equal(wsPayload.default, workspace);
+
+  const { code: batchIdCode, stderr: batchIdErr } = run([
+    "batch",
+    "--job-id",
+    "x",
+    "--workspace",
+    workspace,
+  ]);
+  assert.equal(batchIdCode, 1);
+  assert.match(batchIdErr, /不支持 --job-id/);
+
+  const { code: batchEmptyCode, stderr: batchEmptyErr } = run([
+    "batch",
+    "--workspace",
+    workspace,
+  ]);
+  assert.equal(batchEmptyCode, 1);
+  assert.match(batchEmptyErr, /至少提供一个任务/);
+});
+
+test("cli: continue --foreground 前台续跑", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({
+    workspace,
+    task: "foreground 续跑覆盖",
+    review: false,
+    isolated: false,
+    executor: "codebuddy",
+    permissionMode: "auto",
+    maxTurns: 5,
+    timeoutMs: 30_000,
+    maxRetries: 0,
+    jobId: "cli-cov-fg",
+  });
+  run(["cancel", job.jobId, "--workspace", workspace]);
+  const { code, stdout } = run(
+    [
+      "continue",
+      job.jobId,
+      "--workspace",
+      workspace,
+      "--message",
+      "前台续跑",
+      "--foreground",
+    ],
+    { FAKE_JOB_DIR: job.directory },
+  );
+  assert.equal(code, 0);
+  const payload = JSON.parse(stdout);
+  assert.ok(["done", "needs_fix", "failed"].includes(payload.status));
+});
+
+test("cli: clean --orphans 巡检与清理", async () => {
+  const workspace = await tempWorkspace();
+  // 无 git 仓库 / 无 worktree：返回空结果（--orphans 主路径）。
+  const { code, stdout } = run([
+    "clean",
+    "--orphans",
+    "--workspace",
+    workspace,
+  ]);
+  assert.equal(code, 0);
+  const payload = JSON.parse(stdout);
+  assert.equal(payload.orphans, 0);
+  assert.deepEqual(payload.removed, []);
+});
+
+test("cli: health --all 单 workspace 失败不阻断汇总（catch 分支）", async () => {
+  const wsOk = await tempWorkspace();
+  const wsBad = await tempWorkspace();
+  // 非法 .cbx.json（strict schema 拒绝未知字段）让 health(wsBad) 抛错走 catch。
+  await writeFile(
+    path.join(wsBad, ".cbx.json"),
+    JSON.stringify({ unknownField: true }),
+    "utf8",
+  );
+  const { code, stdout } = run([
+    "health",
+    "--all",
+    "--workspace",
+    wsOk,
+    "--workspace",
+    wsBad,
+  ]);
+  assert.equal(code, 0);
+  const payload = JSON.parse(stdout);
+  assert.equal(payload.workspaces.length, 2);
+  const bad = payload.workspaces.find(
+    (w: { workspace: string }) => w.workspace === wsBad,
+  );
+  assert.equal(bad.status, "error");
+  assert.ok(typeof bad.error === "string" && bad.error.length > 0);
+});
