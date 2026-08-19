@@ -15,6 +15,8 @@ export interface BuiltinExecutor {
   envVar: string;
   /** PATH 上依次尝试的二进制名 */
   candidates: string[];
+  /** 路由元数据：auto 路由做任务能力匹配；缺省表示不可作为 auto 候选。 */
+  capabilities?: string[];
   /** 把统一入参翻译成该 CLI 的具体参数序列（不含二进制本身） */
   buildArgs(opts: BuildArgsOptions): string[];
 }

@@ -22,6 +22,7 @@ import { parseReviewVerdict } from "./verdict.js";
 import { createHumanGate } from "./human-gate.js";
 import { resolveAgentLabel } from "./agent-registry.js";
 import { contextArtifacts, AUDIT_CANDIDATE } from "./artifacts.js";
+import { ROUTE_AUTO, routeReviewExecutor } from "./executors/route.js";
 import type {
   JobContext,
   JobState,
@@ -316,8 +317,17 @@ export async function runStage(params: {
       : "";
     const reviewExtra = `只审查上下文包 artifacts 中列出的证据，不要修改代码。将结果写入 ${path.join(writeDir, "review.md")}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL（供人工阅读）。同时把机器可读判定写入 ${path.join(writeDir, "review.json")}，严格 JSON：{"version":1,"verdict":"PASS"或"FAIL"}（推荐；未写则 cbx 回退解析 review.md 首行）。若失败源于需求歧义、公共契约冲突或基线问题，第二行写 CLASSIFICATION: SEMANTIC；普通代码缺陷无需 classification。按严重程度列出问题、文件和行号。${structuredAuditExtra}`;
     let reviewAgent: ProcessResult;
-    const reviewExecutor =
-      stage.reviewExecutor ?? context.reviewExecutor ?? stage.executor;
+    let reviewExecutor = stage.reviewExecutor ?? context.reviewExecutor ?? stage.executor;
+    // reviewExecutor="auto"：路由一个避开主执行 agent 的交叉验证者（独立审查，避免「自己审自己」）；
+    // 找不到可路由的其它 agent 时回退主执行 agent 自审（reviewLabel 仍为该 agent）。
+    if (reviewExecutor === ROUTE_AUTO) {
+      const reviewDecision = await routeReviewExecutor({
+        task: context.taskText ?? stage.task ?? "",
+        workspace,
+        primary: stage.executor,
+      });
+      if (reviewDecision) reviewExecutor = reviewDecision.executor;
+    }
     const reviewLabel = await resolveAgentLabel(reviewExecutor, workspace, "审查代理");
     const auditCandidate = path.join(writeDir, AUDIT_CANDIDATE);
     const reviewJsonCandidate = path.join(writeDir, "review.json");

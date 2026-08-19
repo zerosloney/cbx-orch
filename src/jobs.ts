@@ -26,7 +26,8 @@ import {
 } from "./git-ops.js";
 import { DEFAULT_TOKEN_BUDGET, type ContextBudget } from "./context-pack.js";
 import { APP_VERSION } from "./version.js";
-import type { JobContext, JobState, TaskContract } from "./types.js";
+import type { JobContext, JobState, TaskContract, Json } from "./types.js";
+import { ROUTE_AUTO, routeStageExecutor } from "./executors/route.js";
 
 /** 规范化 .cbx.json 的 context.tokenBudget；缺失角色用默认值填充。 */
 function normalizeContextBudget(raw: unknown): ContextBudget {
@@ -166,12 +167,43 @@ export async function createJob(options: {
   const contextBudget = normalizeContextBudget(
     runtimeConfig.context?.tokenBudget,
   );
+  // 路由层（executor="auto"）：执行前先按 agent capabilities 与任务文本匹配选执行器。
+  // 显式声明的 executor 不经过路由（本段仅在保留字 auto 时触发），决策落盘 context.routing 供审计。
+  let executor = options.executor;
+  let routing: Json = {} as Json;
+  if (options.executor === ROUTE_AUTO) {
+    const decision = await routeStageExecutor({ task: options.task, workspace });
+    if (decision) {
+      executor = decision.executor;
+      routing = {
+        mode: "auto",
+        route_to: decision.executor,
+        score: decision.score,
+        ranked: decision.ranked,
+        notes: decision.notes,
+      };
+    } else {
+      executor = "codebuddy";
+      routing = {
+        mode: "auto",
+        route_to: "codebuddy",
+        score: 0,
+        ranked: [],
+        notes: ["无可用 agent 命中能力，回退默认 codebuddy。"],
+      };
+    }
+  }
+  // executor 走 auto 且启用审查、未显式声明审查者时，默认用 auto 做交叉验证（避开主执行 agent）。
+  const reviewExecutor =
+    options.reviewExecutor ??
+    (options.review && options.executor === ROUTE_AUTO ? ROUTE_AUTO : undefined);
   const context: JobContext = {
     appVersion: APP_VERSION,
     jobId,
     workspace,
     createdAt: now(),
     testCommand: options.testCommand,
+    taskText: options.task,
     reviewRequested: options.review,
     isolated: options.isolated,
     permissionMode: options.permissionMode,
@@ -187,13 +219,14 @@ export async function createJob(options: {
     autoBranch: options.autoBranch ?? false,
     autoCommit: options.autoCommit ?? false,
     commitMessage: options.commitMessage ?? "chore(cbx): apply task",
-    executor: options.executor ?? "codebuddy",
-    reviewExecutor: options.reviewExecutor,
+    executor: executor ?? "codebuddy",
+    reviewExecutor,
+    routing: Object.keys(routing).length ? routing : undefined,
     adaptive: adaptive.enabled
       ? {
           ...adaptive,
           managerExecutor:
-            adaptive.managerExecutor ?? options.executor ?? "codebuddy",
+            adaptive.managerExecutor ?? executor ?? "codebuddy",
         }
       : undefined,
     taskContract,

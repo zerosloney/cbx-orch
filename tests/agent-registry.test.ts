@@ -46,9 +46,19 @@ test("validateAgentSpec rejects malformed specs with file context", () => {
     [{ ...VALID_SPEC, autoArgs: "--yolo" }, /autoArgs 必须是字符串数组/],
     [{ ...VALID_SPEC, maxTurnsArg: 5 }, /maxTurnsArg 必须是字符串/],
     [{ ...VALID_SPEC, version: 2 }, /version 必须是字符串/],
+    [{ ...VALID_SPEC, capabilities: "frontend" }, /capabilities 必须是非空字符串数组/],
   ];
   for (const [raw, pattern] of cases)
     assert.throws(() => validateAgentSpec(raw, "spec.json"), pattern);
+});
+
+test("validateAgentSpec accepts optional capabilities and preserves them", () => {
+  const withCaps = validateAgentSpec(
+    { ...VALID_SPEC, capabilities: ["frontend", "react"] },
+    "fe.json",
+  );
+  assert.deepEqual(withCaps.capabilities, ["frontend", "react"]);
+  assert.equal(validateAgentSpec(VALID_SPEC, "gemini.json").capabilities, undefined);
 });
 
 test("buildArgsFromSpec renders placeholders and appends mode/turn flags", () => {

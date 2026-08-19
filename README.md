@@ -159,11 +159,12 @@ graph LR
   "autoArgs": ["--yolo"],
   "planArgs": ["--approval-mode", "plan"],
   "maxTurnsArg": "--max-turns",
+  "capabilities": ["backend", "python"],
   "version": "1.0.0"
 }
 ```
 
-字段说明：`name`（小写字母/数字/`._-`，不可与内置冲突）、`aliases`（可选，`resolveExecutor` 同样命中）、`label`（显示名，用于阶段日志与错误消息）、`candidates`（PATH 上依次尝试的二进制名）、`args`（参数模板，支持 `{prompt}` / `{maxTurns}` / `{permissionMode}` / `{auto}` 占位符，`{auto}` 在 `auto`/`dontAsk` 模式渲染为 `"true"`、否则 `"false"`）、`autoArgs`（`permissionMode` 为 `auto`/`dontAsk` 时追加）、`planArgs`（`plan` 时追加）、`maxTurnsArg`（设置后追加 `<maxTurnsArg> <maxTurns>`）、`envVar`（可选，缺省由 name 派生为 `CBX_<NAME>`，用于覆盖二进制路径）。
+字段说明：`name`（小写字母/数字/`._-`，不可与内置冲突）、`aliases`（可选，`resolveExecutor` 同样命中）、`label`（显示名，用于阶段日志与错误消息）、`candidates`（PATH 上依次尝试的二进制名）、`args`（参数模板，支持 `{prompt}` / `{maxTurns}` / `{permissionMode}` / `{auto}` 占位符，`{auto}` 在 `auto`/`dontAsk` 模式渲染为 `"true"`、否则 `"false"`）、`autoArgs`（`permissionMode` 为 `auto`/`dontAsk` 时追加）、`planArgs`（`plan` 时追加）、`maxTurnsArg`（设置后追加 `<maxTurnsArg> <maxTurns>`）、`envVar`（可选，缺省由 name 派生为 `CBX_<NAME>`，用于覆盖二进制路径）、`capabilities`（可选，声明该 agent 擅长的领域/技术标签，如 `["frontend","react"]`；供 `auto` 路由做能力匹配，缺省表示不可作为自动路由候选）。
 
 注册后 `--executor gemini` 与 stage 的 `executor: "gemini"` 直接可用。查看注册结果与二进制可用性：
 
@@ -174,6 +175,14 @@ curl http://127.0.0.1:4173/api/agents  # Web UI 同款数据
 ```
 
 spec 校验失败（缺字段、name 冲突）不会中断其他 agent 的注册，错误会聚合展示在 `cbx agents` 输出与 `/api/agents` 响应的 `errors` 字段中。
+
+### Agent 路由（executor=auto）
+
+除显式声明执行器外，可把 `executor` 或 `review_executor` 设为保留字 `auto`，在执行任务前由路由层自动选 agent：按各 agent 声明的 `capabilities` 与任务文本做确定性能力匹配打分（命中标签越多分越高，大小写不敏感；ASCII 单词用词边界匹配避免误伤子串，中文/短语走整串包含），从已探测可用（`available=true`）的 agent 中选得分最高者。声明式执行器永远优先，路由只兜底「未指定 / 指定 `auto`」的任务（渐进式，向后兼容）。路由决策（选中者、得分、排名、说明）落盘到任务 `context.json` 的 `routing` 字段供审计。
+
+- 无可用 agent 命中能力时回退默认 `codebuddy`。
+- 启用审查且 `review_executor=auto`（或 `executor=auto` 且未显式指定审查者）时，路由一个**避开主执行 agent** 的交叉验证者做独立审查；找不到其它可路由 agent 时回退主执行 agent 自审。
+- 路由打分是纯函数（无 I/O、无 LLM），见 `src/executors/route.ts`。
 
 ## 项目配置
 

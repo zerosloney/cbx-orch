@@ -33,6 +33,12 @@ export interface AgentSpec {
   maxTurnsArg?: string;
   /** spec 版本，仅用于展示与追溯 */
   version?: string;
+  /**
+   * 路由元数据：该 agent 擅长的领域/技术标签（如 "frontend"、"react"）。
+   * executor 为保留字 "auto" 时，路由层把它与任务文本做词频匹配打分选 agent；
+   * 缺省表示无可路由能力（auto 不优先选它）。纯启发式声明，不影响入参渲染。
+   */
+  capabilities?: string[];
 }
 
 /** 渲染 spec 的参数模板：占位符替换 + permissionMode 分支追加（plan 优先，其次 auto）。 */
@@ -62,6 +68,7 @@ export function specToBuiltin(spec: AgentSpec): BuiltinExecutor {
     label: spec.label,
     envVar: spec.envVar,
     candidates: spec.candidates,
+    capabilities: spec.capabilities,
     buildArgs: (opts) => buildArgsFromSpec(spec, opts),
   };
 }

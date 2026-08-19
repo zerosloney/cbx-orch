@@ -30,6 +30,8 @@ export interface AgentProbe {
   aliases: string[];
   available: boolean;
   command: string[] | null;
+  /** 路由元数据：探针复刻 spec 能力声明，便于路由层直接消费（无需回查 spec）。 */
+  capabilities?: string[];
   error?: string;
 }
 
@@ -67,6 +69,9 @@ export function validateAgentSpec(raw: unknown, file: string): AgentSpec {
     throw new Error(`${file}: maxTurnsArg 必须是字符串。`);
   if (value.version !== undefined && typeof value.version !== "string")
     throw new Error(`${file}: version 必须是字符串。`);
+  const capabilities = value.capabilities === undefined ? undefined : asStringArray(value.capabilities);
+  if (value.capabilities !== undefined && !capabilities)
+    throw new Error(`${file}: capabilities 必须是非空字符串数组。`);
   return {
     name: value.name,
     aliases,
@@ -78,6 +83,7 @@ export function validateAgentSpec(raw: unknown, file: string): AgentSpec {
     planArgs: optional("planArgs"),
     maxTurnsArg: value.maxTurnsArg,
     version: value.version,
+    capabilities,
   };
 }
 
@@ -179,6 +185,7 @@ async function probeAgent({ spec, source }: RegisteredAgent): Promise<AgentProbe
     label: spec.label,
     source,
     aliases: spec.aliases,
+    capabilities: spec.capabilities,
   };
   // findExecutable 对裸二进制名不做存在性检查（兜底交给 spawn），探测需自行确认。
   const configured = process.env[spec.envVar];
