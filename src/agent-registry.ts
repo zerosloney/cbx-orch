@@ -7,6 +7,7 @@ import {
   resolveExecutor,
   type BuiltinExecutor,
 } from "./executors/builtin.js";
+import { locateOnPath } from "./executors/locate.js";
 import { type AgentSpec, specToBuiltin } from "./executors/specs.js";
 
 // Agent 注册中心：把「新增一个编码 CLI 要改 builtin.ts 硬编码」变成「丢一个 JSON spec 进目录即自动发现」。
@@ -171,30 +172,6 @@ export async function resolveAgentLabel(
   return agent?.spec.label ?? fallback;
 }
 
-/** 依次检查候选命令是否真实存在：带路径分隔符的直接 stat，裸名沿 PATH+PATHEXT 解析。 */
-async function locateBinary(names: string[]): Promise<string | null> {
-  const pathDirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-  const extensions =
-    process.platform === "win32"
-      ? [...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean), ""]
-      : [""];
-  for (const name of names) {
-    const isPathLike = name.includes("/") || name.includes("\\") || path.isAbsolute(name);
-    const candidatesForName = isPathLike
-      ? [name]
-      : pathDirs.flatMap((dir) => extensions.map((ext) => path.join(dir, name + ext)));
-    for (const candidate of candidatesForName) {
-      try {
-        await access(candidate);
-        return candidate;
-      } catch {
-        /* 继续尝试下一个候选 */
-      }
-    }
-  }
-  return null;
-}
-
 async function probeAgent({ spec, source }: RegisteredAgent): Promise<AgentProbe> {
   const base = {
     name: spec.name,
@@ -202,12 +179,12 @@ async function probeAgent({ spec, source }: RegisteredAgent): Promise<AgentProbe
     source,
     aliases: spec.aliases,
   };
-  // findExecutable 对裸二进制名不做存在性检查（spawn 时才报错），探测需自行确认。
+  // findExecutable 对裸二进制名不做存在性检查（兜底交给 spawn），探测需自行确认。
   const configured = process.env[spec.envVar];
   if (configured) {
     try {
       await access(configured);
-      return { ...base, available: true, command: findExecutable(spec) };
+      return { ...base, available: true, command: await findExecutable(spec) };
     } catch {
       return {
         ...base,
@@ -217,8 +194,8 @@ async function probeAgent({ spec, source }: RegisteredAgent): Promise<AgentProbe
       };
     }
   }
-  if (await locateBinary(spec.candidates))
-    return { ...base, available: true, command: findExecutable(spec) };
+  if (await locateOnPath(spec.candidates))
+    return { ...base, available: true, command: await findExecutable(spec) };
   return {
     ...base,
     available: false,

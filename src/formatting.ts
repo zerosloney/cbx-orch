@@ -1,6 +1,7 @@
 import chalk, { type ChalkInstance } from "chalk";
 import type { JobState } from "./types.js";
 import type { QueueFile } from "./queue.js";
+import type { AgentProbe } from "./agent-registry.js";
 
 const STATUS_COLORS: Record<string, ChalkInstance> = {
   done: chalk.green,
@@ -106,6 +107,32 @@ function colorizeReview(verdict: string): string {
   return verdict;
 }
 
+/**
+ * 终端表格拼装：列宽 = max(表头, 各行显示宽度)，粗体表头 + 分隔线。
+ * clampFirstColumn 用于首列可能超长（如 jobId）的表：按终端宽度截断首列，保底 20 列。
+ */
+function renderTable(
+  headers: string[],
+  rows: string[][],
+  opts?: { clampFirstColumn?: boolean },
+): string {
+  const widths = headers.map((h, i) =>
+    Math.max(h.length, ...rows.map((r) => displayWidth(String(r[i])))),
+  );
+  if (opts?.clampFirstColumn) {
+    const termWidth = process.stdout.columns ?? 120;
+    const otherWidth = widths.slice(1).reduce((a, b) => a + b + 2, 0);
+    widths[0] = Math.min(widths[0], Math.max(20, termWidth - otherWidth - 2));
+  }
+  const line = (cells: string[]) =>
+    cells.map((c, i) => padDisplayEnd(String(c), widths[i])).join("  ");
+  return [
+    chalk.bold(line(headers)),
+    widths.map((w) => "─".repeat(w)).join("──"),
+    ...rows.map((r) => line(r)),
+  ].join("\n");
+}
+
 export function renderJobsTable(jobs: JobState[]): string {
   if (jobs.length === 0) return chalk.gray("暂无任务");
 
@@ -145,33 +172,11 @@ export function renderJobsTable(jobs: JobState[]): string {
     ];
   });
 
-  const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => displayWidth(String(r[i])))),
-  );
-
-  const termWidth = process.stdout.columns ?? 120;
-  const otherWidth = widths.slice(1).reduce((a, b) => a + b + 2, 0);
-  widths[0] = Math.min(widths[0], Math.max(20, termWidth - otherWidth - 2));
-
-  const line = (cells: string[]) =>
-    cells.map((c, i) => padDisplayEnd(String(c), widths[i])).join("  ");
-
-  return [
-    chalk.bold(line(headers)),
-    widths.map((w) => "─".repeat(w)).join("──"),
-    ...rows.map((r) => line(r)),
-  ].join("\n");
+  return renderTable(headers, rows, { clampFirstColumn: true });
 }
 
 export function renderAgentsTable(
-  probes: Array<{
-    name: string;
-    label: string;
-    source: string;
-    aliases: string[];
-    available: boolean;
-    command: string[] | null;
-  }>,
+  probes: AgentProbe[],
   errors: string[],
 ): string {
   const headers = ["Agent", "Label", "Source", "Binary", "Path"];
@@ -182,16 +187,7 @@ export function renderAgentsTable(
     p.available ? chalk.green("ok") : chalk.red("missing"),
     p.command ? p.command.join(" ") : "—",
   ]);
-  const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => displayWidth(String(r[i])))),
-  );
-  const line = (cells: string[]) =>
-    cells.map((c, i) => padDisplayEnd(String(c), widths[i])).join("  ");
-  const table = [
-    chalk.bold(line(headers)),
-    widths.map((w) => "─".repeat(w)).join("──"),
-    ...rows.map((r) => line(r)),
-  ].join("\n");
+  const table = renderTable(headers, rows);
   const hints = [
     table,
     chalk.gray("新增 agent：在 .cbx/agents/（项目）或 ~/.cbx/agents/（用户）放置 spec JSON，无需修改代码。"),
@@ -215,19 +211,8 @@ export function renderQueueTable(queue: QueueFile): string {
   ]);
 
   const headers = ["Job", "Status", "Pri", "Created", "Error"];
-  const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => displayWidth(String(r[i])))),
-  );
 
-  const line = (cells: string[]) =>
-    cells.map((c, i) => padDisplayEnd(String(c), widths[i])).join("  ");
-
-  return [
-    header,
-    chalk.bold(line(headers)),
-    widths.map((w) => "─".repeat(w)).join("──"),
-    ...rows.map((r) => line(r)),
-  ].join("\n");
+  return [header, renderTable(headers, rows)].join("\n");
 }
 
 export function renderJobDetail(state: JobState): string {

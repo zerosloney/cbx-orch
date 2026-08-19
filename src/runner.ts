@@ -127,7 +127,7 @@ async function invokeBuiltin(
   redaction?: EventRedaction,
   runner?: RunnerPlugin,
 ): Promise<ProcessResult> {
-  const executable = findExecutable(spec);
+  const executable = await findExecutable(spec);
   const args = [...executable.slice(1), ...spec.buildArgs({ prompt, permissionMode, maxTurns })];
   const command = executable[0];
   const eventsFile = path.join(directory, "events.ndjson");

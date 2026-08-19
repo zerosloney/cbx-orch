@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
 import { BUILTIN_SPECS, specToBuiltin, type BuildArgsOptions } from "./specs.js";
+import { expandPathCandidates, firstExisting } from "./locate.js";
 
 // 内置执行器适配层：codebuddy / opencode / omp / cline / qwen 的声明式定义见 specs.ts（BUILTIN_SPECS），
 // 本模块负责由 spec 派生执行器表、按名/别名解析、以及二进制查找（envVar 覆盖 → PATH 解析 → 兜底 spawn）。
@@ -36,37 +36,28 @@ export function resolveExecutor(name: string): BuiltinExecutor | undefined {
   return BY_NAME.get(name);
 }
 
-// intentional-simple: 进程级缓存，只对单进程内重复调用生效。环境变量/安装变更需重启进程。
-const resolvedPathCache = new Map<string, string>();
+function wrapCommand(candidate: string): string[] {
+  const lower = candidate.toLowerCase();
+  if (lower.endsWith(".ps1"))
+    return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", candidate];
+  if (lower.endsWith(".mjs") || lower.endsWith(".cjs") || lower.endsWith(".js"))
+    return [process.execPath, candidate];
+  return [candidate];
+}
 
 /**
  * 返回 [command, ...rest] 形式的可执行命令：
- * - 优先采用 envVar 指定的覆盖路径；
- * - Windows 上用 PowerShell Get-Command 解析 bin 名的真实来源（结果缓存，避免每次 spawn 同步阻塞事件循环）；
- * - 兜底直接把候选名交给 spawn；
+ * - 优先采用 envVar 指定的覆盖路径（不检查存在性，由探测阶段给出更友好的错误）；
+ * - 其次按 PATH×PATHEXT 展开探测 candidates（与 agent 探测共用 locate.ts 的同一算法）；
+ * - 兜底直接把首个候选名交给 spawn，由 spawn 报错；
  * - .ps1/.js/.mjs/.cjs 会被包装成 powershell/node 调用。
  */
-export function findExecutable(spec: BuiltinExecutor): string[] {
+export async function findExecutable(spec: BuiltinExecutor): Promise<string[]> {
   const configured = process.env[spec.envVar];
-  const candidates: string[] = [];
-  if (configured) candidates.push(configured);
-  if (process.platform === "win32") {
-    const primary = spec.candidates[0];
-    let resolved = resolvedPathCache.get(primary);
-    if (resolved === undefined) {
-      const ps = spawnSync("powershell.exe", ["-NoProfile", "-Command", `(Get-Command ${primary}).Source`], { encoding: "utf8", windowsHide: true });
-      resolved = ps.status === 0 ? String(ps.stdout).trim() : "";
-      resolvedPathCache.set(primary, resolved);
-    }
-    if (resolved) candidates.push(resolved);
+  if (configured) return wrapCommand(configured);
+  for (const name of spec.candidates) {
+    const found = await firstExisting(expandPathCandidates(name));
+    if (found) return wrapCommand(found);
   }
-  candidates.push(...spec.candidates);
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    const lower = candidate.toLowerCase();
-    if (lower.endsWith(".ps1")) return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", candidate];
-    if (lower.endsWith(".mjs") || lower.endsWith(".cjs") || lower.endsWith(".js")) return [process.execPath, candidate];
-    return [candidate];
-  }
-  throw new Error(`找不到 ${spec.label} (${spec.candidates.join("/")})。请安装 ${spec.label}，或设置 ${spec.envVar}。`);
+  return wrapCommand(spec.candidates[0]);
 }
