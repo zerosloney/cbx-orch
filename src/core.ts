@@ -44,8 +44,9 @@ export { approveJob, approveJobAndStart } from "./approval.js";
 // Lifecycle (background start & cancel)
 export { startBackground, cancelJob } from "./lifecycle.js";
 
-// Worktree cleanup
-export { cleanupWorktree } from "./worktree.js";
+// Worktree cleanup & orphan patrol
+export { cleanupWorktree, scanOrphanWorktrees, removeOrphanWorktrees } from "./worktree.js";
+export type { OrphanWorktree } from "./worktree.js";
 
 // Queue operations facade
 export { dispatchQueue, health, serveQueue, enqueueJob, finishQueueEntry, listQueue, pauseQueue, resumeQueue, cancelQueueEntries, cancelJobState, retryQueueJob } from "./queue-api.js";

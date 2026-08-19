@@ -18,7 +18,7 @@ import {
 import { createJob } from "./helpers.js";
 
 // queue-api.ts 门面层的进程内覆盖：dispatchQueue/health（含治理裁剪分支）/serveQueue/
-// enqueue/finish/cancel/retry 全链路，透传 queueRuntime 的 saveStateAndQueue 事务写入。
+// enqueue/finish/cancel/retry 全链路，透传 queueRuntime 的持久化事务写入。
 
 async function tempWorkspace(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), "cbx-queue-api-"));

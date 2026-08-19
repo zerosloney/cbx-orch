@@ -6,6 +6,8 @@ import {
   approveJobAndStart,
   cancelJob,
   cleanupWorktree,
+  removeOrphanWorktrees,
+  scanOrphanWorktrees,
   dispatchQueue,
   createJob,
   executeJob,
@@ -517,6 +519,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     return;
   }
   if (command === "clean") {
+    if (parsed.has("--orphans")) {
+      // 巡检并清理孤儿 worktree（job 已被清理而 worktree 遗留）；只删无 jobDir 的条目。
+      const orphans = await scanOrphanWorktrees(workspace);
+      if (orphans.length === 0) {
+        print({ orphans: 0, removed: [], failed: [] });
+        return;
+      }
+      const { removed, failed } = await removeOrphanWorktrees(workspace, orphans);
+      print({ orphans: orphans.length, removed, failed });
+      return;
+    }
     const jobId = requireJobId(parsed, command);
     print({ jobId, cleaned: await cleanupWorktree(workspace, jobId) });
     return;

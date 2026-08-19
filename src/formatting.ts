@@ -234,6 +234,7 @@ export function renderJobDetail(state: JobState): string {
 export function renderHealth(result: {
   status: string;
   metrics: Record<string, unknown>;
+  worktreeOrphans?: Array<{ worktree: string; jobId: string }>;
 }): string {
   const m = result.metrics as Record<string, number>;
   const lines: string[] = [];
@@ -241,10 +242,13 @@ export function renderHealth(result: {
     `${chalk.bold("Status:")} ${result.status === "ok" ? chalk.green("ok") : chalk.red(result.status)}`,
   );
   lines.push("");
+  const orphanCount = result.worktreeOrphans?.length;
   const items: [string, number | undefined][] = [
     ["Queue depth", m.queueDepth],
     ["Failed jobs", m.failedJobs],
     ["Retrying jobs", m.retryingJobs],
+    ["Tokens used", m.tokensUsed],
+    ["Orphan worktrees", orphanCount],
     ["Pending deliveries", m.pendingDeliveries],
     ["Delivery failures", m.deliveryFailures],
   ];
@@ -255,6 +259,15 @@ export function renderHealth(result: {
         ? chalk.red(String(num))
         : chalk.cyan(String(num));
     lines.push(`  ${label.padEnd(20)} ${colored}`);
+  }
+  if (orphanCount && orphanCount > 0 && result.worktreeOrphans) {
+    lines.push("");
+    lines.push(
+      `${chalk.bold("Orphan worktrees:")} ${chalk.yellow(`cbx clean --orphans 可清理`)}`,
+    );
+    for (const orphan of result.worktreeOrphans) {
+      lines.push(`  ${orphan.worktree}`);
+    }
   }
   if (m.jobsByStatus && typeof m.jobsByStatus === "object") {
     lines.push("");
