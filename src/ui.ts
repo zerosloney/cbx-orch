@@ -824,8 +824,10 @@ export function createWebUiServer(
         return json(res, await listJobs(ws));
       }
       if (url.pathname === "/api/queue") return json(res, await listQueue(ws));
-      if (url.pathname === "/api/agents")
-        return json(res, await discoverAgents(ws));
+      if (url.pathname === "/api/agents") {
+        const { probes, errors } = await discoverAgents(ws);
+        return json(res, { agents: probes, errors });
+      }
       if (url.pathname === "/healthz" || url.pathname === "/api/metrics")
         return json(res, await health(ws));
       if (url.pathname === "/openapi.json")

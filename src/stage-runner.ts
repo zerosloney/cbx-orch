@@ -20,7 +20,7 @@ import {
 import { evidenceHashes, structuredAuditRequested } from "./evidence.js";
 import { parseReviewVerdict } from "./verdict.js";
 import { createHumanGate } from "./human-gate.js";
-import { resolveExecutor } from "./executors/builtin.js";
+import { resolveAgentLabel } from "./agent-registry.js";
 import { contextArtifacts, AUDIT_CANDIDATE } from "./artifacts.js";
 import type {
   JobContext,
@@ -318,7 +318,7 @@ export async function runStage(params: {
     let reviewAgent: ProcessResult;
     const reviewExecutor =
       stage.reviewExecutor ?? context.reviewExecutor ?? stage.executor;
-    const reviewLabel = resolveExecutor(reviewExecutor)?.label ?? "审查代理";
+    const reviewLabel = await resolveAgentLabel(reviewExecutor, workspace, "审查代理");
     const auditCandidate = path.join(writeDir, AUDIT_CANDIDATE);
     const reviewJsonCandidate = path.join(writeDir, "review.json");
     if (existsSync(auditCandidate)) await unlink(auditCandidate);

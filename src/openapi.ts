@@ -24,7 +24,6 @@ const jobSummary: Schema = {
   type: "object",
   properties: {
     jobId: { type: "string" },
-    task: { type: "string" },
     status: { type: "string" },
     phase: { type: "string" },
     attempt: { type: "integer" },
@@ -165,7 +164,7 @@ export function buildOpenApiDocument(host: string, port: number): Record<string,
               {
                 type: "object",
                 properties: {
-                  probes: { type: "array", items: { $ref: "#/components/schemas/AgentProbe" } },
+                  agents: { type: "array", items: { $ref: "#/components/schemas/AgentProbe" } },
                   errors: { type: "array", items: { type: "string" } },
                 },
               },

@@ -147,7 +147,7 @@ graph LR
 
 ### Agent 注册与自动发现
 
-内置 5 个适配器之外的新 CLI 无需改代码：在工作区 `.cbx/agents/`（项目级，可随仓库分发）或 `~/.cbx/agents/`（用户级）放置一个 JSON spec 即可被自动发现并注册。同名时 workspace 覆盖用户级；内置注册名不可被覆盖。
+全部 executor（含内置 5 个适配器，声明见 `src/executors/specs.ts` 的 `BUILTIN_SPECS`）共用同一 AgentSpec 契约：新增 CLI 无需改代码，在工作区 `.cbx/agents/`（项目级，可随仓库分发）或 `~/.cbx/agents/`（用户级）放置一个 JSON spec 即可被自动发现并注册。同名时 workspace 覆盖用户级；内置注册名不可被覆盖。
 
 ```json
 {
@@ -163,7 +163,7 @@ graph LR
 }
 ```
 
-字段说明：`name`（小写字母/数字/`._-`，不可与内置冲突）、`aliases`（可选，`resolveExecutor` 同样命中）、`label`（显示名）、`candidates`（PATH 上依次尝试的二进制名）、`args`（参数模板，支持 `{prompt}` / `{maxTurns}` 占位符）、`autoArgs`（`permissionMode` 为 `auto`/`dontAsk` 时追加）、`planArgs`（`plan` 时追加）、`maxTurnsArg`（设置后追加 `<maxTurnsArg> <maxTurns>`）、`envVar`（可选，缺省由 name 派生为 `CBX_<NAME>`，用于覆盖二进制路径）。
+字段说明：`name`（小写字母/数字/`._-`，不可与内置冲突）、`aliases`（可选，`resolveExecutor` 同样命中）、`label`（显示名，用于阶段日志与错误消息）、`candidates`（PATH 上依次尝试的二进制名）、`args`（参数模板，支持 `{prompt}` / `{maxTurns}` / `{permissionMode}` / `{auto}` 占位符，`{auto}` 在 `auto`/`dontAsk` 模式渲染为 `"true"`、否则 `"false"`）、`autoArgs`（`permissionMode` 为 `auto`/`dontAsk` 时追加）、`planArgs`（`plan` 时追加）、`maxTurnsArg`（设置后追加 `<maxTurnsArg> <maxTurns>`）、`envVar`（可选，缺省由 name 派生为 `CBX_<NAME>`，用于覆盖二进制路径）。
 
 注册后 `--executor gemini` 与 stage 的 `executor: "gemini"` 直接可用。查看注册结果与二进制可用性：
 

@@ -25,7 +25,7 @@ import {
 } from "./git-ops.js";
 import { loadState, logJobEvent } from "./state.js";
 import { runStage } from "./stage-runner.js";
-import { resolveExecutor } from "./executors/builtin.js";
+import { resolveAgentLabel } from "./agent-registry.js";
 import type {
   JobContext,
   JobState,
@@ -275,7 +275,7 @@ export async function runDependencyLayers(params: {
           stage,
         );
         const stageLabel =
-          resolveExecutor(stage.executor)?.label ?? "编码代理";
+          await resolveAgentLabel(stage.executor, workspace);
         const stageExtra = [extra, depHandback, stage.task]
           .filter(Boolean)
           .join("\n\n");

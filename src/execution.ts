@@ -50,7 +50,7 @@ import {
   type VerifiedProgress,
 } from "./progress.js";
 import type { NextAction } from "./adaptive-manager.js";
-import { resolveExecutor } from "./executors/builtin.js";
+import { resolveAgentLabel } from "./agent-registry.js";
 import { dispatchQueue, finishQueueEntry } from "./queue-api.js";
 import { cleanupWorktree } from "./worktree.js";
 import { APP_VERSION } from "./version.js";
@@ -536,7 +536,7 @@ async function executeJobLocked(
 
       const stage = decision.stage as TaskStage;
       const stageIndex = stageReports.length;
-      const stageLabel = resolveExecutor(stage.executor)?.label ?? "编码代理";
+      const stageLabel = await resolveAgentLabel(stage.executor, workspace);
       logJobEvent(workspace, jobId, "stage_started", {
         stage: stage.name,
         executor: stage.executor,
@@ -663,7 +663,7 @@ async function executeJobLocked(
   for (const stage of executionOrder) {
     const stageIndex = nameToIndex.get(stage.name) ?? 0;
     const stageExecutor = stage.executor;
-    const stageLabel = resolveExecutor(stageExecutor)?.label ?? "编码代理";
+    const stageLabel = await resolveAgentLabel(stageExecutor, workspace);
     executedNames.add(stage.name);
     // 失败传播：任一 dependsOn stage 已失败则跳过当前 stage。
     const failedDeps = (stage.dependsOn ?? []).filter((dep) =>

@@ -5,14 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import {
   agentDirs,
-  buildArgsFromSpec,
   collectAgents,
   discoverAgents,
   probeAgents,
+  resolveAgentLabel,
   resolveRegisteredExecutor,
   validateAgentSpec,
 } from "../src/agent-registry.js";
-import { resolveExecutor } from "../src/executors/builtin.js";
+import { BUILTIN_EXECUTORS, resolveExecutor } from "../src/executors/builtin.js";
+import { BUILTIN_SPECS, buildArgsFromSpec } from "../src/executors/specs.js";
 import { createJob, executeJob, setupFake } from "./helpers.js";
 
 const VALID_SPEC = {
@@ -78,6 +79,40 @@ test("buildArgsFromSpec renders placeholders and appends mode/turn flags", () =>
   );
 });
 
+test("buildArgsFromSpec renders {permissionMode} and {auto} placeholders", () => {
+  const spec = validateAgentSpec(
+    {
+      name: "modecli",
+      label: "Mode CLI",
+      candidates: ["modecli"],
+      args: ["exec", "--mode", "{permissionMode}", "--auto-approve", "{auto}", "{prompt}"],
+    },
+    "modecli.json",
+  );
+  assert.deepEqual(
+    buildArgsFromSpec(spec, { prompt: "go", permissionMode: "plan", maxTurns: 3 }),
+    ["exec", "--mode", "plan", "--auto-approve", "false", "go"],
+  );
+  assert.deepEqual(
+    buildArgsFromSpec(spec, { prompt: "go", permissionMode: "dontAsk", maxTurns: 3 }),
+    ["exec", "--mode", "dontAsk", "--auto-approve", "true", "go"],
+  );
+});
+
+test("builtin specs conform to the file-spec contract and derive BUILTIN_EXECUTORS", () => {
+  // builtin 与文件 spec 共用同一契约：内置定义本身必须是合法 spec，
+  // 否则「声明式注册」就是双轨话术（内置走特权路径）。
+  for (const spec of BUILTIN_SPECS)
+    assert.doesNotThrow(() => validateAgentSpec(spec, `builtin:${spec.name}`));
+  assert.equal(BUILTIN_EXECUTORS.length, BUILTIN_SPECS.length);
+  for (const spec of BUILTIN_SPECS) {
+    const executor = resolveExecutor(spec.name);
+    assert.equal(executor?.label, spec.label);
+    assert.equal(executor?.envVar, spec.envVar);
+    assert.deepEqual(executor?.candidates, spec.candidates);
+  }
+});
+
 async function tempWorkspace(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), "cbx-agents-"));
 }
@@ -117,6 +152,15 @@ test("resolveRegisteredExecutor resolves specs by name/alias and falls back to u
   assert.equal((await resolveRegisteredExecutor("gca", workspace))?.name, "gemini");
   assert.equal((await resolveRegisteredExecutor("codebuddy", workspace))?.name, "codebuddy");
   assert.equal(await resolveRegisteredExecutor("nonexistent", workspace), undefined);
+});
+
+test("resolveAgentLabel resolves builtin/file-spec labels with fallback", async () => {
+  const workspace = await tempWorkspace();
+  await writeSpec(workspace, "gemini.json", VALID_SPEC);
+  assert.equal(await resolveAgentLabel("codebuddy", workspace), "CodeBuddy");
+  assert.equal(await resolveAgentLabel("gca", workspace), "Gemini CLI");
+  assert.equal(await resolveAgentLabel("nonexistent", workspace), "编码代理");
+  assert.equal(await resolveAgentLabel("nonexistent", workspace, "审查代理"), "审查代理");
 });
 
 test("probeAgents reports availability via envVar override and missing binaries", async () => {
