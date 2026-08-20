@@ -155,6 +155,7 @@ test("cbx batch --max-batch 1 波次执行并 --wait 汇总终态", async () => 
       "--test",
       'node -e "process.exit(0)"',
       "--no-review",
+      "--no-isolated",
     ],
     {
       encoding: "utf8",

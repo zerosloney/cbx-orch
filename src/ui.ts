@@ -39,6 +39,10 @@ import {
   isTrustedLocalRequest,
   requestHasBody,
 } from "./http-guard.js";
+import {
+  parseExecutionProfile,
+  type ExecutionProfile,
+} from "./profile.js";
 
 /** 校验 token; 未配置 token 时始终放行。常量时间比较避免时序侧信道。
  *  支持两种凭证：Authorization Bearer header（curl/API 客户端），
@@ -866,8 +870,21 @@ export function createWebUiServer(
           const body = await readJsonBody(req);
           if (typeof body.task !== "string" || !body.task.trim())
             return json(res, { error: "task 必须是非空字符串。" }, 400);
+          let profile: ExecutionProfile | undefined;
+          if (body.profile !== undefined) {
+            try {
+              profile = parseExecutionProfile(body.profile);
+            } catch (error) {
+              return json(
+                res,
+                { error: error instanceof Error ? error.message : String(error) },
+                400,
+              );
+            }
+          }
           const config = await loadConfig(ws);
           const defaults = mergeConfig(config, {
+            profile,
             testCommand:
               typeof body.test_command === "string"
                 ? body.test_command
@@ -890,6 +907,10 @@ export function createWebUiServer(
             approvalBeforeRun:
               typeof body.approval_before_run === "boolean"
                 ? body.approval_before_run
+                : undefined,
+            approvalBeforeComplete:
+              typeof body.approval_before_complete === "boolean"
+                ? body.approval_before_complete
                 : undefined,
             dependencyGuard:
               typeof body.dependency_guard === "boolean"
@@ -931,6 +952,7 @@ export function createWebUiServer(
             keepWorktree: defaults.keepWorktree,
             reviewRules: config.reviewRules,
             approvalBeforeRun: defaults.approvalBeforeRun,
+            approvalBeforeComplete: defaults.approvalBeforeComplete,
             autoBranch: defaults.autoBranch,
             autoCommit: defaults.autoCommit,
             commitMessage: defaults.commitMessage,
@@ -938,6 +960,7 @@ export function createWebUiServer(
             reviewExecutor: defaults.reviewExecutor,
             adaptive: defaults.adaptive,
             trustMode: defaults.trustMode,
+            profile: defaults.profile,
             dependencyGuard: defaults.dependencyGuard,
             allowUnsafePermissions: body.allow_unsafe_permissions === true,
           });

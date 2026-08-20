@@ -35,7 +35,12 @@ import { runTui, startWebUi, summarizeWorkspace } from "./ui.js";
 import { parseCliArgs, type CliArgs } from "./cli-args.js";
 import { runBatch } from "./batch.js";
 import { discoverAgents } from "./agent-registry.js";
+import { renderDoctor, runDoctor } from "./doctor.js";
 import { APP_VERSION } from "./version.js";
+import {
+  parseExecutionProfile,
+  type ExecutionProfile,
+} from "./profile.js";
 import {
   isInteractive,
   renderAgentsTable,
@@ -68,8 +73,25 @@ function print(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
-const USAGE = `用法：cbx run|start|batch|ws|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|forget|purge|watch|ui|tui|review-gate|stop-review-gate ...
-选项：--help 显示本帮助；--version / -v 显示版本。`;
+/** --profile 在 CLI 参数解析器纳入该值选项前，保持 `--profile value` 与 `--profile=value` 一致。 */
+function parseProfileOption(argv: string[]): ExecutionProfile | undefined {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--") break;
+    if (arg === "--profile") {
+      const value = argv[index + 1];
+      if (value === undefined || value === "--")
+        throw new Error("选项 --profile 缺少值。");
+      return parseExecutionProfile(value);
+    }
+    if (arg.startsWith("--profile="))
+      return parseExecutionProfile(arg.slice("--profile=".length));
+  }
+  return undefined;
+}
+
+const USAGE = `用法：cbx run|start|batch|doctor|templates|ws|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|forget|purge|watch|ui|tui|review-gate|stop-review-gate ...
+选项：--help 显示本帮助；--version / -v 显示版本；--profile fast|verified|governed|untrusted 设置执行档位。`;
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   const [command, ...rest] = argv;
@@ -83,7 +105,36 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
   const parsed = parseCliArgs(rest);
   const workspace = parsed.option("--workspace", ".")!;
+  if (command === "doctor") {
+    const report = await runDoctor(workspace);
+    if (parsed.has("--json")) print(report);
+    else console.log(renderDoctor(report));
+    if (report.status === "fail") process.exit(1);
+    return;
+  }
+  if (command === "templates") {
+    const fileConfig = await loadConfig(workspace);
+    const templates = Object.entries(fileConfig.templates ?? {}).map(
+      ([name, template]) => ({ name, ...template }),
+    );
+    if (parsed.has("--json")) {
+      print({ templates });
+      return;
+    }
+    if (templates.length === 0) {
+      console.log("暂无任务模板");
+      return;
+    }
+    for (const template of templates) {
+      const summary = template.task.replace(/\s+/g, " ").trim();
+      const task = summary.length > 120 ? `${summary.slice(0, 117)}...` : summary;
+      console.log(`${template.name}  profile=${template.profile ?? "—"}`);
+      console.log(`  task: ${task}`);
+    }
+    return;
+  }
   if (["run", "start"].includes(command)) {
+    const cliProfile = parseProfileOption(rest);
     const fileConfig = await loadConfig(workspace);
     // 任务模板：--template <name> 从 .cbx.json templates 展开。
     // 优先级：命令行显式参数 > 模板值 > 配置文件默认值。
@@ -101,6 +152,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     const taskFile = parsed.option("--task-file");
     if (taskFile) task = await readFile(taskFile, "utf8");
     const defaults = mergeConfig(fileConfig, {
+      profile: cliProfile ?? template?.profile,
       testCommand: parsed.option("--test") ?? template?.test,
       review: parsed.has("--review")
         ? true
@@ -186,6 +238,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         reviewExecutor: defaults.reviewExecutor,
         adaptive: defaults.adaptive,
         trustMode: defaults.trustMode,
+        profile: defaults.profile,
+        dependencyGuard: defaults.dependencyGuard,
         allowUnsafePermissions: parsed.has("--dangerously-skip-permissions"),
       });
       jobId = created.jobId;
@@ -637,8 +691,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       throw new Error(
         "请至少提供一个任务：--task <描述> 或 --task-file <文件>。",
       );
+    const profile = parseProfileOption(rest);
     const fileConfig = await loadConfig(workspace);
     const defaults = mergeConfig(fileConfig, {
+      profile,
       testCommand: parsed.option("--test"),
       review: parsed.has("--review")
         ? true
@@ -710,6 +766,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         executor: defaults.executor,
         reviewExecutor: defaults.reviewExecutor,
         trustMode: defaults.trustMode,
+        profile: defaults.profile,
         dependencyGuard: defaults.dependencyGuard,
         allowUnsafePermissions: parsed.has("--dangerously-skip-permissions"),
       },

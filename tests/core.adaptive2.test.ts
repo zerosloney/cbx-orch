@@ -4,12 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
-import {
-  setupFake,
-  createJob,
-  executeJob,
-  readArtifact,
-} from "./helpers.js";
+import { setupFake, createJob, executeJob, readArtifact } from "./helpers.js";
 
 test("structured task contract performs a plan-only handshake and pauses on ambiguity", async () => {
   const { workspace } = await setupFake();
@@ -166,11 +161,12 @@ test("staged tasks use the first stage executor for the context handshake", asyn
     false,
     "review=false keeps the legacy contract flow",
   );
-  assert.equal(
-    JSON.parse(await readArtifact(workspace, job.jobId, "result.json"))
-      .acceptanceEvidence[0].status,
-    "evidence_available",
+  const result = JSON.parse(
+    await readArtifact(workspace, job.jobId, "result.json"),
   );
+  assert.equal(result.acceptanceEvidence[0].status, "unverified");
+  assert.equal(result.evidenceAvailable, false);
+  assert.equal(result.verificationStatus, "unverified");
 });
 
 test("git baseline is recorded and isolated execution stays pinned when HEAD drifts", async () => {

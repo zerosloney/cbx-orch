@@ -4,6 +4,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { loadRuntimeConfig } from "../src/storage.js";
 import {
   createJob,
   listJobs,
@@ -136,6 +137,126 @@ test(".cbx.json provides defaults and tasks can be listed", async () => {
     jobId: "config-job",
   });
   assert.equal((await listJobs(workspace))[0].jobId, "config-job");
+});
+
+test("mergeConfig defaults to isolated execution while preserving explicit values", () => {
+  assert.equal(mergeConfig({}, {}).isolated, true);
+  assert.equal(mergeConfig({ isolated: false }, {}).isolated, false);
+  assert.equal(mergeConfig({}, { isolated: false }).isolated, false);
+  assert.equal(mergeConfig({ isolated: true }, {}).isolated, true);
+  assert.equal(mergeConfig({}, { isolated: true }).isolated, true);
+});
+
+test("loadRuntimeConfig accepts the four execution profiles", async () => {
+  for (const profile of [
+    "fast",
+    "verified",
+    "governed",
+    "untrusted",
+  ] as const) {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-profile-"));
+    await writeFile(
+      path.join(workspace, ".cbx.json"),
+      JSON.stringify({ profile }),
+      "utf8",
+    );
+    assert.equal((await loadRuntimeConfig(workspace)).profile, profile);
+  }
+});
+
+test("loadRuntimeConfig rejects an unknown execution profile", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-profile-"));
+  await writeFile(
+    path.join(workspace, ".cbx.json"),
+    JSON.stringify({ profile: "strict" }),
+    "utf8",
+  );
+  await assert.rejects(
+    () => loadRuntimeConfig(workspace),
+    /未知 execution profile。可选值：fast、verified、governed、untrusted。/,
+  );
+});
+
+test("mergeConfig applies profile defaults without overriding explicit values", () => {
+  const expected = {
+    fast: {
+      isolated: false,
+      review: false,
+      dependencyGuard: false,
+      approvalBeforeComplete: false,
+      trustMode: "trusted",
+    },
+    verified: {
+      isolated: true,
+      review: true,
+      dependencyGuard: false,
+      approvalBeforeComplete: false,
+      trustMode: "trusted",
+    },
+    governed: {
+      isolated: true,
+      review: true,
+      dependencyGuard: true,
+      approvalBeforeComplete: true,
+      trustMode: "trusted",
+    },
+    untrusted: {
+      isolated: true,
+      review: true,
+      dependencyGuard: true,
+      approvalBeforeComplete: true,
+      trustMode: "untrusted",
+    },
+  } as const;
+  for (const profile of Object.keys(expected) as (keyof typeof expected)[]) {
+    const merged = mergeConfig({ profile }, {});
+    assert.equal(merged.profile, profile);
+    assert.deepEqual(
+      {
+        isolated: merged.isolated,
+        review: merged.review,
+        dependencyGuard: merged.dependencyGuard,
+        approvalBeforeComplete: merged.approvalBeforeComplete,
+        trustMode: merged.trustMode,
+      },
+      expected[profile],
+    );
+  }
+
+  const explicit = mergeConfig(
+    {
+      profile: "governed",
+      isolated: false,
+      review: false,
+      dependencyGuard: false,
+      approval: { beforeComplete: false },
+      execution: { trustMode: "trusted" },
+    },
+    {
+      profile: "untrusted",
+      isolated: false,
+      review: false,
+      dependencyGuard: false,
+      approvalBeforeComplete: false,
+      trustMode: "trusted",
+    },
+  );
+  assert.equal(explicit.profile, "untrusted");
+  assert.equal(explicit.isolated, false);
+  assert.equal(explicit.review, false);
+  assert.equal(explicit.dependencyGuard, false);
+  assert.equal(explicit.approvalBeforeComplete, false);
+  assert.equal(explicit.trustMode, "trusted");
+});
+
+test("mergeConfig keeps current defaults when profile is unset", () => {
+  const merged = mergeConfig({}, {});
+  assert.equal(merged.profile, undefined);
+  assert.equal(merged.isolated, true);
+  assert.equal(merged.review, false);
+  assert.equal(merged.dependencyGuard, false);
+  assert.equal(merged.approvalBeforeComplete, false);
+  assert.equal(merged.trustMode, "trusted");
 });
 
 test("untrusted mode requires a configured runner plugin (no runner → rejected)", async () => {

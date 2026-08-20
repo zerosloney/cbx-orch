@@ -1,11 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  copyFile,
-  mkdtemp,
-  readFile,
-  writeFile,
-} from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";

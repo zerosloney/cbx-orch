@@ -329,7 +329,7 @@ test("cli: run 使用 --task-file 读取任务", async () => {
   const taskFile = path.join(workspace, "task.txt");
   await writeFile(taskFile, "从文件读取的任务", "utf8");
   // 加 --timeout-ms 让任务快速失败，只验证参数解析阶段不提示缺 task
-  const { code, stdout, stderr } = run(["run", "--workspace", workspace, "--task-file", taskFile, "--executor", "codebuddy", "--timeout-ms", "100", "--max-turns", "1"]);
+  const { code, stdout, stderr } = run(["run", "--workspace", workspace, "--task-file", taskFile, "--executor", "codebuddy", "--timeout-ms", "100", "--max-turns", "1", "--no-isolated"]);
   // run 命令失败时仍返回 0（除非 --ci）；验证参数解析已通过
   assert.equal(code, 0);
   const combined = stdout + stderr;

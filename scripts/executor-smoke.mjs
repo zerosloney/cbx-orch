@@ -13,89 +13,99 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { BUILTIN_EXECUTORS, findExecutable, resolveExecutor } from "../dist/src/executors/builtin.js";
+import { BUILTIN_EXECUTORS, locateExecutable, resolveExecutor } from "../dist/src/executors/builtin.js";
 
 const SMOKE_TIMEOUT_MS = 90_000;
 
 const onlyArgIndex = process.argv.indexOf("--executor");
 const only = onlyArgIndex >= 0 ? process.argv[onlyArgIndex + 1] : undefined;
 
-let passed = 0;
-let skipped = 0;
-let failed = 0;
+async function main() {
+  let passed = 0;
+  let skipped = 0;
+  let failed = 0;
 
-for (const spec of BUILTIN_EXECUTORS) {
-  if (only && spec.name !== only && !spec.aliases.includes(only)) continue;
-  const command = findExecutable(spec);
-  if (command.length === 0) {
-    console.log(`SKIP ${spec.name}: 未安装（PATH 上找不到 ${spec.candidates.join(" / ")}）`);
-    skipped += 1;
-    continue;
+  for (const spec of BUILTIN_EXECUTORS) {
+    if (only && spec.name !== only && !spec.aliases.includes(only)) continue;
+    const configured = process.env[spec.envVar];
+    const command = await locateExecutable(spec);
+    if (!command) {
+      if (configured !== undefined) {
+        console.error(`FAIL ${spec.name}: ${spec.envVar} 指向的路径不存在：${configured}`);
+        failed += 1;
+        continue;
+      }
+      console.log(`SKIP ${spec.name}: 未安装（PATH 上找不到 ${spec.candidates.join(" / ")}）`);
+      skipped += 1;
+      continue;
+    }
+    // 临时 git 仓库内跑最小任务，避免污染真实工作区。
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cbx-smoke-"));
+    spawnSync("git", ["init", "-b", "main"], { cwd: dir, stdio: "ignore" });
+    writeFileSync(path.join(dir, "README.md"), "cbx executor smoke\n");
+    spawnSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "cbx-smoke",
+      GIT_AUTHOR_EMAIL: "smoke@cbx.test",
+      GIT_COMMITTER_NAME: "cbx-smoke",
+      GIT_COMMITTER_EMAIL: "smoke@cbx.test",
+    };
+    spawnSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: dir,
+      stdio: "ignore",
+      env: gitEnv,
+    });
+    const resolved = resolveExecutor(spec.name);
+    if (!resolved) {
+      console.error(`FAIL ${spec.name}: 注册表解析失败`);
+      failed += 1;
+      continue;
+    }
+    const args = resolved.buildArgs({
+      prompt: "不要修改任何文件，只回复 OK。",
+      permissionMode: "auto",
+      maxTurns: 1,
+    });
+    const startedAt = Date.now();
+    const result = spawnSync(command[0], [...command.slice(1), ...args], {
+      cwd: dir,
+      encoding: "utf8",
+      timeout: SMOKE_TIMEOUT_MS,
+      env: process.env,
+    });
+    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const ok = result.status === 0 && !result.error;
+    // 清理临时目录（真实编码 CLI 可能在目录内留下 worktree/缓存）。
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* 清理失败不掩盖结果 */
+    }
+    if (ok) {
+      console.log(`PASS ${spec.name} (${elapsed}s)`);
+      passed += 1;
+    } else {
+      const tail = (text) =>
+        String(text ?? "").replace(/\s+/g, " ").trim().slice(-300);
+      console.error(
+        `FAIL ${spec.name} (${elapsed}s): status=${result.status} error=${result.error?.message ?? "无"}`,
+      );
+      console.error(`  stdout 尾: ${tail(result.stdout)}`);
+      console.error(`  stderr 尾: ${tail(result.stderr)}`);
+      failed += 1;
+    }
   }
-  // 临时 git 仓库内跑最小任务，避免污染真实工作区。
-  const dir = mkdtempSync(path.join(os.tmpdir(), "cbx-smoke-"));
-  spawnSync("git", ["init", "-b", "main"], { cwd: dir, stdio: "ignore" });
-  writeFileSync(path.join(dir, "README.md"), "cbx executor smoke\n");
-  spawnSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
-  const gitEnv = {
-    ...process.env,
-    GIT_AUTHOR_NAME: "cbx-smoke",
-    GIT_AUTHOR_EMAIL: "smoke@cbx.test",
-    GIT_COMMITTER_NAME: "cbx-smoke",
-    GIT_COMMITTER_EMAIL: "smoke@cbx.test",
-  };
-  spawnSync("git", ["commit", "-m", "init", "--no-verify"], {
-    cwd: dir,
-    stdio: "ignore",
-    env: gitEnv,
-  });
-  const resolved = resolveExecutor(spec.name);
-  if (!resolved) {
-    console.error(`FAIL ${spec.name}: 注册表解析失败`);
-    failed += 1;
-    continue;
+
+  console.log(`\nsmoke 结果：${passed} 通过 / ${skipped} 跳过（未安装）/ ${failed} 失败`);
+  if (failed > 0) {
+    console.error(`存在失败执行器；adapter 参数可能已与真实 CLI 漂移，请对照 README 执行器表核对。`);
+    process.exit(1);
   }
-  const args = resolved.buildArgs({
-    prompt: "不要修改任何文件，只回复 OK。",
-    permissionMode: "auto",
-    maxTurns: 1,
-  });
-  const startedAt = Date.now();
-  const result = spawnSync(command[0], [...command.slice(1), ...args], {
-    cwd: dir,
-    encoding: "utf8",
-    timeout: SMOKE_TIMEOUT_MS,
-    env: process.env,
-  });
-  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-  const ok = result.status === 0 && !result.error;
-  // 清理临时目录（真实编码 CLI 可能在目录内留下 worktree/缓存）。
-  try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch {
-    /* 清理失败不掩盖结果 */
-  }
-  if (ok) {
-    console.log(`PASS ${spec.name} (${elapsed}s)`);
-    passed += 1;
-  } else {
-    const tail = (text) =>
-      String(text ?? "").replace(/\s+/g, " ").trim().slice(-300);
-    console.error(
-      `FAIL ${spec.name} (${elapsed}s): status=${result.status} error=${result.error?.message ?? "无"}`,
-    );
-    console.error(`  stdout 尾: ${tail(result.stdout)}`);
-    console.error(`  stderr 尾: ${tail(result.stderr)}`);
-    failed += 1;
+  if (passed === 0) {
+    console.error("没有任何已安装执行器被测试。先安装至少一个编码 CLI（codebuddy/opencode/omp/cline/qwen）。");
+    process.exit(2);
   }
 }
 
-console.log(`\nsmoke 结果：${passed} 通过 / ${skipped} 跳过（未安装）/ ${failed} 失败`);
-if (failed > 0) {
-  console.error(`存在失败执行器；adapter 参数可能已与真实 CLI 漂移，请对照 README 执行器表核对。`);
-  process.exit(1);
-}
-if (passed === 0) {
-  console.error("没有任何已安装执行器被测试。先安装至少一个编码 CLI（codebuddy/opencode/omp/cline/qwen）。");
-  process.exit(2);
-}
+await main();

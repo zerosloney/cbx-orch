@@ -3,6 +3,10 @@
   "required": ["task"],
   "properties": {
     "task": { "type": "string" },
+    "profile": {
+      "type": "string",
+      "enum": ["fast", "verified", "governed", "untrusted"]
+    },
     "context_snapshot": {
       "type": "string",
       "description": "父会话提炼的目标补充、计划、关键文件或命令输出及约束"

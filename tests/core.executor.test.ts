@@ -611,8 +611,14 @@ test("invokeExecutor returns friendly Chinese guidance instead of raw ENOENT", a
       1_000,
     );
     assert.equal(result.code, -1);
-    assert.ok(result.output.includes(`${spec.envVar} 指向的路径不存在`), result.output);
-    const events = await readFile(path.join(directory, "events.ndjson"), "utf8");
+    assert.ok(
+      result.output.includes(`${spec.envVar} 指向的路径不存在`),
+      result.output,
+    );
+    const events = await readFile(
+      path.join(directory, "events.ndjson"),
+      "utf8",
+    );
     assert.match(events, /"event":"process_started"/);
     assert.match(events, /"event":"process_finished","returncode":-1/);
   } finally {

@@ -2,6 +2,7 @@ import path from "node:path";
 import { CbxError } from "./errors.js";
 import { saveJson, loadJson } from "./storage.js";
 import type { JobContext } from "./types.js";
+import { isExecutionProfile } from "./profile.js";
 
 function contextFieldError(field: string, expectation: string): CbxError {
   return new CbxError(
@@ -123,6 +124,11 @@ export function validateJobContext(value: unknown): JobContext {
     "gitRoot",
   ])
     optionalContextString(raw, field);
+  if (raw.profile !== undefined && !isExecutionProfile(raw.profile))
+    throw contextFieldError(
+      "profile",
+      "缺省或为 fast/verified/governed/untrusted",
+    );
   for (const field of [
     "keepWorktree",
     "approvalBeforeRun",

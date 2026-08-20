@@ -57,6 +57,22 @@ export type { QueueEntry, QueueEntryStatus, QueueFile } from "./queue.js";
 // Re-export validation functions that were previously exported from core
 export { assertJobId, normalizeJobId, validateWorkspace, validateTestCommand, validatePermissionMode, assertExecutionPolicy, normalizeTaskContract } from "./validation.js";
 
+// Execution profiles
+export {
+  EXECUTION_PROFILES,
+  isExecutionProfile,
+  parseExecutionProfile,
+  validateExecutionProfile,
+  profileDefaults,
+  assertExecutionProfile,
+} from "./profile.js";
+export type {
+  ExecutionProfile,
+  TrustMode,
+  ExecutionProfileDefaults,
+  ExecutionProfileOptions,
+} from "./profile.js";
+
 // Re-export evidence functions that were previously exported from core
 export { AUDIT_EVIDENCE_ARTIFACTS, evidenceHashes, completionEvidenceValid, parsePendingCompletion, worktreeSha256, structuredAuditRequested } from "./evidence.js";
 export type { PendingCompletion } from "./evidence.js";

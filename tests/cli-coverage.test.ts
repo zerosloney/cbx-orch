@@ -395,6 +395,7 @@ test("cli: run --task 内联创建任务并执行（无 --job-id 分支）", asy
       'node -e "process.exit(0)"',
       "--workspace",
       workspace,
+      "--no-isolated",
       "--ci",
     ],
     { FAKE_JOB_DIR: "" },

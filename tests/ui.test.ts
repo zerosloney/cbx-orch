@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -737,6 +737,87 @@ test("HTTP: POST /api/jobs 创建任务并后台执行（缺 task → 400）", a
     const state = await loadState(workspace, body.job_id);
     assert.equal(state.jobId, body.job_id);
     assert.equal(state.status, "queued");
+  });
+});
+
+test("HTTP: POST /api/jobs 透传 profile 并拒绝非法值", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-http-profile-"));
+  await withServer(workspace, undefined, async (port) => {
+    const valid = await fetch(`http://127.0.0.1:${port}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        task: "UI profile",
+        profile: "fast",
+        isolated: false,
+        review: false,
+      }),
+    });
+    assert.equal(valid.status, 201);
+    const body = (await valid.json()) as { job_id: string };
+    const context = JSON.parse(
+      await readFile(path.join(jobDir(workspace, body.job_id), "context.json"), "utf8"),
+    ) as { profile?: string };
+    assert.equal(context.profile, "fast");
+
+    const invalid = await fetch(`http://127.0.0.1:${port}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task: "UI invalid profile", profile: "strict" }),
+    });
+    assert.equal(invalid.status, 400);
+    const error = (await invalid.json()) as { error: string };
+    assert.match(error.error, /未知 execution profile。可选值/);
+  });
+});
+
+test("HTTP: POST /api/jobs 持久化 approvalBeforeComplete 的请求与配置值", async () => {
+  const requestWorkspace = await mkdtemp(
+    path.join(os.tmpdir(), "cbx-http-approval-request-"),
+  );
+  await withServer(requestWorkspace, undefined, async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        task: "请求审批配置",
+        isolated: false,
+        review: false,
+        approval_before_complete: true,
+      }),
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { job_id: string };
+    const context = JSON.parse(
+      await readFile(path.join(jobDir(requestWorkspace, body.job_id), "context.json"), "utf8"),
+    ) as { approvalBeforeComplete?: boolean };
+    assert.equal(context.approvalBeforeComplete, true);
+  });
+
+  const configWorkspace = await mkdtemp(
+    path.join(os.tmpdir(), "cbx-http-approval-config-"),
+  );
+  await writeFile(
+    path.join(configWorkspace, ".cbx.json"),
+    JSON.stringify({ approval: { beforeComplete: true } }),
+    "utf8",
+  );
+  await withServer(configWorkspace, undefined, async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        task: "配置审批默认",
+        isolated: false,
+        review: false,
+      }),
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { job_id: string };
+    const context = JSON.parse(
+      await readFile(path.join(jobDir(configWorkspace, body.job_id), "context.json"), "utf8"),
+    ) as { approvalBeforeComplete?: boolean };
+    assert.equal(context.approvalBeforeComplete, true);
   });
 });
 

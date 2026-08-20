@@ -15,6 +15,7 @@ import {
   retryQueueJob,
   startBackground,
 } from "./helpers.js";
+import { loadJobContext } from "../src/context-schema.js";
 
 test("semantic review failures pause without automatic implementation retries", async () => {
   const { workspace } = await setupFake();
@@ -304,5 +305,130 @@ test("createJob rejects blank tasks and fractional maxTurns", async () => {
   await assert.rejects(
     () => createJob({ ...base, task: "整数校验", maxTurns: 1.5 }),
     /maxTurns 必须是正整数/,
+  );
+});
+
+test("execution profiles reject invalid combinations before job persistence", async () => {
+  const { workspace } = await setupFake();
+  const base = {
+    workspace,
+    task: "profile validation",
+    review: true,
+    isolated: true,
+    permissionMode: "auto",
+    maxTurns: 5,
+    testCommand: "npm test",
+  } as const;
+  const rejects = [
+    {
+      jobId: "profile-verified-no-test",
+      options: { profile: "verified" as const, testCommand: undefined },
+      message: /verified profile 要求 testCommand 非空/,
+    },
+    {
+      jobId: "profile-verified-no-isolation",
+      options: { profile: "verified" as const, isolated: false },
+      message: /verified profile 要求 isolated=true/,
+    },
+    {
+      jobId: "profile-verified-no-review",
+      options: { profile: "verified" as const, review: false },
+      message: /verified profile 要求 review=true/,
+    },
+    {
+      jobId: "profile-governed-no-dependency-guard",
+      options: {
+        profile: "governed" as const,
+        dependencyGuard: false,
+        approvalBeforeComplete: true,
+      },
+      message: /governed profile 要求 dependencyGuard=true/,
+    },
+    {
+      jobId: "profile-governed-no-approval",
+      options: {
+        profile: "governed" as const,
+        dependencyGuard: true,
+        approvalBeforeComplete: false,
+      },
+      message: /governed profile 要求 approvalBeforeComplete=true/,
+    },
+    {
+      jobId: "profile-untrusted-mismatch",
+      options: {
+        profile: "untrusted" as const,
+        dependencyGuard: true,
+        approvalBeforeComplete: true,
+        trustMode: "trusted" as const,
+      },
+      message: /untrusted profile 要求 trustMode=untrusted/,
+    },
+  ];
+  for (const item of rejects) {
+    await assert.rejects(
+      () => createJob({ ...base, ...item.options, jobId: item.jobId }),
+      item.message,
+    );
+    assert.equal(
+      existsSync(path.join(workspace, ".cbx", "jobs", item.jobId)),
+      false,
+      `${item.jobId} 不应创建任务目录`,
+    );
+  }
+});
+
+test("valid execution profile is persisted and legacy context remains loadable", async () => {
+  const { workspace } = await setupFake();
+  const profiled = await createJob({
+    workspace,
+    task: "profile persistence",
+    testCommand: "npm test",
+    review: true,
+    isolated: true,
+    permissionMode: "auto",
+    maxTurns: 5,
+    profile: "verified",
+    jobId: "profile-persisted",
+  });
+  const persisted = JSON.parse(
+    await readFile(path.join(profiled.directory, "context.json"), "utf8"),
+  ) as { profile?: string };
+  assert.equal(persisted.profile, "verified");
+  assert.equal((await loadJobContext(profiled.directory)).profile, "verified");
+
+  const legacy = await createJob({
+    workspace,
+    task: "legacy context",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "profile-legacy",
+  });
+  const legacyContext = await loadJobContext(legacy.directory);
+  assert.equal(legacyContext.profile, undefined);
+});
+
+test("context schema rejects an unknown execution profile", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({
+    workspace,
+    task: "invalid context profile",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 5,
+    jobId: "profile-invalid-context",
+  });
+  const contextFile = path.join(job.directory, "context.json");
+  const context = JSON.parse(await readFile(contextFile, "utf8"));
+  await writeFile(
+    contextFile,
+    JSON.stringify({ ...context, profile: "strict" }),
+    "utf8",
+  );
+  await assert.rejects(
+    () => loadJobContext(job.directory),
+    /context\.json 无效：profile 缺省或为 fast\/verified\/governed\/untrusted。/,
   );
 });

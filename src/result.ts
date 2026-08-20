@@ -63,7 +63,8 @@ export async function writeResult(workspace: string, jobId: string, state: JobSt
   const changedFiles = (status ?? "").split(/\r?\n/).filter(Boolean).map(line => line.slice(3).replace(/^.* -> /, ""));
   const requiredEvidenceArtifacts = ["complete.patch", "test.log", ...(context.reviewRequested ? ["review.md"] : [])];
   const evidenceArtifacts = requiredEvidenceArtifacts.filter(file => existsSync(path.join(directory, file)));
-  const evidenceAvailable = state.status === "done" && state.testExitCode === 0 && (!context.reviewRequested || state.reviewVerdict === "PASS" || (!structuredAuditRequested(context) && (state.reviewVerdict === null || state.reviewVerdict === undefined))) && evidenceArtifacts.length === requiredEvidenceArtifacts.length;
+  const evidenceAvailable = Boolean(context.testCommand?.trim()) && state.status === "done" && state.testExitCode === 0 && (!context.reviewRequested || state.reviewVerdict === "PASS" || (!structuredAuditRequested(context) && (state.reviewVerdict === null || state.reviewVerdict === undefined))) && evidenceArtifacts.length === requiredEvidenceArtifacts.length;
+  const verificationStatus = evidenceAvailable ? "verified" : "unverified";
   const progress = state.verifiedProgress as VerifiedProgress | undefined;
   const progressById = new Map((progress?.criteria ?? []).map(item => [item.id, item]));
   const acceptanceEvidence = criterionDefinitions(context.taskContract?.acceptanceCriteria ?? []).map(({ id, criterion }) => {
@@ -73,6 +74,7 @@ export async function writeResult(workspace: string, jobId: string, state: JobSt
   });
   await saveJson(path.join(directory, "result.json"), {
     jobId, status: state.status, phase: state.phase, attempt: state.attempt,
+    evidenceAvailable, verificationStatus,
     estimatedTokens,
     error: state.error ?? null, executorExitCode: state.executorExitCode ?? null,
     testExitCode: state.testExitCode ?? null, reviewVerdict: state.reviewVerdict ?? null,

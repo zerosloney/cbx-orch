@@ -182,8 +182,8 @@ graph LR
 注册后 `--executor gemini` 与 stage 的 `executor: "gemini"` 直接可用。查看注册结果与二进制可用性：
 
 ```powershell
-node dist\src\cli.js agents            # 表格视图
-node dist\src\cli.js agents --json     # 机器可读
+cbx agents --workspace .                # 表格视图
+cbx agents --workspace . --json         # 机器可读
 curl http://127.0.0.1:4173/api/agents  # Web UI 同款数据
 ```
 
@@ -205,6 +205,7 @@ spec 校验失败（缺字段、name 冲突）不会中断其他 agent 的注册
 ```json
 {
   "executor": "codebuddy",
+  "profile": "verified",
   "testCommand": "npm test",
   "review": true,
   "isolated": true,
@@ -228,7 +229,8 @@ spec 校验失败（缺字段、name 冲突）不会中断其他 agent 的注册
     "bugfix": {
       "task": "修复 review.md 中的问题",
       "test": "npm test",
-      "review": true
+      "review": true,
+      "profile": "verified"
     },
     "feature": { "task": "实现新功能", "executor": "opencode" }
   },
@@ -271,9 +273,66 @@ spec 校验失败（缺字段、name 冲突）不会中断其他 agent 的注册
 }
 ```
 
+### 任务模板
+
+任务模板来自目标仓库 `.cbx.json` 的 `templates` 字段。查看当前 workspace 的模板目录：
+
+```powershell
+cbx templates --workspace .
+cbx templates --workspace . --json
+```
+
+默认输出每个模板的名称、`profile` 和 `task` 摘要；`--json` 输出 `{ "templates": [...] }`，便于脚本读取。模板可设置 `task`、`test`、`review`、`executor`、`isolated` 和可选的 `profile`（`fast`/`verified`/`governed`/`untrusted`）：
+
+```json
+{
+  "templates": {
+    "bugfix": {
+      "task": "修复 review.md 中的问题",
+      "test": "npm test",
+      "review": true,
+      "profile": "verified"
+    }
+  }
+}
+```
+
+使用 `cbx run` 或 `cbx start` 的 `--template <name>` 展开模板。profile 的优先级为：CLI 显式 `--profile` > 模板 `profile` > 配置文件顶层 `profile`。
+
+```powershell
+cbx start --workspace . --template bugfix
+cbx start --workspace . --template bugfix --profile fast
+```
+
+### 执行档位（Execution Profiles）
+
+`profile` 可写在 `.cbx.json` 顶层，也可通过 CLI `--profile fast|verified|governed|untrusted`、MCP `cbx_start.profile` 或 Web 请求体的 `profile` 传入。入口显式传入的 profile 会覆盖配置文件值。四档预设如下：
+
+| 档位        | 默认行为与创建硬约束                                                                                                  |
+| ----------- | --------------------------------------------------------------------------------------------------------------------- |
+| `fast`      | 默认不启用 Git worktree 隔离（`isolated=false`）和独立审查（`review=false`），不强制测试命令；信任模式为 `trusted`。  |
+| `verified`  | 默认启用隔离与独立审查（`isolated=true`、`review=true`）；必须提供非空测试命令。                                      |
+| `governed`  | `verified` 的约束，再要求依赖锁文件守卫（`dependencyGuard=true`）和完成前人工审批（`approval.beforeComplete=true`）。 |
+| `untrusted` | `governed` 的约束，并要求 `trustMode=untrusted`；还必须配置提供容器级隔离的 `execution.runner`，否则创建会被拒绝。    |
+
+显式字段会覆盖 profile 的默认值，但覆盖后的配置仍必须满足对应硬约束；例如 `verified` 显式设置 `review=false` 或 `isolated=false` 会在任务创建阶段拒绝。除 `untrusted` 外，其余 profile 不允许使用 `trustMode=untrusted`。未设置 profile 时沿用现有字段默认值。
+
+### Doctor 诊断
+
+`cbx doctor` 是只读环境诊断，不创建任务、不写工作区，也不会启动任何 Agent。它检查 Node.js >= 22、workspace 目录、`.cbx.json` 配置与 profile 硬约束、Git、executor 可用性，以及 `untrusted` 模式所需的 runner 文件：
+
+```powershell
+node dist/src/cli.js doctor --workspace .
+node dist/src/cli.js doctor --workspace . --json
+```
+
+默认输出人类可读的逐项状态；`--json` 输出包含 `checks` 的机器可读报告。任一检查为 `fail` 时返回非零退出码；只有 `warn` 或 `pass` 时返回 0。
+
 任务管理：
 
 ```powershell
+node dist/src/cli.js doctor --workspace .                   # 只读环境诊断
+node dist/src/cli.js doctor --workspace . --json            # 输出机器可读诊断报告
 node dist/src/cli.js list --workspace .
 node dist/src/cli.js list --limit 50 --workspace .    # 只列出最近 50 条（updated_at 倒序）
 node dist/src/cli.js list --all --workspace A --workspace B            # 跨 workspace 列出任务（带前缀）
@@ -485,6 +544,8 @@ MCP 还提供 `resources/list` 和 `resources/read`，可直接读取任务的 `
 `cbx_start` 还支持：`max_turns`（正整数）、`permission_mode`（`default`/`acceptEdits`/`auto`/`dontAsk`，`dontAsk` 需 `allow_unsafe_permissions: true`）、`approval_before_run`（执行前审批门，对应 `approval.beforeRun`）、`dependency_guard`（lockfile 哈希守卫）；`task_contract.stages[].depends_on`（前置 stage name 数组，对应 CLI 的 `dependsOn`）。`approval_before_complete`（测试+审查通过后，落 `done` 前再停一次审批门，对应 `.cbx.json` 的 `approval.beforeComplete`，批准入口同 `cbx approve`）；`adaptive`（对象，snake_case 字段 `enabled`/`max_rounds`/`manager_executor`，启用后由独立 manager executor 每轮决策跑哪个 stage，超出 `max_rounds` 触发 `needs_fix / adaptive_max_rounds` Human Gate，可用 `cbx_continue` 的 `extra_rounds` 续跑；`adaptive.enabled=true` 要求 `review=true`）。`cbx_continue` 支持 `extra_rounds`（1–100 整数，仅在 `max_rounds` Human Gate 等待时追加 adaptive 轮次）。
 
 `result.json` 包含 changed files、handback、`stages` 数组（每阶段 exit code 与 review verdict）、测试与验收摘要、基线信息、`humanGate`（人工等待状态）及 artifact SHA-256。最终交付仍应通过 `cbx_artifact` 或 MCP resources 读取并核对 `handback.md`、`complete.patch`、`test.log` 和 `review.md`，不要只根据状态元数据总结。
+
+`result.json` 的 `evidenceAvailable` 只有在配置了非空测试命令、测试成功且既有 review/证据条件均满足时才为 `true`，此时 `verificationStatus` 为 `"verified"`。未提供测试命令的任务仍可进入 `done`，但结果必须标记为 `evidenceAvailable: false`、`verificationStatus: "unverified"`；占位 `test.log` 不代表测试已验证。
 
 ## ZCode 插件
 

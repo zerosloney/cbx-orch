@@ -1,11 +1,8 @@
-
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import {
-  createJob,
-} from "../src/core.js";
+import { createJob } from "../src/core.js";
 
 export const fakeAgent = `
 import { access, appendFile, mkdir, writeFile } from "node:fs/promises";

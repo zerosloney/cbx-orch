@@ -5,6 +5,7 @@ import type {
 } from "./validation.js";
 import type { RuntimeConfig } from "./storage.js";
 import type { ContextBudget } from "./context-pack.js";
+import type { ExecutionProfile } from "./profile.js";
 
 export type Json = Record<string, unknown>;
 
@@ -86,6 +87,7 @@ export interface JobContext {
   createdAt: string;
   /** 创建时的原始任务描述，供运行时路由/审查做能力匹配。 */
   taskText?: string;
+  profile?: ExecutionProfile;
   testCommand?: string;
   reviewRequested: boolean;
   isolated: boolean;

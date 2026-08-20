@@ -18,6 +18,10 @@ import {
   normalizeJobId,
   normalizeTaskContract,
 } from "./validation.js";
+import {
+  assertExecutionProfile,
+  type ExecutionProfile,
+} from "./profile.js";
 import { normalizeAdaptiveOptions } from "./adaptive-manager.js";
 import {
   snapshotGitBaseline,
@@ -67,6 +71,7 @@ export async function createJob(options: {
   executor?: string;
   reviewExecutor?: string;
   trustMode?: "trusted" | "untrusted";
+  profile?: ExecutionProfile;
   contextSnapshot?: string;
   taskContract?: TaskContract;
   adaptive?: Partial<import("./adaptive-manager.js").AdaptiveOptions>;
@@ -127,6 +132,15 @@ export async function createJob(options: {
     );
     options.isolated = true;
   }
+  assertExecutionProfile({
+    profile: options.profile,
+    isolated: options.isolated,
+    review: options.review,
+    testCommand: options.testCommand,
+    dependencyGuard: options.dependencyGuard,
+    approvalBeforeComplete: options.approvalBeforeComplete,
+    trustMode: options.trustMode,
+  });
   // 测试命令黑名单是软防线（正则可被变体绕过）。非隔离时强警告：cbx 不保证命令安全，应运行在受控环境。
   if (options.testCommand && !options.isolated) {
     console.error(
@@ -204,6 +218,7 @@ export async function createJob(options: {
     createdAt: now(),
     testCommand: options.testCommand,
     taskText: options.task,
+    profile: options.profile,
     reviewRequested: options.review,
     isolated: options.isolated,
     permissionMode: options.permissionMode,

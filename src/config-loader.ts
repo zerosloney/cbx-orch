@@ -2,6 +2,10 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { normalizeAdaptiveOptions } from "./adaptive-manager.js";
 import { isMissing } from "./file-utils.js";
+import {
+  validateExecutionProfile,
+  type ExecutionProfile,
+} from "./profile.js";
 
 export interface TaskTemplate {
   task: string;
@@ -9,9 +13,11 @@ export interface TaskTemplate {
   review?: boolean;
   executor?: string;
   isolated?: boolean;
+  profile?: ExecutionProfile;
 }
 
 export interface RuntimeConfig {
+  profile?: ExecutionProfile;
   testCommand?: string;
   review?: boolean;
   isolated?: boolean;
@@ -130,6 +136,7 @@ export async function loadRuntimeConfig(
   }
   const config = object(parsed, ".cbx.json");
   known(config, ".cbx.json", [
+    "profile",
     "testCommand",
     "review",
     "isolated",
@@ -157,6 +164,7 @@ export async function loadRuntimeConfig(
     "context",
     "templates",
   ]);
+  if (config.profile !== undefined) validateExecutionProfile(config.profile);
   optionalString(config.testCommand, "testCommand");
   optionalBoolean(config.review, "review");
   optionalBoolean(config.isolated, "isolated");
@@ -349,6 +357,7 @@ export async function loadRuntimeConfig(
         "review",
         "executor",
         "isolated",
+        "profile",
       ]);
       if (typeof tpl.task !== "string" || !tpl.task.trim())
         throw new Error(`templates.${name}.task 必须是必填的非空字符串。`);
@@ -356,6 +365,8 @@ export async function loadRuntimeConfig(
       optionalBoolean(tpl.review, `templates.${name}.review`);
       optionalString(tpl.executor, `templates.${name}.executor`);
       optionalBoolean(tpl.isolated, `templates.${name}.isolated`);
+      if (tpl.profile !== undefined)
+        validateExecutionProfile(tpl.profile);
     }
   }
   return config as RuntimeConfig;

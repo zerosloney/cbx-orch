@@ -14,6 +14,8 @@ Job state, event streams, test logs, diffs, and review reports all persist to di
 npm install -g cbx-orch        # published package
 # run from the target repo:
 cbx run --workspace . --task "实现用户登录功能" --test "npm test" --timeout-ms 1800000 --max-retries 1 --review
+cbx doctor --workspace .
+cbx doctor --workspace . --json
 cbx status JOB_ID
 cbx review JOB_ID
 cbx continue JOB_ID --message "fix the issues in review.md"
@@ -44,15 +46,27 @@ Handing a task to an agent CLI directly is a one-shot session: a crash loses the
 | Cline     | `cline`             | `cline`     | `CBX_CLINE`     |
 | Qwen Code | `qwen`              | `qwen`      | `CBX_QWEN`      |
 
-`cbx run`/`start`/`batch`/`ws`/`mcp`/`status`/`list`/`queue`/`dispatch`/`serve`/`health`/`metrics`/`logs`/`files`/`result`/`export`/`review`/`continue`/`approve`/`retry`/`cancel`/`clean`/`forget`/`purge`/`watch`/`ui`/`tui`/`review-gate`/`stop-review-gate` are available (see `cbx --help`).
+`cbx run`/`start`/`batch`/`doctor`/`templates`/`ws`/`mcp`/`status`/`list`/`queue`/`dispatch`/`serve`/`health`/`metrics`/`logs`/`files`/`result`/`export`/`review`/`continue`/`approve`/`retry`/`cancel`/`clean`/`forget`/`purge`/`watch`/`ui`/`tui`/`review-gate`/`stop-review-gate` are available (see `cbx --help`).
+
+### Agent registration and discovery
+
+Custom executors use the AgentSpec JSON contract. Place project-level specs in `.cbx/agents/` (versionable with the repository) or user-level specs in `~/.cbx/agents/`; workspace specs override user-level specs, and built-in names cannot be overridden. Inspect the discovered agents and their binary availability with:
+
+```powershell
+cbx agents --workspace .
+cbx agents --workspace . --json
+```
+
+The human-readable output is a table; `--json` is intended for scripts and integrations.
 
 ## Configuration
 
-`cbx.json` at the repo root (CLI flags override config):
+`.cbx.json` at the repo root (CLI flags override config):
 
 ```json
 {
   "executor": "codebuddy",
+  "profile": "verified",
   "testCommand": "npm test",
   "review": true,
   "isolated": true,
@@ -71,7 +85,8 @@ Handing a task to an agent CLI directly is a one-shot session: a crash loses the
     "bugfix": {
       "task": "修复 review.md 中的问题",
       "test": "npm test",
-      "review": true
+      "review": true,
+      "profile": "verified"
     }
   },
   "adaptive": { "enabled": false, "maxRounds": 8 },
@@ -88,7 +103,62 @@ Handing a task to an agent CLI directly is a one-shot session: a crash loses the
 }
 ```
 
+### Task templates
+
+Task templates come from the `templates` object in the target repository's `.cbx.json`. List the templates for a workspace with:
+
+```powershell
+cbx templates --workspace .
+cbx templates --workspace . --json
+```
+
+The default output shows each template name, `profile`, and a `task` summary. `--json` returns `{ "templates": [...] }` for scripts. A template can set `task`, `test`, `review`, `executor`, `isolated`, and an optional `profile` (`fast`, `verified`, `governed`, or `untrusted`):
+
+```json
+{
+  "templates": {
+    "bugfix": {
+      "task": "修复 review.md 中的问题",
+      "test": "npm test",
+      "review": true,
+      "profile": "verified"
+    }
+  }
+}
+```
+
+Use `--template <name>` with `cbx run` or `cbx start` to expand a template. Profile precedence is: explicit CLI `--profile` > template `profile` > top-level config-file `profile`.
+
+```powershell
+cbx start --workspace . --template bugfix
+cbx start --workspace . --template bugfix --profile fast
+```
+
+### Execution Profiles
+
+`profile` can be set at the top level of `.cbx.json`, or passed through the CLI as `--profile fast|verified|governed|untrusted`, MCP as `cbx_start.profile`, or the Web request body as `profile`. An explicitly supplied entry-point value overrides the config-file value:
+
+| Profile     | Defaults and creation-time constraints                                                                                                                     |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fast`      | Defaults to no Git worktree isolation (`isolated=false`) and no independent review (`review=false`); no test command is required; trust mode is `trusted`. |
+| `verified`  | Enables isolation and independent review by default; a non-empty test command is required.                                                                 |
+| `governed`  | Adds `dependencyGuard=true` and approval before completion (`approval.beforeComplete=true`) to the `verified` constraints.                                 |
+| `untrusted` | Adds `trustMode=untrusted` to the `governed` constraints and also requires `execution.runner` to provide container-level isolation.                        |
+
+Explicit fields override profile defaults, but the resulting configuration must still satisfy the profile's hard constraints; for example, `verified` with `review=false` or `isolated=false` is rejected during task creation. Profiles other than `untrusted` cannot use `trustMode=untrusted`. When no profile is set, the existing field defaults remain in effect.
+
 Unknown fields, wrong types, and out-of-range values are rejected so policy typos fail loudly.
+
+### Doctor diagnostics
+
+`cbx doctor` is a read-only environment check. It does not create jobs, write to the workspace, or start an Agent. It checks Node.js >= 22, the workspace directory, `.cbx.json` configuration and profile constraints, Git, executor availability, and the runner file required by `untrusted` mode:
+
+```powershell
+cbx doctor --workspace .
+cbx doctor --workspace . --json
+```
+
+The default output is human-readable; `--json` returns a machine-readable report with `checks`. A `fail` check returns a non-zero exit code, while `warn` and `pass` return 0.
 
 ### Task contracts
 
@@ -112,6 +182,8 @@ cbx mcp --http --port 8931 --token <t>      # streamable HTTP MCP (2025-06-18, r
 ```
 
 The Web UI binds loopback only; `--ui-token` enables auth via HttpOnly cookie / Bearer header. The MCP server exposes 19+ tools (`cbx_start`, `cbx_status`, `cbx_continue`, `cbx_artifact`, `cbx_review`, …) plus `resources/read` for job artifacts. ZCode and Claude Code marketplace plugins register the MCP server automatically and provide `/cbx-run` etc. slash commands.
+
+In `result.json`, `evidenceAvailable` is `true` and `verificationStatus` is `"verified"` only when a non-empty `testCommand` is configured, the test succeeds, and the existing review/evidence conditions pass. A task without a test command may still reach `done`, but its result is `evidenceAvailable: false` and `verificationStatus: "unverified"`; the placeholder `test.log` does not count as verification.
 
 ## Security notes
 

@@ -3,12 +3,7 @@ import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
-import {
-  setupFake,
-  createJob,
-  executeJob,
-  readArtifact,
-} from "./helpers.js";
+import { setupFake, createJob, executeJob, readArtifact } from "./helpers.js";
 
 test("end-to-end success runs fake agent, test, and review", async () => {
   const { workspace } = await setupFake();
@@ -69,6 +64,8 @@ test("end-to-end success runs fake agent, test, and review", async () => {
     "result.json should include a positive estimatedTokens from agent.log",
   );
   assert.match(result.artifactHashes["complete.patch"], /^[a-f0-9]{64}$/);
+  assert.equal(result.evidenceAvailable, true);
+  assert.equal(result.verificationStatus, "verified");
   assert.equal(result.acceptanceEvidence[0].status, "evidence_available");
   assert.equal(result.audit.completion, "complete");
   assert.equal(result.audit.cleanliness, "clean");
@@ -92,6 +89,34 @@ test("end-to-end success runs fake agent, test, and review", async () => {
     ),
     result.verifiedProgress,
   );
+});
+
+test("completed task without a test command remains unverified in result.json", async () => {
+  const { workspace } = await setupFake();
+  const job = await createJob({
+    workspace,
+    task: "无测试命令",
+    review: false,
+    isolated: false,
+    permissionMode: "auto",
+    maxTurns: 10,
+    timeoutMs: 2_000,
+    maxRetries: 0,
+    jobId: "no-test-command",
+  });
+  process.env.FAKE_JOB_DIR = job.directory;
+  const state = await executeJob(workspace, job.jobId);
+  assert.equal(state.status, "done");
+  assert.equal(state.testExitCode, 0);
+  assert.equal(
+    (await readFile(path.join(job.directory, "test.log"), "utf8")).trim(),
+    "未指定测试命令。",
+  );
+  const result = JSON.parse(
+    await readArtifact(workspace, job.jobId, "result.json"),
+  );
+  assert.equal(result.evidenceAvailable, false);
+  assert.equal(result.verificationStatus, "unverified");
 });
 
 test("structured audit preserves partial criterion progress but blocks completion", async () => {

@@ -6,14 +6,8 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import {
-  redactText,
-  redactSensitive,
-} from "../src/redaction.js";
-import {
-  loadRuntimeConfig,
-  prunePersistedData,
-} from "../src/storage.js";
+import { redactText, redactSensitive } from "../src/redaction.js";
+import { loadRuntimeConfig, prunePersistedData } from "../src/storage.js";
 
 // ---- redactText: 行级字段名脱敏 + 全文 pattern 兜底 ----
 
@@ -141,18 +135,25 @@ test("prunePersistedData: 过期记录删除 + 近期记录和畸形记录保留
   const old = new Date(Date.now() - 10 * 86_400_000).toISOString();
   const recent = new Date().toISOString();
   const lines = [
-    JSON.stringify({ at: old, reason: "old-fail" }),        // 过期 → ndjson+SQLite 各删1
-    JSON.stringify({ createdAt: recent, reason: "recent" }),// 近期 → 保留（SQLite 导入时 at 缺失→now()）
-    JSON.stringify({ at: old, reason: "old-fail-2" }),      // 过期 → ndjson+SQLite 各删1
-    "not-json-at-all",                                      // 畸形 → ndjson 保留；SQLite 导入跳过
-    JSON.stringify({ reason: "no-timestamp" }),              // 缺时间戳 → 保留；SQLite at 缺失→now()
+    JSON.stringify({ at: old, reason: "old-fail" }), // 过期 → ndjson+SQLite 各删1
+    JSON.stringify({ createdAt: recent, reason: "recent" }), // 近期 → 保留（SQLite 导入时 at 缺失→now()）
+    JSON.stringify({ at: old, reason: "old-fail-2" }), // 过期 → ndjson+SQLite 各删1
+    "not-json-at-all", // 畸形 → ndjson 保留；SQLite 导入跳过
+    JSON.stringify({ reason: "no-timestamp" }), // 缺时间戳 → 保留；SQLite at 缺失→now()
     "",
   ];
-  await writeFile(path.join(cbxDir, "delivery-failures.ndjson"), lines.join("\n") + "\n", "utf8");
+  await writeFile(
+    path.join(cbxDir, "delivery-failures.ndjson"),
+    lines.join("\n") + "\n",
+    "utf8",
+  );
   const removed = await prunePersistedData(ws, 3);
   // SQLite 删除 2（at=old 的记录）+ ndjson 删除 2 = 4
   assert.equal(removed, 4);
-  const remaining = await readFile(path.join(cbxDir, "delivery-failures.ndjson"), "utf8");
+  const remaining = await readFile(
+    path.join(cbxDir, "delivery-failures.ndjson"),
+    "utf8",
+  );
   assert.ok(remaining.includes("recent"));
   assert.ok(remaining.includes("not-json-at-all"));
   assert.ok(remaining.includes("no-timestamp"));
@@ -166,7 +167,10 @@ test("prunePersistedData: 全部过期时写空文件", async () => {
   const old = new Date(Date.now() - 30 * 86_400_000).toISOString();
   await writeFile(
     path.join(cbxDir, "delivery-failures.ndjson"),
-    JSON.stringify({ at: old }) + "\n" + JSON.stringify({ createdAt: old }) + "\n",
+    JSON.stringify({ at: old }) +
+      "\n" +
+      JSON.stringify({ createdAt: old }) +
+      "\n",
     "utf8",
   );
   const removed = await prunePersistedData(ws, 1);
@@ -175,7 +179,10 @@ test("prunePersistedData: 全部过期时写空文件", async () => {
   // ndjson: 两行都 old → 删除 2
   // 总计 = 1 + 2 = 3
   assert.equal(removed, 3);
-  const remaining = await readFile(path.join(cbxDir, "delivery-failures.ndjson"), "utf8");
+  const remaining = await readFile(
+    path.join(cbxDir, "delivery-failures.ndjson"),
+    "utf8",
+  );
   assert.equal(remaining, "");
 });
 

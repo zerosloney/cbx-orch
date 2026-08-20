@@ -29,6 +29,7 @@ import { runReviewGate } from "./review-gate.js";
 import { constantTimeEqual } from "./storage.js";
 import { hasJsonContentType, isTrustedLocalRequest } from "./http-guard.js";
 import { APP_VERSION } from "./version.js";
+import { parseExecutionProfile } from "./profile.js";
 
 import cbx_start from "./mcp-schemas/cbx_start.json" with { type: "json" };
 import cbx_status from "./mcp-schemas/cbx_status.json" with { type: "json" };
@@ -171,6 +172,10 @@ export async function callTool(
     // schema 声明 required，但 JSON-RPC 不强制 schema：缺 task 时 String(undefined) 会创建 "undefined" 垃圾任务。
     if (typeof args.task !== "string" || !args.task.trim())
       throw new Error("task 必须是非空字符串。");
+    const profile =
+      args.profile === undefined
+        ? undefined
+        : parseExecutionProfile(args.profile);
     optionalBoolean(args, "approval_before_complete");
     optionalBoolean(args, "approval_before_run");
     optionalBoolean(args, "dependency_guard");
@@ -193,6 +198,7 @@ export async function callTool(
       );
     const config = await loadConfig(root);
     const defaults = mergeConfig(config, {
+      profile,
       testCommand: args.test_command ? String(args.test_command) : undefined,
       review: typeof args.review === "boolean" ? args.review : undefined,
       isolated: typeof args.isolated === "boolean" ? args.isolated : undefined,
@@ -301,6 +307,7 @@ export async function callTool(
       executor: defaults.executor,
       reviewExecutor: defaults.reviewExecutor,
       adaptive: defaults.adaptive,
+      profile: defaults.profile,
       dependencyGuard: defaults.dependencyGuard,
       allowUnsafePermissions: args.allow_unsafe_permissions === true,
     });

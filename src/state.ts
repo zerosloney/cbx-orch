@@ -23,6 +23,8 @@ import { CbxError } from "./errors.js";
 import { cleanupWorktree } from "./worktree.js";
 import { normalizeAdaptiveOptions } from "./adaptive-manager.js";
 import type { JobState, CbxConfig, Json } from "./types.js";
+import { profileDefaults } from "./profile.js";
+import type { ExecutionProfile } from "./profile.js";
 
 /** 把降级路径的失败原因落到 job 事件流，避免裸吞导致排障无据。 */
 export function logJobEvent(
@@ -286,6 +288,7 @@ export function mergeConfig(
     CbxConfig,
     "testCommand" | "reviewRules" | "executor" | "reviewExecutor"
   > & {
+    profile: ExecutionProfile | undefined;
     approvalBeforeRun: boolean;
     approvalBeforeComplete: boolean;
     autoBranch: boolean;
@@ -298,10 +301,13 @@ export function mergeConfig(
     overrides.adaptive,
     normalizeAdaptiveOptions(config.adaptive),
   );
+  const profile = overrides.profile ?? config.profile;
+  const defaults = profile === undefined ? undefined : profileDefaults(profile);
   return {
+    profile,
     testCommand: overrides.testCommand ?? config.testCommand,
-    review: overrides.review ?? config.review ?? false,
-    isolated: overrides.isolated ?? config.isolated ?? false,
+    review: overrides.review ?? config.review ?? defaults?.review ?? false,
+    isolated: overrides.isolated ?? config.isolated ?? defaults?.isolated ?? true,
     timeoutMs: overrides.timeoutMs ?? config.timeoutMs ?? 30 * 60_000,
     maxRetries: overrides.maxRetries ?? config.maxRetries ?? 1,
     maxTurns: overrides.maxTurns ?? config.maxTurns ?? 50,
@@ -313,6 +319,7 @@ export function mergeConfig(
     approvalBeforeComplete:
       overrides.approvalBeforeComplete ??
       config.approval?.beforeComplete ??
+      defaults?.approvalBeforeComplete ??
       false,
     maxConcurrent: overrides.maxConcurrent ?? config.maxConcurrent ?? 2,
     autoBranch: overrides.autoBranch ?? config.git?.autoBranch ?? false,
@@ -323,9 +330,16 @@ export function mergeConfig(
       "chore(cbx): apply task",
     executor: overrides.executor ?? config.executor ?? "codebuddy",
     reviewExecutor: overrides.reviewExecutor ?? config.reviewExecutor,
-    trustMode: overrides.trustMode ?? config.execution?.trustMode ?? "trusted",
+    trustMode:
+      overrides.trustMode ??
+      config.execution?.trustMode ??
+      defaults?.trustMode ??
+      "trusted",
     dependencyGuard:
-      overrides.dependencyGuard ?? config.dependencyGuard ?? false,
+      overrides.dependencyGuard ??
+      config.dependencyGuard ??
+      defaults?.dependencyGuard ??
+      false,
     adaptive,
   };
 }

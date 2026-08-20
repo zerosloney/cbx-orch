@@ -104,7 +104,12 @@ test("MCP: tools/list returns all tool definitions", async () => {
   });
   assert.equal(responses.length, 1);
   const result = (responses[0] as Record<string, unknown>).result as {
-    tools: Array<{ name: string }>;
+    tools: Array<{
+      name: string;
+      inputSchema?: {
+        properties?: Record<string, { enum?: unknown[] }>;
+      };
+    }>;
   };
   const names = result.tools.map((t) => t.name);
   const expected = [
@@ -128,6 +133,13 @@ test("MCP: tools/list returns all tool definitions", async () => {
   ];
   for (const name of expected)
     assert.ok(names.includes(name), `缺少工具：${name}`);
+  const start = result.tools.find((tool) => tool.name === "cbx_start");
+  assert.deepEqual(start?.inputSchema?.properties?.profile?.enum, [
+    "fast",
+    "verified",
+    "governed",
+    "untrusted",
+  ]);
 });
 
 test("MCP: cbx_status returns job state for a real job", async () => {
@@ -348,6 +360,7 @@ test("MCP: cbx_start 透传 max_turns/permission_mode/approval_before_run/depend
           workspace,
           max_turns: 12,
           permission_mode: "auto",
+          profile: "fast",
           approval_before_run: true,
           dependency_guard: true,
           task_contract: {
@@ -382,6 +395,7 @@ test("MCP: cbx_start 透传 max_turns/permission_mode/approval_before_run/depend
     permissionMode: string;
     approvalBeforeRun: boolean;
     dependencyGuard: boolean;
+    profile?: string;
     taskContract?: {
       stages?: Array<{ dependsOn?: string[] }>;
     };
@@ -390,6 +404,7 @@ test("MCP: cbx_start 透传 max_turns/permission_mode/approval_before_run/depend
   assert.equal(ctx.permissionMode, "auto");
   assert.equal(ctx.approvalBeforeRun, true);
   assert.equal(ctx.dependencyGuard, true);
+  assert.equal(ctx.profile, "fast");
   // stage 依赖透传（CLI taskContract.stages[].dependsOn 等价字段）
   assert.equal(ctx.taskContract?.stages?.[1]?.dependsOn?.join(","), "api");
 });
@@ -405,6 +420,8 @@ test("MCP: cbx_start 拒绝非法新参数类型", async () => {
     { keep_worktree: "false" },
     { auto_branch: "false" },
     { auto_commit: "false" },
+    { profile: "strict" },
+    { profile: 1 },
   ];
   for (const extra of cases) {
     const responses = await mcpCall(

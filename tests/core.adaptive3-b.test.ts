@@ -1,13 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile, } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
-import {
-  setupFake,
-  createJob,
-  executeJob,
-} from "./helpers.js";
+import { setupFake, createJob, executeJob } from "./helpers.js";
 
 test("adaptive done with approvalBeforeComplete stops at awaiting_approval without looping (P1-1)", async () => {
   const { workspace } = await setupFake();
@@ -160,6 +156,7 @@ test("CLI adaptive flags persist opt-in settings", async () => {
       "--manager-executor",
       "codebuddy",
       "--approval-before-complete",
+      "--no-isolated",
     ],
     { encoding: "utf8", env: { ...process.env, FAKE_JOB_DIR: "" } },
   );

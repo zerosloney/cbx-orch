@@ -50,7 +50,13 @@ interface ApiDocument {
   openapi: string;
   info: { title: string; version: string };
   servers: Array<{ url: string }>;
-  components: { securitySchemes: Record<string, unknown> };
+  components: {
+    securitySchemes: Record<string, unknown>;
+    schemas: Record<
+      string,
+      { properties?: Record<string, { type?: unknown; enum?: unknown[] }> }
+    >;
+  };
   paths: Record<string, Record<string, Operation>>;
 }
 
@@ -62,6 +68,19 @@ test("buildOpenApiDocument 输出 3.1 结构且含鉴权与 server 定义", () =
   assert.deepEqual(doc.servers, [{ url: "http://127.0.0.1:4173" }]);
   assert.ok(doc.components.securitySchemes.bearerAuth);
   assert.ok(doc.components.securitySchemes.cookieAuth);
+  const createJobRequest = doc.components.schemas.CreateJobRequest;
+  assert.equal(
+    createJobRequest.properties?.approval_before_complete?.type,
+    "boolean",
+  );
+  assert.equal(createJobRequest.properties?.approval_before_run?.type, "boolean");
+  assert.equal(createJobRequest.properties?.dependency_guard?.type, "boolean");
+  assert.deepEqual(createJobRequest.properties?.profile?.enum, [
+    "fast",
+    "verified",
+    "governed",
+    "untrusted",
+  ]);
   assert.ok(Object.keys(doc.paths).length >= 20);
 });
 
