@@ -253,6 +253,7 @@ async function loadDetail(id){
     {name:'overview',label:'概览'},
     {name:'timeline',label:'阶段时间线'},
     {name:'executor',label:'执行器'},
+    {name:'logs',label:'日志'},
     {name:'diff',label:'Diff'},
     {name:'test',label:'Test'},
     {name:'review',label:'Review'},
@@ -325,6 +326,116 @@ function renderStreamEventCard(evt) {
   return div;
 }
 
+// ---- 日志页签：全量 events.ndjson + agent.log，增量游标轮询跟随 ----
+// intentional-simple: 全量拉取后仅渲染最近 LOGS_RENDER_LIMIT 条（与全局流式面板 200 条上限同思路），
+// 内存保留全量数组供过滤/搜索计数；历史很大时升级路径为虚拟滚动。
+var LOGS_RENDER_LIMIT=500;
+var LOGS_POLL_MS=2000;
+var logsPoll=null;
+function stopLogsPoll(){
+  if(logsPoll){clearInterval(logsPoll.timer);logsPoll=null;}
+}
+function jobEventKind(e){
+  if(e.event==='executor_stream_event')return e.kind||'text';
+  return 'lifecycle';
+}
+function logSearchText(e){
+  var meta=e.meta||{};
+  return ((e.event||'')+' '+(e.content||'')+' '+(meta.toolName||'')).toLowerCase();
+}
+function renderJobEventCard(e){
+  if(e.event==='executor_stream_event')return renderStreamEventCard(e);
+  var div=document.createElement('div');
+  div.className='evt-card';
+  div.dataset.eventType='lifecycle';
+  var html='<div class="evt-header"><span class="evt-kind-badge kind-lifecycle">'+esc(e.event||'event')+'</span><span class="t">'+fmt(e.at||'')+'</span></div>';
+  if(e.event==='process_started'&&Array.isArray(e.command))html+='<div class="evt-body">'+esc(e.command.slice(0,4).join(' ')+(e.command.length>4?' …':''))+'</div>';
+  else if(e.event==='process_finished')html+='<div class="evt-body">退出码 '+esc(String(e.returncode))+(e.timedOut?' · 超时':'')+'</div>';
+  div.innerHTML=html;
+  return div;
+}
+function matchLogFilter(e,f){
+  if(f==='all')return true;
+  if(f==='stream')return e.event==='executor_stream_event';
+  return jobEventKind(e)===f;
+}
+async function loadLogsTab(id,panel,result){
+  stopLogsPoll();
+  var terminal=result&&['done','failed','review_failed','cancelled','needs_fix'].indexOf(result.status)>=0;
+  var st={cursor:0,events:[],filter:'all',query:'',follow:!terminal,logOffset:0};
+  var filters=[
+    {key:'all',label:'全部'},
+    {key:'stream',label:'执行器流'},
+    {key:'tool_use',label:'工具'},
+    {key:'thought',label:'思考'},
+    {key:'error',label:'错误'},
+    {key:'lifecycle',label:'生命周期'},
+  ];
+  panel.innerHTML=
+    '<div class="logs-toolbar">'+
+    '<div class="stream-filters" id="logs-filters">'+filters.map(function(f){return '<button type="button" class="stream-filter'+(f.key==='all'?' active':'')+'" data-filter="'+f.key+'">'+f.label+'</button>';}).join('')+'</div>'+
+    '<input type="text" class="stream-search" id="logs-search" placeholder="搜索日志…">'+
+    '<label class="logs-follow"><input type="checkbox" id="logs-follow"'+(st.follow?' checked':'')+(terminal?' disabled':'')+'> 跟随</label>'+
+    '<span class="logs-count" id="logs-count"></span>'+
+    '</div>'+
+    '<div id="logs-events"></div>'+
+    '<h3 style="margin:14px 0 6px;color:#9ecbff">agent.log</h3>'+
+    '<pre class="art-view" id="logs-agentlog" style="display:block;max-height:240px;white-space:pre-wrap"></pre>';
+  var eventsEl=panel.querySelector('#logs-events');
+  var logEl=panel.querySelector('#logs-agentlog');
+  var countEl=panel.querySelector('#logs-count');
+  function renderEvents(){
+    var q=st.query;
+    var shown=st.events.filter(function(e){return matchLogFilter(e,st.filter)&&(!q||logSearchText(e).indexOf(q)>=0);});
+    var omitted=Math.max(0,shown.length-LOGS_RENDER_LIMIT);
+    var html='';
+    if(shown.length===0)html='<p class="hint">暂无'+(st.filter==='all'?'事件':'匹配事件')+'（任务可能尚未开始执行）。</p>';
+    else{
+      if(omitted>0)html+='<p class="hint">已省略前 '+omitted+' 条，仅渲染最近 '+LOGS_RENDER_LIMIT+' 条；完整历史走 <code>cbx logs '+esc(id)+'</code>。</p>';
+      shown.slice(-LOGS_RENDER_LIMIT).forEach(function(e){var c=renderJobEventCard(e);if(c)html+=c.outerHTML;});
+    }
+    eventsEl.innerHTML=html;
+    countEl.textContent=shown.length+' / '+st.events.length+' 条';
+    if(st.follow)eventsEl.scrollTop=eventsEl.scrollHeight;
+  }
+  async function pollEvents(){
+    var data=await cbxFetch('/api/jobs/'+id+'/events?since='+st.cursor).then(function(r){return r.json()});
+    if(data.events&&data.events.length){
+      data.events.forEach(function(s){try{st.events.push(JSON.parse(s));}catch(e){/* 半行/坏行：跳过 */}});
+    }
+    st.cursor=data.next_offset||st.cursor;
+    renderEvents();
+  }
+  async function pollLog(){
+    var chunk=await cbxFetch('/api/jobs/'+id+'/agent.log?since='+st.logOffset).then(function(r){return r.json()});
+    if(chunk.content){
+      logEl.textContent+=chunk.content;
+      if(st.follow)logEl.scrollTop=logEl.scrollHeight;
+    }
+    st.logOffset=chunk.nextOffset||st.logOffset;
+  }
+  panel.querySelector('#logs-filters').addEventListener('click',function(e){
+    var btn=e.target.closest('.stream-filter');if(!btn)return;
+    panel.querySelectorAll('#logs-filters .stream-filter').forEach(function(b){b.classList.remove('active');});
+    btn.classList.add('active');
+    st.filter=btn.dataset.filter;
+    renderEvents();
+  });
+  panel.querySelector('#logs-search').addEventListener('input',function(e){st.query=e.target.value.toLowerCase();renderEvents();});
+  panel.querySelector('#logs-follow').addEventListener('change',function(e){st.follow=e.target.checked;});
+  await pollEvents();
+  await pollLog();
+  if(!terminal){
+    // 详情面板被 loadDetail 重建（换任务/操作后）时自动停；用户切走页签时跳过拉取、回来一次增量追平。
+    logsPoll={timer:setInterval(function(){
+      if(!document.body.contains(panel)){stopLogsPoll();return;}
+      if(!panel.classList.contains('active'))return;
+      pollEvents().catch(function(){});
+      pollLog().catch(function(){});
+    },LOGS_POLL_MS)};
+  }
+}
+
 async function loadTab(id,tab,panelsEl,result){
   var panel=panelsEl.querySelector('.tab-panel[data-tab="'+tab+'"]');
   if(!panel)return;
@@ -381,32 +492,12 @@ async function loadTab(id,tab,panelsEl,result){
       html+='</div>';
       if(ex.command)html+='<div class="cmd">'+esc(ex.command)+'</div>';
 
-      // 流式事件结构化展示 (events.ndjson)
-      try {
-        var evData = await cbxFetch('/api/jobs/' + id + '/events?since=0').then(function(r) { return r.json(); });
-        var streamEvts = (evData.events || []).map(function(s) {
-          try { return JSON.parse(s); } catch(e) { return null; }
-        }).filter(function(e) {
-          return e && e.event === 'executor_stream_event';
-        });
-        if (streamEvts.length > 0) {
-          html += '<h3 style="margin:14px 0 6px;color:#9ecbff">流式执行动向 (Stream Log Events)</h3>';
-          html += '<div style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow:auto;padding:4px;background:#080b11;border:1px solid #2a3140;border-radius:6px">';
-          streamEvts.slice(-30).forEach(function(se) {
-            var card = renderStreamEventCard(se);
-            if (card) html += card.outerHTML;
-          });
-          html += '</div>';
-        }
-      } catch (e) { /* ignore */ }
-
-      // 增量 agent.log 拉取(默认读尾部 256KB)
-      var log=await cbxFetch('/api/jobs/'+id+'/agent.log?since=0').then(function(r){return r.json()});
-      if(log.content){
-        html+='<h3 style="margin:14px 0 6px;color:#9ecbff">agent.log 尾部</h3>';
-        html+='<pre class="art-view" style="display:block;max-height:240px;white-space:pre-wrap">'+esc(log.content)+'</pre>';
-      }
+      // 流式事件与 agent.log 已迁至「日志」页签（全量历史 + 增量跟随），此处只留指引。
+      html+='<p class="hint" style="margin-top:12px">流式事件与 agent.log 的完整历史和实时跟随见「日志」页签。</p>';
       panel.innerHTML=html;
+    }
+    else if(tab==='logs'){
+      await loadLogsTab(id,panel,result);
     }
     else if(tab==='diff'){
       var txt=await cbxFetch('/api/jobs/'+id+'/artifact/complete.patch').then(function(r){return r.text()});
