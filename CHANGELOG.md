@@ -2,7 +2,9 @@
 
 This project follows [Semantic Versioning](https://semver.org/). User-visible behavior changes, security fixes, and migration requirements are recorded here before a release.
 
-## Unreleased
+## 1.2.0 — 2026-08-22
+
+harness router 版本：auto 路由四级能力闭环——历史战绩同层决胜、执行失败降级链、成本/时延策略（best/cheapest/fastest）、任务分类加权；新增 model 级选择（spec.modelArg）与 agent 基准校准（npm run bench:agents）。全部确定性、可审计、无 LLM 依赖。
 
 - Feature: **任务分类加权（路由第四级）**。任务文本经确定性分类器（`src/task-category.ts`，关键词启发式、规则顺序即意图优先级）归入 bugfix/performance/refactor/testing/docs/feature/chore，创建时持久化 `context.taskCategory`；战绩层按 (executor × 分类) 聚合成功率，auto 路由同层决胜优先用分类样本的 Laplace 平滑成功率（无分类样本回退全局、无历史回退中性先验）——agent 可能「修 bug 很行、做新功能不行」，分类口径可推翻全局口径；分类与样本依据写入 `routing.notes` 审计。
 - Feature: **model 级选择**。AgentSpec 新增 `modelArg`（模型 flag，如 `--model`）：任务/配置指定 `model` 时追加 `<modelArg> <model>` 到 spawn 参数（照 `maxTurnsArg` 模式）。入口：`.cbx.json` `model`、CLI `--model`、MCP/Web `model`（优先级入口 > 配置），持久化 `context.model`，主执行与审查调用均透传。内置 CLI 未验证各家模型 flag 前不声明 `modelArg`（避免拼错参数），文件 spec 可立即使用。
