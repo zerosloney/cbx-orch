@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpath as realpathCb } from "node:fs";
 import { mkdir, mkdtemp } from "node:fs/promises";
+import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -11,6 +12,10 @@ import {
 } from "../src/worktree.js";
 import { health } from "../src/queue-api.js";
 import { initializeGitWorkspace } from "./helpers.js";
+
+/** 真实路径归一化：promises API 无 .native，用 callback 版 fs.realpath.native
+ *  （Windows 展开 8.3 短名、macOS 解析符号链接），与 git 报告的最终路径对齐。 */
+const realpathNative = promisify(realpathCb.native);
 
 function git(args: string[], cwd: string) {
   return spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -37,15 +42,19 @@ test("scanOrphanWorktrees reports worktrees whose job directory is gone", async 
   await mkdir(path.join(workspace, ".cbx", "jobs", "live-job"), {
     recursive: true,
   });
+  // CI 环境的 TEMP 路径与字符串形式可能不一致（Windows runner 的 8.3 短名
+  // RUNNER~1、macOS 的 /var→/private/var 符号链接），git 报告的是真实路径；
+  // 两边都归一化到真实路径再比较，本地与 CI 环境均成立。
+  const orphanReal = await realpathNative(orphan);
 
   const orphans = await scanOrphanWorktrees(workspace);
   assert.equal(orphans.length, 1);
-  assert.equal(orphans[0].worktree, orphan);
+  assert.equal(await realpathNative(orphans[0].worktree), orphanReal);
   assert.equal(orphans[0].jobId, "gone-job");
 
   const result = await removeOrphanWorktrees(workspace, orphans);
   assert.deepEqual(result.failed, []);
-  assert.deepEqual(result.removed, [orphan]);
+  assert.deepEqual(result.removed, [orphans[0].worktree]);
   assert.equal(existsSync(orphan), false, "orphan worktree should be removed");
   assert.equal(existsSync(active), true, "live worktree must not be touched");
 });
