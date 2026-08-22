@@ -2,6 +2,16 @@
 
 This project follows [Semantic Versioning](https://semver.org/). User-visible behavior changes, security fixes, and migration requirements are recorded here before a release.
 
+## 1.1.0 — 2026-08-22
+
+治理与诊断版本：执行档位把安全约束收口为一处声明，`cbx doctor` 提供只读环境诊断，任务模板降低重复提交成本，`result.json` 显式区分已验证/未验证交付。
+
+- Feature: **执行档位（Execution Profiles）**。新增 `profile` 四档预设（`fast`/`verified`/`governed`/`untrusted`），把隔离、独立审查、依赖守卫、完成前审批与信任模式的默认组合收口为一处声明：`fast` 默认不隔离、不审查、不强制测试命令；`verified` 要求 `isolated=true`、`review=true` 与非空测试命令；`governed` 再加 `dependencyGuard=true` 与 `approvalBeforeComplete=true`；`untrusted` 还要求 `trustMode=untrusted` 且必须配置提供容器级隔离的 `execution.runner`，否则任务创建被拒绝。可经 `.cbx.json` 顶层、CLI `--profile`、MCP `cbx_start.profile` 或 Web 请求体传入，优先级为入口显式值 > 任务模板 > 配置文件；显式字段可覆盖档位默认值但不得违反对应硬约束（非 `untrusted` 档位不允许 `trustMode=untrusted`）。未设置 profile 时沿用原有字段默认值，行为与 1.0.0 一致。
+- Feature: **`cbx doctor` 只读环境诊断**。逐项检查 Node.js >= 22、workspace 目录、`.cbx.json` 配置加载与 profile 硬约束、Git 根目录、executor 可用性（复用执行期同一条 agent 发现路径）以及 `untrusted` 模式所需 runner 文件；默认输出人类可读逐项状态，`--json` 输出含 `checks` 数组的机器可读报告，任一检查 `fail` 时非零退出。不创建任务、不写工作区、不启动 Agent。
+- Feature: **任务模板**。`.cbx.json` 的 `templates` 字段定义可复用任务预设（`task`/`test`/`review`/`executor`/`isolated`/`profile`），`cbx templates [--json]` 列出模板目录，`cbx run/start --template <name>` 展开提交。
+- Feature: **验证状态显式化**。`result.json` 新增 `evidenceAvailable` 与 `verificationStatus`：仅当配置了非空测试命令、测试成功、review/结构化审计通过且证据文件齐备时才为 `true`/`"verified"`；未提供测试命令的任务仍可进入 `done`，但结果显式标记 `evidenceAvailable: false`、`verificationStatus: "unverified"`——占位 `test.log` 不再可能被误读为"已验证"。
+- Chore: `npm run smoke:executors` 重构为 async 主流程并改用 `locateExecutable` 探测（行为不变：未安装跳过、失败非零退出、支持 `--executor <name>` 过滤）。
+
 ## 1.0.0 — 2026-08-19
 
 首个稳定版本。核心能力已齐备并经多轮加固：五大入口（CLI/TUI/Web UI/MCP/插件）、多执行器适配与声明式注册、agent capabilities 路由、持久化队列与审批门、token 用量可观测、孤儿 worktree 巡检、多平台 CI（Ubuntu/Windows/macOS）与覆盖率门槛（94/85/90）。
