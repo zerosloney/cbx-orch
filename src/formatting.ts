@@ -2,6 +2,7 @@ import chalk, { type ChalkInstance } from "chalk";
 import type { JobState } from "./types.js";
 import type { QueueFile } from "./queue.js";
 import type { AgentProbe } from "./agent-registry.js";
+import type { ExecutorStats } from "./executors/stats.js";
 
 const STATUS_COLORS: Record<string, ChalkInstance> = {
   done: chalk.green,
@@ -178,19 +179,30 @@ export function renderJobsTable(jobs: JobState[]): string {
 export function renderAgentsTable(
   probes: AgentProbe[],
   errors: string[],
+  stats?: ReadonlyMap<string, ExecutorStats>,
 ): string {
-  const headers = ["Agent", "Label", "Source", "Binary", "Path"];
-  const rows = probes.map((p) => [
-    p.aliases.length ? `${p.name} (${p.aliases.join(",")})` : p.name,
-    p.label,
-    p.source,
-    p.available ? chalk.green("ok") : chalk.red("missing"),
-    p.command ? p.command.join(" ") : "—",
-  ]);
+  const headers = ["Agent", "Label", "Source", "Binary", "Path", "Runs", "OK%", "AvgTok", "AvgSec"];
+  const rows = probes.map((p) => {
+    const record = stats?.get(p.name);
+    return [
+      p.aliases.length ? `${p.name} (${p.aliases.join(",")})` : p.name,
+      p.label,
+      p.source,
+      p.available ? chalk.green("ok") : chalk.red("missing"),
+      p.command ? p.command.join(" ") : "—",
+      record ? String(record.runs) : "—",
+      record ? `${Math.round(record.successRate * 100)}%` : "—",
+      record?.avgTokens != null ? String(record.avgTokens) : "—",
+      record?.avgDurationMs != null
+        ? String(Math.round(record.avgDurationMs / 1000))
+        : "—",
+    ];
+  });
   const table = renderTable(headers, rows);
   const hints = [
     table,
     chalk.gray("新增 agent：在 .cbx/agents/（项目）或 ~/.cbx/agents/（用户）放置 spec JSON，无需修改代码。"),
+    chalk.gray("Runs/OK%/AvgTok/AvgSec 为该执行器在本 workspace 的历史战绩（终态任务；auto 路由战绩决胜与 cheapest/fastest 策略的数据源）。"),
   ];
   if (errors.length)
     hints.push(chalk.yellow(`以下 spec 注册失败：\n${errors.map((e) => `  - ${e}`).join("\n")}`));

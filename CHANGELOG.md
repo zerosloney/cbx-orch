@@ -2,6 +2,12 @@
 
 This project follows [Semantic Versioning](https://semver.org/). User-visible behavior changes, security fixes, and migration requirements are recorded here before a release.
 
+## Unreleased
+
+- Feature: **auto 路由策略（成本/时延偏好，harness router 第三级）**。新增 `routingStrategy`（`best`/`cheapest`/`fastest`，缺省 `best`）：策略窗口为最高能力分层（能力契合优先于偏好），`cheapest` 同层按均值 token 升序、`fastest` 按平均任务墙钟升序选优；无该指标样本的 agent 排后，同层全无样本降级为战绩决胜（记入路由 notes）；「多跑零成」（runs≥2 且 done=0）的 agent 在 cheapest/fastest 下剔除——快速失败的便宜是假象。战绩层新增 `avgDurationMs`（终态 `updatedAt−createdAt` 任务墙钟，脏数据容忍），`cbx agents` 表格新增 `AvgSec` 列，`best` 决胜补时长为第三排序键。策略创建时定档持久化到 `context.routingStrategy`（context.json 存在性校验），失败降级链重路由遵守同一策略；入口覆盖 CLI `--routing-strategy`、`.cbx.json` `routingStrategy`、MCP 与 Web 的 `routing_strategy`、任务模板 `routingStrategy`（优先级：入口显式 > 模板 > 配置）。审查路由固定 `best`——审查要质量。
+- Feature: **执行失败降级链（harness router 第二级）**。`executor=auto` 的任务在执行器失败触发执行重试时，重新路由（排除已尝试的 agent、用最新可用性与战绩打分）换下一个候选，而非让同一失败 agent 原样重跑；降级吃既有执行重试预算，不新增尝试次数。降级链持久化到 `context.routing.fallbacks`（`context.executor` 同步更新，`cbx retry` 从降级后 agent 起步继续走链），并落 `executor_fallback` 事件审计；`StageReport.executor` 反映最终实际执行的 agent。边界：显式 executor（含 taskContract 显式指定 executor 的 stage）不降级；测试/审查失败保持同 agent 的 fix 循环。
+- Feature: **auto 路由接入历史战绩（同分决胜）**。新增执行器战绩层（`src/executors/stats.ts`）：从 `.cbx/jobs/` 现场聚合 per-executor 战绩（终态任务数、成功率、均值 token、最近使用；`cancelled` 不计——用户中止不是执行器的问题；按 `context.executor` 归因主执行者），无新持久化状态，被 purge 的任务自然退出战绩。`executor`/`review_executor` 为 `auto` 且能力匹配同分并列时，按 Laplace 平滑成功率（`(done+1)/(runs+2)`，无历史得中性先验 0.5，小样本不被极端化）降序、均值 token 升序决胜——在本 workspace 连败或烧 token 的 agent 让位于同能力下战绩更好者；决胜依据（各家次数/成功率/token）写入 `routing.notes` 审计，全员无历史的并列保持原稳定顺序且不产生决胜 note。`cbx agents` 表格新增 `Runs`/`OK%`/`AvgTok` 战绩列，`--json` 与 `/api/agents` 每个 agent 附带 `stats` 字段（无历史为 `null`）。
+
 ## 1.1.0 — 2026-08-22
 
 治理与诊断版本：执行档位把安全约束收口为一处声明，`cbx doctor` 提供只读环境诊断，任务模板降低重复提交成本，`result.json` 显式区分已验证/未验证交付。

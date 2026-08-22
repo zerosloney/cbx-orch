@@ -30,6 +30,11 @@ import {
 } from "./core.js";
 import { captureAsync } from "./process-runner.js";
 import { discoverAgents } from "./agent-registry.js";
+import { collectExecutorStats } from "./executors/stats.js";
+import {
+  parseRoutingStrategy,
+  type RoutingStrategy,
+} from "./executors/route.js";
 import { buildOpenApiDocument } from "./openapi.js";
 import { constantTimeEqual } from "./storage.js";
 import { processAlive } from "./lock.js";
@@ -830,7 +835,14 @@ export function createWebUiServer(
       if (url.pathname === "/api/queue") return json(res, await listQueue(ws));
       if (url.pathname === "/api/agents") {
         const { probes, errors } = await discoverAgents(ws);
-        return json(res, { agents: probes, errors });
+        const stats = await collectExecutorStats(ws);
+        return json(res, {
+          agents: probes.map((p) => ({
+            ...p,
+            stats: stats.get(p.name) ?? null,
+          })),
+          errors,
+        });
       }
       if (url.pathname === "/healthz" || url.pathname === "/api/metrics")
         return json(res, await health(ws));
@@ -874,6 +886,18 @@ export function createWebUiServer(
           if (body.profile !== undefined) {
             try {
               profile = parseExecutionProfile(body.profile);
+            } catch (error) {
+              return json(
+                res,
+                { error: error instanceof Error ? error.message : String(error) },
+                400,
+              );
+            }
+          }
+          let routingStrategy: RoutingStrategy | undefined;
+          if (body.routing_strategy !== undefined) {
+            try {
+              routingStrategy = parseRoutingStrategy(body.routing_strategy);
             } catch (error) {
               return json(
                 res,
@@ -926,6 +950,7 @@ export function createWebUiServer(
               typeof body.review_executor === "string"
                 ? body.review_executor
                 : undefined,
+            routingStrategy,
             autoBranch:
               typeof body.auto_branch === "boolean" ? body.auto_branch : undefined,
             autoCommit:
@@ -958,6 +983,7 @@ export function createWebUiServer(
             commitMessage: defaults.commitMessage,
             executor: defaults.executor,
             reviewExecutor: defaults.reviewExecutor,
+            routingStrategy: routingStrategy ?? defaults.routingStrategy,
             adaptive: defaults.adaptive,
             trustMode: defaults.trustMode,
             profile: defaults.profile,

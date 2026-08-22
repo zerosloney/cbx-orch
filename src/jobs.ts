@@ -31,7 +31,7 @@ import {
 import { DEFAULT_TOKEN_BUDGET, type ContextBudget } from "./context-pack.js";
 import { APP_VERSION } from "./version.js";
 import type { JobContext, JobState, TaskContract, Json } from "./types.js";
-import { ROUTE_AUTO, routeStageExecutor } from "./executors/route.js";
+import { ROUTE_AUTO, parseRoutingStrategy, routeStageExecutor } from "./executors/route.js";
 
 /** 规范化 .cbx.json 的 context.tokenBudget；缺失角色用默认值填充。 */
 function normalizeContextBudget(raw: unknown): ContextBudget {
@@ -70,6 +70,8 @@ export async function createJob(options: {
   commitMessage?: string;
   executor?: string;
   reviewExecutor?: string;
+  /** auto 路由策略（best/cheapest/fastest）；未传时回退 .cbx.json 的 routingStrategy，缺省 best */
+  routingStrategy?: string;
   trustMode?: "trusted" | "untrusted";
   profile?: ExecutionProfile;
   contextSnapshot?: string;
@@ -181,12 +183,21 @@ export async function createJob(options: {
   const contextBudget = normalizeContextBudget(
     runtimeConfig.context?.tokenBudget,
   );
+  // 路由策略：入口显式值 > 配置文件 routingStrategy；缺省 best。
+  // 持久化进 context，失败降级链重路由时遵守同一策略（不回读配置——任务创建时的策略即该任务的策略）。
+  const routingStrategy = options.routingStrategy !== undefined
+    ? parseRoutingStrategy(options.routingStrategy)
+    : (runtimeConfig.routingStrategy ?? "best");
   // 路由层（executor="auto"）：执行前先按 agent capabilities 与任务文本匹配选执行器。
   // 显式声明的 executor 不经过路由（本段仅在保留字 auto 时触发），决策落盘 context.routing 供审计。
   let executor = options.executor;
   let routing: Json = {} as Json;
   if (options.executor === ROUTE_AUTO) {
-    const decision = await routeStageExecutor({ task: options.task, workspace });
+    const decision = await routeStageExecutor({
+      task: options.task,
+      workspace,
+      strategy: routingStrategy,
+    });
     if (decision) {
       executor = decision.executor;
       routing = {
@@ -236,6 +247,7 @@ export async function createJob(options: {
     commitMessage: options.commitMessage ?? "chore(cbx): apply task",
     executor: executor ?? "codebuddy",
     reviewExecutor,
+    routingStrategy,
     routing: Object.keys(routing).length ? routing : undefined,
     adaptive: adaptive.enabled
       ? {

@@ -289,6 +289,7 @@ export function mergeConfig(
     "testCommand" | "reviewRules" | "executor" | "reviewExecutor"
   > & {
     profile: ExecutionProfile | undefined;
+    routingStrategy: CbxConfig["routingStrategy"];
     approvalBeforeRun: boolean;
     approvalBeforeComplete: boolean;
     autoBranch: boolean;
@@ -330,6 +331,7 @@ export function mergeConfig(
       "chore(cbx): apply task",
     executor: overrides.executor ?? config.executor ?? "codebuddy",
     reviewExecutor: overrides.reviewExecutor ?? config.reviewExecutor,
+    routingStrategy: overrides.routingStrategy ?? config.routingStrategy,
     trustMode:
       overrides.trustMode ??
       config.execution?.trustMode ??

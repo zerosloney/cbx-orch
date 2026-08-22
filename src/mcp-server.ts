@@ -30,6 +30,7 @@ import { constantTimeEqual } from "./storage.js";
 import { hasJsonContentType, isTrustedLocalRequest } from "./http-guard.js";
 import { APP_VERSION } from "./version.js";
 import { parseExecutionProfile } from "./profile.js";
+import { parseRoutingStrategy } from "./executors/route.js";
 
 import cbx_start from "./mcp-schemas/cbx_start.json" with { type: "json" };
 import cbx_status from "./mcp-schemas/cbx_status.json" with { type: "json" };
@@ -176,6 +177,10 @@ export async function callTool(
       args.profile === undefined
         ? undefined
         : parseExecutionProfile(args.profile);
+    const routingStrategy =
+      args.routing_strategy === undefined
+        ? undefined
+        : parseRoutingStrategy(args.routing_strategy);
     optionalBoolean(args, "approval_before_complete");
     optionalBoolean(args, "approval_before_run");
     optionalBoolean(args, "dependency_guard");
@@ -242,6 +247,7 @@ export async function callTool(
       reviewExecutor: args.review_executor
         ? String(args.review_executor)
         : undefined,
+      routingStrategy,
       adaptive: adaptiveOverride(args.adaptive),
     });
     if (
@@ -306,6 +312,7 @@ export async function callTool(
       commitMessage: defaults.commitMessage,
       executor: defaults.executor,
       reviewExecutor: defaults.reviewExecutor,
+      routingStrategy: routingStrategy ?? defaults.routingStrategy,
       adaptive: defaults.adaptive,
       profile: defaults.profile,
       dependencyGuard: defaults.dependencyGuard,

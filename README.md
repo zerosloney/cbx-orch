@@ -189,12 +189,17 @@ curl http://127.0.0.1:4173/api/agents  # Web UI 同款数据
 
 spec 校验失败（缺字段、name 冲突）不会中断其他 agent 的注册，错误会聚合展示在 `cbx agents` 输出与 `/api/agents` 响应的 `errors` 字段中。
 
+`cbx agents` 表格与 `/api/agents`（以及 `--json`）同时展示每个执行器在本 workspace 的**历史战绩**（`Runs`/`OK%`/`AvgTok`：终态任务数、成功率、均值 token）。战绩是从 `.cbx/jobs/` 现场聚合的只读投影，不引入新持久化状态——被 purge 的任务自然退出战绩；无历史的 agent 显示 `—`（JSON 中 `stats: null`）。
+
 ### Agent 路由（executor=auto）
 
 除显式声明执行器外，可把 `executor` 或 `review_executor` 设为保留字 `auto`，在执行任务前由路由层自动选 agent：按各 agent 声明的 `capabilities` 与任务文本做确定性能力匹配打分（命中标签越多分越高，大小写不敏感；ASCII 单词用词边界匹配避免误伤子串，中文/短语走整串包含），从已探测可用（`available=true`）的 agent 中选得分最高者。声明式执行器永远优先，路由只兜底「未指定 / 指定 `auto`」的任务（渐进式，向后兼容）。路由决策（选中者、得分、排名、说明）落盘到任务 `context.json` 的 `routing` 字段供审计。
 
 - 无可用 agent 命中能力时回退默认 `codebuddy`。
 - 启用审查且 `review_executor=auto`（或 `executor=auto` 且未显式指定审查者）时，路由一个**避开主执行 agent** 的交叉验证者做独立审查；找不到其它可路由 agent 时回退主执行 agent 自审。
+- **能力同分按历史战绩决胜**：能力分并列时，按 Laplace 平滑成功率（`(done+1)/(runs+2)`，无历史得中性先验 0.5，小样本不被极端化）降序、再按均值 token 升序选优——在本 workspace 连败、烧 token 的 agent 会让位于同能力下战绩更好的 agent。决胜依据（各家的次数/成功率/token）写入 `routing.notes` 审计。战绩口径：仅终态任务（`done`/`failed`/`needs_fix`/`review_failed`；`cancelled` 不计），按主执行 executor 归因（`context.executor`）。
+- **路由策略（`routingStrategy`）**：`executor=auto` 时可声明选人偏好——`best`（缺省，战绩决胜）、`cheapest`（能力同层内按均值 token 升序）、`fastest`（同层按平均任务墙钟升序）。策略窗口是**最高能力分层**：能力契合不可被成本/时延偏好交换，策略只在能力同分的候选间选优。数据源是执行器战绩（`cbx agents` 的 `AvgTok`/`AvgSec` 列）；无该指标样本的 agent 排后，同层全无样本时降级为战绩决胜并记 note；「多跑零成」（≥2 次且 0 成）的 agent 被剔除——快速失败的"便宜"是假象。策略在任务创建时定档并持久化到 `context.routingStrategy`，失败降级链重路由遵守同一策略。入口：`.cbx.json` 的 `routingStrategy`、CLI `--routing-strategy`、MCP 与 Web 请求体的 `routing_strategy`、任务模板的 `routingStrategy`；优先级为入口显式值 > 模板 > 配置文件。审查路由（交叉验证者）固定 `best`——审查要质量，不为成本牺牲。
+- **执行失败降级链**：`executor=auto` 的任务在执行器失败（崩溃、非零退出、超时）触发执行重试时，**重新路由（排除已尝试的 agent）换下一个候选**，而不是让同一个失败的 agent 原样再跑一遍；重路由使用最新的可用性探测与战绩，且吃既有执行重试预算（不新增尝试次数）。降级链持久化到 `context.routing.fallbacks`，并落 `executor_fallback` 事件（from/to/reason/ranked）供审计；`context.executor` 随之更新，之后 `cbx retry` 从降级后的 agent 起步继续走链，不会回头吃已失败的 agent。边界：显式声明的 executor（非 `auto`）不降级——尊重任务作者的选择；taskContract 中显式指定 executor 的 stage 同样不降级；测试/审查失败仍走同 agent 的 fix 循环（那是「活干坏了」，不是「harness 坏了」）。
 - 路由打分是纯函数（无 I/O、无 LLM），见 `src/executors/route.ts`。
 - 设计取舍：路由层**不**引入 LLM 打分作为第二档。路由发生在选定执行器之前——LLM 评分自身就得先调起一个 agent（用谁评？这本身就是一个路由决策）；且路由决策落盘 `context.routing` 供审计，LLM 输出不可复现会破坏审计语义，还给每次任务创建增加延迟与外部失败模式。需要 LLM 参与决策时走 adaptive 模式（manager executor 每轮决策），两层职责不混合。
 

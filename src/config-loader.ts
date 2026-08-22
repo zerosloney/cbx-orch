@@ -6,6 +6,7 @@ import {
   validateExecutionProfile,
   type ExecutionProfile,
 } from "./profile.js";
+import { isRoutingStrategy, type RoutingStrategy } from "./executors/route.js";
 
 export interface TaskTemplate {
   task: string;
@@ -14,6 +15,7 @@ export interface TaskTemplate {
   executor?: string;
   isolated?: boolean;
   profile?: ExecutionProfile;
+  routingStrategy?: RoutingStrategy;
 }
 
 export interface RuntimeConfig {
@@ -33,6 +35,8 @@ export interface RuntimeConfig {
   ci?: { failOnReview?: boolean };
   executor?: string;
   reviewExecutor?: string;
+  /** auto 路由策略：best（战绩决胜，缺省）/ cheapest（同层按均值 token）/ fastest（同层按任务墙钟） */
+  routingStrategy?: RoutingStrategy;
   templates?: Record<string, TaskTemplate>;
   execution?: {
     trustMode?: "trusted" | "untrusted";
@@ -152,6 +156,7 @@ export async function loadRuntimeConfig(
     "ci",
     "executor",
     "reviewExecutor",
+    "routingStrategy",
     "execution",
     "plugins",
     "notifications",
@@ -177,6 +182,11 @@ export async function loadRuntimeConfig(
   optionalInteger(config.maxConcurrent, "maxConcurrent", 1);
   optionalString(config.executor, "executor");
   optionalString(config.reviewExecutor, "reviewExecutor");
+  if (
+    config.routingStrategy !== undefined &&
+    !isRoutingStrategy(config.routingStrategy)
+  )
+    throw new Error("routingStrategy 必须是 best、cheapest 或 fastest。");
   optionalBoolean(config.dependencyGuard, "dependencyGuard");
   if (config.approval !== undefined) {
     const value = object(config.approval, "approval");
@@ -358,6 +368,7 @@ export async function loadRuntimeConfig(
         "executor",
         "isolated",
         "profile",
+        "routingStrategy",
       ]);
       if (typeof tpl.task !== "string" || !tpl.task.trim())
         throw new Error(`templates.${name}.task 必须是必填的非空字符串。`);
@@ -367,6 +378,13 @@ export async function loadRuntimeConfig(
       optionalBoolean(tpl.isolated, `templates.${name}.isolated`);
       if (tpl.profile !== undefined)
         validateExecutionProfile(tpl.profile);
+      if (
+        tpl.routingStrategy !== undefined &&
+        !isRoutingStrategy(tpl.routingStrategy)
+      )
+        throw new Error(
+          `templates.${name}.routingStrategy 必须是 best、cheapest 或 fastest。`,
+        );
     }
   }
   return config as RuntimeConfig;

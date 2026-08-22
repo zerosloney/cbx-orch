@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile, unlink, } from "node:fs/promises";
 import path from "node:path";
-import { loadJson } from "./storage.js";
+import { loadJson, saveJson } from "./storage.js";
 import { collectDepBaseline, detectChangedDeps } from "./dependency-guard.js";
 import { RetryBudget } from "./retry-budget.js";
 import { snapshotDiff, collectDiff } from "./git-ops.js";
@@ -22,7 +22,7 @@ import { parseReviewVerdict } from "./verdict.js";
 import { createHumanGate } from "./human-gate.js";
 import { resolveAgentLabel } from "./agent-registry.js";
 import { contextArtifacts, AUDIT_CANDIDATE } from "./artifacts.js";
-import { ROUTE_AUTO, routeReviewExecutor } from "./executors/route.js";
+import { ROUTE_AUTO, isRoutingStrategy, routeReviewExecutor, routeStageExecutor } from "./executors/route.js";
 import type {
   JobContext,
   JobState,
@@ -61,7 +61,6 @@ export async function runStage(params: {
     context,
     stage,
     stageIndex,
-    stageLabel,
     stageExtra,
     maxAttempts,
     cancelMarker,
@@ -70,6 +69,9 @@ export async function runStage(params: {
     finishCancelled,
     writeDir = directory,
   } = params;
+  // 失败降级链（harness router 第二级）会按 ranked 顺位换 agent，故 executor/label 可变。
+  let stageExecutor = stage.executor;
+  let stageLabel = params.stageLabel;
   let attempt = params.attempt;
   let attemptExtra = params.attemptExtra;
   let lastError = "";
@@ -91,6 +93,65 @@ export async function runStage(params: {
     ? await collectDepBaseline(workdir)
     : {};
 
+  // 失败降级链：执行失败重试时按 ranked 顺位换下一个 agent（routeStageExecutor 重新路由，
+  // 排除已尝试者——重新路由而非消费创建时的冻结快照，可用性与战绩都是最新的）。
+  // 生效条件：本 stage 的 executor 由路由选择（context.routing.mode === "auto" 且 stage 用主执行器）；
+  // taskContract 显式声明的 stage executor 不降级（尊重任务作者的选择）。
+  // 预算：降级吃既有 execution-retry 预算（不新增尝试次数）；测试/审查失败仍走同 agent 的
+  // fix 循环——那是「活干坏了」，不是「harness 坏了」。
+  const routingAudit = context.routing as
+    | { mode?: string; route_to?: string; fallbacks?: Array<{ from: string; to: string; reason: string; attempt: number }> }
+    | undefined;
+  const fallbackEligible =
+    routingAudit?.mode === "auto" && stage.executor === context.executor;
+  const triedExecutors = new Set<string>();
+  // 本轮 runStage 内的降级审计链（本地可变副本；routingAudit 指向创建时的快照不可复用）。
+  const fallbackChain: Array<{ from: string; to: string; reason: string; attempt: number }> = [
+    ...(routingAudit?.fallbacks ?? []),
+  ];
+  if (fallbackEligible) {
+    triedExecutors.add(stage.executor);
+    // cbx retry / 队列重入场景：上一轮 runStage 已落盘的降级链继续生效，不从头吃已失败的 agent。
+    for (const entry of fallbackChain) {
+      triedExecutors.add(entry.from);
+      triedExecutors.add(entry.to);
+    }
+  }
+  const maybeFallbackExecutor = async (reason: string): Promise<void> => {
+    if (!fallbackEligible) return;
+    triedExecutors.add(stageExecutor);
+    const decision = await routeStageExecutor({
+      task: context.taskText ?? stage.task ?? "",
+      workspace,
+      exclude: [...triedExecutors],
+      // 降级重路由遵守任务创建时定档的策略（cheapest 任务降级后仍挑便宜的候选）
+      strategy: isRoutingStrategy(context.routingStrategy)
+        ? context.routingStrategy
+        : "best",
+    });
+    if (!decision || triedExecutors.has(decision.executor)) return;
+    const from = stageExecutor;
+    stageExecutor = decision.executor;
+    stageLabel = await resolveAgentLabel(stageExecutor, workspace);
+    triedExecutors.add(stageExecutor);
+    // 持久化降级：context.executor 指向新 agent（后续 retry 从它起步），routing.fallbacks 记审计链。
+    fallbackChain.push({ from, to: stageExecutor, reason, attempt });
+    await saveJson(path.join(directory, "context.json"), {
+      ...context,
+      executor: stageExecutor,
+      routing: { ...routingAudit, fallbacks: fallbackChain },
+    });
+    logJobEvent(workspace, jobId, "executor_fallback", {
+      stage: stage.name,
+      from,
+      to: stageExecutor,
+      reason,
+      attempt,
+      ranked: decision.ranked,
+    });
+    await writeState(workspace, jobId, { executor: stageExecutor });
+  };
+
   // intentional-simple: 闭包内构造辅助。report.name/executor/attempts 与 attempt/attemptExtra 在所有 16 个返回点取值相同，
   // 仅 terminal/state/exitCode/testExitCode/reviewVerdict 因分支而异；budget.totalUsed 在 useXxxRetry 后自动累加。
   const outcome = (
@@ -104,7 +165,8 @@ export async function runStage(params: {
     state,
     report: {
       name: stage.name,
-      executor: stage.executor,
+      // 降级链生效时反映最终实际执行的 agent（完整链见 events.ndjson 的 executor_fallback 与 context.routing.fallbacks）
+      executor: stageExecutor,
       exitCode,
       testExitCode,
       reviewVerdict,
@@ -165,7 +227,7 @@ export async function runStage(params: {
     let agent: ProcessResult;
     try {
       agent = await invokeExecutor(
-        stage.executor,
+        stageExecutor,
         workspace,
         directory,
         workdir,
@@ -184,6 +246,7 @@ export async function runStage(params: {
       lastError = String(error);
       if (budget.canRetryExecution()) {
         await budget.useExecutionRetry();
+        await maybeFallbackExecutor(lastError);
         await writeState(workspace, jobId, {
           phase: "retrying",
           stage: stage.name,
@@ -232,6 +295,7 @@ export async function runStage(params: {
       executorExitCode = agent.code;
       if (budget.canRetryExecution()) {
         await budget.useExecutionRetry();
+        await maybeFallbackExecutor(lastError);
         await writeState(workspace, jobId, {
           phase: "retrying",
           stage: stage.name,
@@ -317,14 +381,14 @@ export async function runStage(params: {
       : "";
     const reviewExtra = `只审查上下文包 artifacts 中列出的证据，不要修改代码。将结果写入 ${path.join(writeDir, "review.md")}。第一行必须是 VERDICT: PASS 或 VERDICT: FAIL（供人工阅读）。同时把机器可读判定写入 ${path.join(writeDir, "review.json")}，严格 JSON：{"version":1,"verdict":"PASS"或"FAIL"}（推荐；未写则 cbx 回退解析 review.md 首行）。若失败源于需求歧义、公共契约冲突或基线问题，第二行写 CLASSIFICATION: SEMANTIC；普通代码缺陷无需 classification。按严重程度列出问题、文件和行号。${structuredAuditExtra}`;
     let reviewAgent: ProcessResult;
-    let reviewExecutor = stage.reviewExecutor ?? context.reviewExecutor ?? stage.executor;
+    let reviewExecutor = stage.reviewExecutor ?? context.reviewExecutor ?? stageExecutor;
     // reviewExecutor="auto"：路由一个避开主执行 agent 的交叉验证者（独立审查，避免「自己审自己」）；
     // 找不到可路由的其它 agent 时回退主执行 agent 自审（reviewLabel 仍为该 agent）。
     if (reviewExecutor === ROUTE_AUTO) {
       const reviewDecision = await routeReviewExecutor({
         task: context.taskText ?? stage.task ?? "",
         workspace,
-        primary: stage.executor,
+        primary: stageExecutor,
       });
       if (reviewDecision) reviewExecutor = reviewDecision.executor;
     }

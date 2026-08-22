@@ -3,6 +3,7 @@ import { CbxError } from "./errors.js";
 import { saveJson, loadJson } from "./storage.js";
 import type { JobContext } from "./types.js";
 import { isExecutionProfile } from "./profile.js";
+import { isRoutingStrategy } from "./executors/route.js";
 
 function contextFieldError(field: string, expectation: string): CbxError {
   return new CbxError(
@@ -128,6 +129,14 @@ export function validateJobContext(value: unknown): JobContext {
     throw contextFieldError(
       "profile",
       "缺省或为 fast/verified/governed/untrusted",
+    );
+  if (
+    raw.routingStrategy !== undefined &&
+    !isRoutingStrategy(raw.routingStrategy)
+  )
+    throw contextFieldError(
+      "routingStrategy",
+      "缺省或为 best/cheapest/fastest",
     );
   for (const field of [
     "keepWorktree",

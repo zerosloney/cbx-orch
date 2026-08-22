@@ -7,6 +7,11 @@
       "type": "string",
       "enum": ["fast", "verified", "governed", "untrusted"]
     },
+    "routing_strategy": {
+      "type": "string",
+      "enum": ["best", "cheapest", "fastest"],
+      "description": "auto 路由策略：best=战绩决胜（缺省）；cheapest/fastest=能力同层内按均值 token/任务墙钟选优"
+    },
     "context_snapshot": {
       "type": "string",
       "description": "父会话提炼的目标补充、计划、关键文件或命令输出及约束"

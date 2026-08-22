@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  parseRoutingStrategy,
   scoreTaskAgainstCapabilities,
   routeStageExecutor,
   routeReviewExecutor,
@@ -69,6 +70,30 @@ async function writeCapabilitySpec(workspace: string, name: string, caps: string
   return env;
 }
 
+/** 种子历史任务：给同层决胜提供战绩（context.executor 归因 + state 终态）。 */
+async function seedHistoryJob(
+  workspace: string,
+  jobId: string,
+  executor: string,
+  status: string,
+  extra: { tokenUsage?: number; createdAt?: string; updatedAt?: string } = {},
+): Promise<void> {
+  const dir = path.join(workspace, ".cbx", "jobs", jobId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, "state.json"),
+    JSON.stringify({
+      jobId,
+      status,
+      createdAt: extra.createdAt ?? "2026-08-01T00:00:00.000Z",
+      updatedAt: extra.updatedAt ?? "2026-08-01T00:10:00.000Z",
+      ...(extra.tokenUsage !== undefined ? { tokenUsage: extra.tokenUsage } : {}),
+    }),
+    "utf8",
+  );
+  await writeFile(path.join(dir, "context.json"), JSON.stringify({ executor }), "utf8");
+}
+
 test("routeStageExecutor: 命中能力者被路由，未命中返回 undefined", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-route-"));
   const feEnv = await writeCapabilitySpec(workspace, "fe-agent", ["frontend", "react"]);
@@ -92,6 +117,103 @@ test("routeStageExecutor: 命中能力者被路由，未命中返回 undefined",
   } finally {
     if (prevFe === undefined) delete process.env[feEnv];
     else process.env[feEnv] = prevFe;
+  }
+});
+
+test("routeStageExecutor: 能力同分按历史战绩（平滑成功率）决胜", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-route-tie-"));
+  const aEnv = await writeCapabilitySpec(workspace, "agent-a", ["react"]);
+  const bEnv = await writeCapabilitySpec(workspace, "agent-b", ["react"]);
+  process.env[aEnv] = process.execPath;
+  process.env[bEnv] = process.execPath;
+  await seedHistoryJob(workspace, "h1", "agent-a", "done");
+  await seedHistoryJob(workspace, "h2", "agent-a", "done");
+  await seedHistoryJob(workspace, "h3", "agent-b", "failed");
+  try {
+    const decision = await routeStageExecutor({
+      task: "写一个 React 组件",
+      workspace,
+    });
+    assert.ok(decision);
+    // 两 agent 能力分同为 1；agent-a 平滑成功率 (2+1)/(2+2)=0.75 > agent-b (0+1)/(1+2)≈0.33
+    assert.equal(decision.executor, "agent-a");
+    assert.ok(decision.notes.some((n) => n.includes("同层决胜")));
+    const rankA = decision.ranked.find((r) => r.name === "agent-a");
+    assert.equal(rankA?.stats?.runs, 2);
+    assert.equal(rankA?.stats?.successRate, 1);
+    assert.equal(decision.ranked.find((r) => r.name === "agent-b")?.stats?.runs, 1);
+  } finally {
+    delete process.env[aEnv];
+    delete process.env[bEnv];
+  }
+});
+
+test("routeStageExecutor: 成功率打平时按均值 token 升序决胜", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-route-tok-"));
+  const aEnv = await writeCapabilitySpec(workspace, "agent-a", ["react"]);
+  const bEnv = await writeCapabilitySpec(workspace, "agent-b", ["react"]);
+  process.env[aEnv] = process.execPath;
+  process.env[bEnv] = process.execPath;
+  await seedHistoryJob(workspace, "h1", "agent-a", "done", { tokenUsage: 9_000 });
+  await seedHistoryJob(workspace, "h2", "agent-b", "done", { tokenUsage: 1_000 });
+  try {
+    const decision = await routeStageExecutor({
+      task: "写一个 React 组件",
+      workspace,
+    });
+    assert.ok(decision);
+    // 平滑成功率同为 (1+1)/(1+2)，agent-b 均值 token 更低 → 胜出
+    assert.equal(decision.executor, "agent-b");
+  } finally {
+    delete process.env[aEnv];
+    delete process.env[bEnv];
+  }
+});
+
+test("routeStageExecutor: 并列双方均无历史时保持稳定顺序且不产生决胜 note", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-route-nohist-"));
+  const aEnv = await writeCapabilitySpec(workspace, "agent-a", ["react"]);
+  const bEnv = await writeCapabilitySpec(workspace, "agent-b", ["react"]);
+  process.env[aEnv] = process.execPath;
+  process.env[bEnv] = process.execPath;
+  try {
+    const decision = await routeStageExecutor({
+      task: "写一个 React 组件",
+      workspace,
+    });
+    assert.ok(decision);
+    // 无任何历史：中性先验 0.5 打平 → 稳定性顺序（文件 spec 按名排序，agent-a 先）
+    assert.equal(decision.executor, "agent-a");
+    assert.ok(!decision.notes.some((n) => n.includes("同层决胜")));
+    assert.equal(decision.ranked.find((r) => r.name === "agent-a")?.stats, undefined);
+  } finally {
+    delete process.env[aEnv];
+    delete process.env[bEnv];
+  }
+});
+
+test("routeReviewExecutor: 交叉验证决胜同样消费历史战绩", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-route-rev-tie-"));
+  const aEnv = await writeCapabilitySpec(workspace, "agent-a", ["backend"]);
+  const bEnv = await writeCapabilitySpec(workspace, "agent-b", ["backend"]);
+  process.env[aEnv] = process.execPath;
+  process.env[bEnv] = process.execPath;
+  await seedHistoryJob(workspace, "h1", "agent-a", "failed");
+  await seedHistoryJob(workspace, "h2", "agent-a", "failed");
+  await seedHistoryJob(workspace, "h3", "agent-b", "done");
+  try {
+    const decision = await routeReviewExecutor({
+      task: "实现 backend API",
+      workspace,
+      primary: "codebuddy",
+    });
+    assert.ok(decision);
+    // primary=codebuddy 不在候选；agent-b 战绩更优 → 胜出
+    assert.equal(decision.executor, "agent-b");
+    assert.ok(decision.notes.some((n) => n.includes("同层决胜")));
+  } finally {
+    delete process.env[aEnv];
+    delete process.env[bEnv];
   }
 });
 
@@ -191,5 +313,116 @@ test("createJob executor=auto: 无能力命中回退默认 codebuddy，不残留
     assert.ok(context.reviewExecutor === undefined || context.reviewExecutor !== ROUTE_AUTO);
   } finally {
     delete process.env[feEnv];
+  }
+});
+
+test("parseRoutingStrategy: 合法值通过，非法值拒绝", () => {
+  assert.equal(parseRoutingStrategy("best"), "best");
+  assert.equal(parseRoutingStrategy("cheapest"), "cheapest");
+  assert.equal(parseRoutingStrategy("fastest"), "fastest");
+  assert.throws(() => parseRoutingStrategy("cheap"), /未知路由策略/);
+  assert.throws(() => parseRoutingStrategy(42), /未知路由策略/);
+});
+
+test("策略 cheapest：能力同层按均值 token 升序选优", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-route-cheap-"));
+  const aEnv = await writeCapabilitySpec(workspace, "agent-a", ["react"]);
+  const bEnv = await writeCapabilitySpec(workspace, "agent-b", ["react"]);
+  process.env[aEnv] = process.execPath;
+  process.env[bEnv] = process.execPath;
+  await seedHistoryJob(workspace, "h1", "agent-a", "done", { tokenUsage: 5_000 });
+  await seedHistoryJob(workspace, "h2", "agent-b", "done", { tokenUsage: 1_000 });
+  try {
+    const decision = await routeStageExecutor({
+      task: "写一个 React 组件",
+      workspace,
+      strategy: "cheapest",
+    });
+    assert.ok(decision);
+    // 成功率同为 1/1，cheapest 按均值 token 选 agent-b
+    assert.equal(decision.executor, "agent-b");
+    assert.ok(decision.notes.some((n) => n.includes("策略 cheapest") && n.includes("1000")));
+  } finally {
+    delete process.env[aEnv];
+    delete process.env[bEnv];
+  }
+});
+
+test("策略 fastest：能力同层按任务墙钟升序选优", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-route-fast-"));
+  const aEnv = await writeCapabilitySpec(workspace, "agent-a", ["react"]);
+  const bEnv = await writeCapabilitySpec(workspace, "agent-b", ["react"]);
+  process.env[aEnv] = process.execPath;
+  process.env[bEnv] = process.execPath;
+  await seedHistoryJob(workspace, "h1", "agent-a", "done", {
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T00:10:00.000Z", // 10 分钟
+  });
+  await seedHistoryJob(workspace, "h2", "agent-b", "done", {
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T00:01:00.000Z", // 1 分钟
+  });
+  try {
+    const decision = await routeStageExecutor({
+      task: "写一个 React 组件",
+      workspace,
+      strategy: "fastest",
+    });
+    assert.ok(decision);
+    assert.equal(decision.executor, "agent-b");
+    assert.ok(decision.notes.some((n) => n.includes("策略 fastest") && n.includes("60000")));
+  } finally {
+    delete process.env[aEnv];
+    delete process.env[bEnv];
+  }
+});
+
+test("策略 cheapest：同层无 token 样本时降级战绩决胜并记 note", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-route-cheap-dflt-"));
+  const aEnv = await writeCapabilitySpec(workspace, "agent-a", ["react"]);
+  const bEnv = await writeCapabilitySpec(workspace, "agent-b", ["react"]);
+  process.env[aEnv] = process.execPath;
+  process.env[bEnv] = process.execPath;
+  // 只有状态历史，无 tokenUsage → cheapest 无指标样本
+  await seedHistoryJob(workspace, "h1", "agent-b", "done");
+  try {
+    const decision = await routeStageExecutor({
+      task: "写一个 React 组件",
+      workspace,
+      strategy: "cheapest",
+    });
+    assert.ok(decision);
+    // 降级 best：agent-b 成功率更高 → 胜出
+    assert.equal(decision.executor, "agent-b");
+    assert.ok(decision.notes.some((n) => n.includes("降级为战绩决胜")));
+  } finally {
+    delete process.env[aEnv];
+    delete process.env[bEnv];
+  }
+});
+
+test("策略 cheapest：多跑零成的 agent 剔除（便宜是失败假象）", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "cbx-route-cheap-broken-"));
+  const aEnv = await writeCapabilitySpec(workspace, "agent-a", ["react"]);
+  const cEnv = await writeCapabilitySpec(workspace, "agent-c", ["react"]);
+  process.env[aEnv] = process.execPath;
+  process.env[cEnv] = process.execPath;
+  // agent-c：2 跑 0 成但只烧 100 token（快速失败）；agent-a：1 成 5000 token
+  await seedHistoryJob(workspace, "h1", "agent-a", "done", { tokenUsage: 5_000 });
+  await seedHistoryJob(workspace, "h2", "agent-c", "failed", { tokenUsage: 100 });
+  await seedHistoryJob(workspace, "h3", "agent-c", "failed", { tokenUsage: 100 });
+  try {
+    const decision = await routeStageExecutor({
+      task: "写一个 React 组件",
+      workspace,
+      strategy: "cheapest",
+    });
+    assert.ok(decision);
+    // agent-c 被剔除（runs>=2 且 done=0），cheapest 选 agent-a
+    assert.equal(decision.executor, "agent-a");
+    assert.ok(decision.notes.some((n) => n.includes("agent-c")));
+  } finally {
+    delete process.env[aEnv];
+    delete process.env[cEnv];
   }
 });

@@ -15,6 +15,7 @@ const VALUE_OPTIONS = new Set([
   "--permission-mode",
   "--executor",
   "--review-executor",
+  "--routing-strategy",
   "--commit-message",
   "--trust-mode",
   "--adaptive-max-rounds",

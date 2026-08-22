@@ -35,12 +35,14 @@ import { runTui, startWebUi, summarizeWorkspace } from "./ui.js";
 import { parseCliArgs, type CliArgs } from "./cli-args.js";
 import { runBatch } from "./batch.js";
 import { discoverAgents } from "./agent-registry.js";
+import { collectExecutorStats } from "./executors/stats.js";
 import { renderDoctor, runDoctor } from "./doctor.js";
 import { APP_VERSION } from "./version.js";
 import {
   parseExecutionProfile,
   type ExecutionProfile,
 } from "./profile.js";
+import type { RoutingStrategy } from "./executors/route.js";
 import {
   isInteractive,
   renderAgentsTable,
@@ -91,7 +93,7 @@ function parseProfileOption(argv: string[]): ExecutionProfile | undefined {
 }
 
 const USAGE = `用法：cbx run|start|batch|doctor|templates|ws|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|forget|purge|watch|ui|tui|review-gate|stop-review-gate ...
-选项：--help 显示本帮助；--version / -v 显示版本；--profile fast|verified|governed|untrusted 设置执行档位。`;
+选项：--help 显示本帮助；--version / -v 显示版本；--profile fast|verified|governed|untrusted 设置执行档位；--routing-strategy best|cheapest|fastest 设置 auto 路由策略。`;
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   const [command, ...rest] = argv;
@@ -128,7 +130,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     for (const template of templates) {
       const summary = template.task.replace(/\s+/g, " ").trim();
       const task = summary.length > 120 ? `${summary.slice(0, 117)}...` : summary;
-      console.log(`${template.name}  profile=${template.profile ?? "—"}`);
+      console.log(
+        `${template.name}  profile=${template.profile ?? "—"}  strategy=${template.routingStrategy ?? "best"}`,
+      );
       console.log(`  task: ${task}`);
     }
     return;
@@ -182,6 +186,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         : parsed.option("--permission-mode"),
       executor: parsed.option("--executor") ?? template?.executor,
       reviewExecutor: parsed.option("--review-executor"),
+      routingStrategy:
+        (parsed.option("--routing-strategy") as RoutingStrategy | undefined) ??
+        template?.routingStrategy,
       autoBranch: parsed.has("--auto-branch")
         ? true
         : parsed.has("--no-auto-branch")
@@ -236,6 +243,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         commitMessage: defaults.commitMessage,
         executor: defaults.executor,
         reviewExecutor: defaults.reviewExecutor,
+        routingStrategy: defaults.routingStrategy,
         adaptive: defaults.adaptive,
         trustMode: defaults.trustMode,
         profile: defaults.profile,
@@ -368,9 +376,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
   if (command === "agents") {
     const { probes, errors } = await discoverAgents(workspace);
+    const stats = await collectExecutorStats(workspace);
     if (isInteractive() && !parsed.has("--json"))
-      console.log(renderAgentsTable(probes, errors));
-    else print({ agents: probes, errors });
+      console.log(renderAgentsTable(probes, errors, stats));
+    else
+      print({
+        agents: probes.map((p) => ({ ...p, stats: stats.get(p.name) ?? null })),
+        errors,
+      });
     return;
   }
   if (command === "dispatch") {

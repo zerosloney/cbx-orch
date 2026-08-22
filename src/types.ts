@@ -106,7 +106,9 @@ export interface JobContext {
   commitMessage: string;
   executor: string;
   reviewExecutor?: string;
-  /** 路由层审计投影（executor="auto" 时写盘）：mode/route_to/score/ranked/notes。 */
+  /** auto 路由策略（best/cheapest/fastest），创建时定档；失败降级链重路由遵守同一策略 */
+  routingStrategy?: string;
+  /** 路由层审计投影（executor="auto" 时写盘）：mode/route_to/score/ranked/notes/fallbacks。 */
   routing?: Json;
   taskContract?: TaskContractType;
   baseCommit?: string;
