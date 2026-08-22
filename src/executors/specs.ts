@@ -6,6 +6,8 @@ export interface BuildArgsOptions {
   prompt: string;
   permissionMode: string;
   maxTurns: number;
+  /** 模型选择（如 "gpt-5"、"claude-sonnet-4"）；spec 声明 modelArg 且任务指定 model 时追加 */
+  model?: string;
 }
 
 // permissionMode 中表示「自动放行」的语义值：opencode 用 --auto、cline 用 --auto-approve true 表达。
@@ -31,6 +33,9 @@ export interface AgentSpec {
   planArgs?: string[];
   /** 有值时追加 [maxTurnsArg, String(maxTurns)] */
   maxTurnsArg?: string;
+  /** 模型选择 flag（如 "--model"）：任务指定 model 时追加 [modelArg, model]。
+   *  内置 CLI 未验证各家的模型 flag 前不声明（避免拼错参数）；文件 spec 可立即使用。 */
+  modelArg?: string;
   /** spec 版本，仅用于展示与追溯 */
   version?: string;
   /**
@@ -55,6 +60,7 @@ export function buildArgsFromSpec(spec: AgentSpec, opts: BuildArgsOptions): stri
             : token,
   );
   if (spec.maxTurnsArg) args.push(spec.maxTurnsArg, String(opts.maxTurns));
+  if (spec.modelArg && opts.model) args.push(spec.modelArg, opts.model);
   if (opts.permissionMode === "plan" && spec.planArgs?.length) args.push(...spec.planArgs);
   else if (AUTO_MODES.has(opts.permissionMode) && spec.autoArgs?.length)
     args.push(...spec.autoArgs);

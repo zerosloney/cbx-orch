@@ -951,6 +951,7 @@ export function createWebUiServer(
                 ? body.review_executor
                 : undefined,
             routingStrategy,
+            model: typeof body.model === "string" ? body.model : undefined,
             autoBranch:
               typeof body.auto_branch === "boolean" ? body.auto_branch : undefined,
             autoCommit:
@@ -984,6 +985,10 @@ export function createWebUiServer(
             executor: defaults.executor,
             reviewExecutor: defaults.reviewExecutor,
             routingStrategy: routingStrategy ?? defaults.routingStrategy,
+            model:
+              typeof body.model === "string"
+                ? body.model
+                : defaults.model,
             adaptive: defaults.adaptive,
             trustMode: defaults.trustMode,
             profile: defaults.profile,

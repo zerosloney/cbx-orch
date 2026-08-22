@@ -67,6 +67,8 @@ export function validateAgentSpec(raw: unknown, file: string): AgentSpec {
   };
   if (value.maxTurnsArg !== undefined && typeof value.maxTurnsArg !== "string")
     throw new Error(`${file}: maxTurnsArg 必须是字符串。`);
+  if (value.modelArg !== undefined && typeof value.modelArg !== "string")
+    throw new Error(`${file}: modelArg 必须是字符串（如 "--model"）。`);
   if (value.version !== undefined && typeof value.version !== "string")
     throw new Error(`${file}: version 必须是字符串。`);
   const capabilities = value.capabilities === undefined ? undefined : asStringArray(value.capabilities);
@@ -82,6 +84,7 @@ export function validateAgentSpec(raw: unknown, file: string): AgentSpec {
     autoArgs: optional("autoArgs"),
     planArgs: optional("planArgs"),
     maxTurnsArg: value.maxTurnsArg,
+    modelArg: value.modelArg,
     version: value.version,
     capabilities,
   };

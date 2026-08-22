@@ -181,6 +181,8 @@ export async function callTool(
       args.routing_strategy === undefined
         ? undefined
         : parseRoutingStrategy(args.routing_strategy);
+    const model =
+      args.model === undefined ? undefined : String(args.model);
     optionalBoolean(args, "approval_before_complete");
     optionalBoolean(args, "approval_before_run");
     optionalBoolean(args, "dependency_guard");
@@ -248,6 +250,7 @@ export async function callTool(
         ? String(args.review_executor)
         : undefined,
       routingStrategy,
+      model,
       adaptive: adaptiveOverride(args.adaptive),
     });
     if (
@@ -313,6 +316,7 @@ export async function callTool(
       executor: defaults.executor,
       reviewExecutor: defaults.reviewExecutor,
       routingStrategy: routingStrategy ?? defaults.routingStrategy,
+      model: model ?? defaults.model,
       adaptive: defaults.adaptive,
       profile: defaults.profile,
       dependencyGuard: defaults.dependencyGuard,

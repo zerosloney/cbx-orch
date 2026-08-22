@@ -177,7 +177,7 @@ graph LR
 }
 ```
 
-字段说明：`name`（小写字母/数字/`._-`，不可与内置冲突）、`aliases`（可选，`resolveExecutor` 同样命中）、`label`（显示名，用于阶段日志与错误消息）、`candidates`（PATH 上依次尝试的二进制名）、`args`（参数模板，支持 `{prompt}` / `{maxTurns}` / `{permissionMode}` / `{auto}` 占位符，`{auto}` 在 `auto`/`dontAsk` 模式渲染为 `"true"`、否则 `"false"`）、`autoArgs`（`permissionMode` 为 `auto`/`dontAsk` 时追加）、`planArgs`（`plan` 时追加）、`maxTurnsArg`（设置后追加 `<maxTurnsArg> <maxTurns>`）、`envVar`（可选，缺省由 name 派生为 `CBX_<NAME>`，用于覆盖二进制路径）、`capabilities`（可选，声明该 agent 擅长的领域/技术标签，如 `["frontend","react"]`；供 `auto` 路由做能力匹配，缺省表示不可作为自动路由候选）。
+字段说明：`name`（小写字母/数字/`._-`，不可与内置冲突）、`aliases`（可选，`resolveExecutor` 同样命中）、`label`（显示名，用于阶段日志与错误消息）、`candidates`（PATH 上依次尝试的二进制名）、`args`（参数模板，支持 `{prompt}` / `{maxTurns}` / `{permissionMode}` / `{auto}` 占位符，`{auto}` 在 `auto`/`dontAsk` 模式渲染为 `"true"`、否则 `"false"`）、`autoArgs`（`permissionMode` 为 `auto`/`dontAsk` 时追加）、`planArgs`（`plan` 时追加）、`maxTurnsArg`（设置后追加 `<maxTurnsArg> <maxTurns>`）、`modelArg`（可选，模型选择 flag 如 `--model`；任务/配置指定 `model` 时追加 `<modelArg> <model>`——内置 CLI 未验证各家模型 flag 前不声明，文件 spec 可立即使用）、`envVar`（可选，缺省由 name 派生为 `CBX_<NAME>`，用于覆盖二进制路径）、`capabilities`（可选，声明该 agent 擅长的领域/技术标签，如 `["frontend","react"]`；供 `auto` 路由做能力匹配，缺省表示不可作为自动路由候选）。
 
 注册后 `--executor gemini` 与 stage 的 `executor: "gemini"` 直接可用。查看注册结果与二进制可用性：
 
@@ -198,10 +198,24 @@ spec 校验失败（缺字段、name 冲突）不会中断其他 agent 的注册
 - 无可用 agent 命中能力时回退默认 `codebuddy`。
 - 启用审查且 `review_executor=auto`（或 `executor=auto` 且未显式指定审查者）时，路由一个**避开主执行 agent** 的交叉验证者做独立审查；找不到其它可路由 agent 时回退主执行 agent 自审。
 - **能力同分按历史战绩决胜**：能力分并列时，按 Laplace 平滑成功率（`(done+1)/(runs+2)`，无历史得中性先验 0.5，小样本不被极端化）降序、再按均值 token 升序选优——在本 workspace 连败、烧 token 的 agent 会让位于同能力下战绩更好的 agent。决胜依据（各家的次数/成功率/token）写入 `routing.notes` 审计。战绩口径：仅终态任务（`done`/`failed`/`needs_fix`/`review_failed`；`cancelled` 不计），按主执行 executor 归因（`context.executor`）。
+- **任务分类加权**：任务文本经确定性分类器（`src/task-category.ts`）归入 `bugfix`/`performance`/`refactor`/`testing`/`docs`/`feature`/`chore`，分类持久化到 `context.taskCategory`；战绩层按 (executor × 分类) 聚合成功率，路由同层决胜优先用**分类样本**的平滑成功率（无分类样本回退全局、无历史回退中性先验）——agent 可能「修 bug 很行、做新功能不行」，分类口径比全局更能反映本次任务的契合度，且可以推翻全局口径。分类依据写入 `routing.notes` 审计。
 - **路由策略（`routingStrategy`）**：`executor=auto` 时可声明选人偏好——`best`（缺省，战绩决胜）、`cheapest`（能力同层内按均值 token 升序）、`fastest`（同层按平均任务墙钟升序）。策略窗口是**最高能力分层**：能力契合不可被成本/时延偏好交换，策略只在能力同分的候选间选优。数据源是执行器战绩（`cbx agents` 的 `AvgTok`/`AvgSec` 列）；无该指标样本的 agent 排后，同层全无样本时降级为战绩决胜并记 note；「多跑零成」（≥2 次且 0 成）的 agent 被剔除——快速失败的"便宜"是假象。策略在任务创建时定档并持久化到 `context.routingStrategy`，失败降级链重路由遵守同一策略。入口：`.cbx.json` 的 `routingStrategy`、CLI `--routing-strategy`、MCP 与 Web 请求体的 `routing_strategy`、任务模板的 `routingStrategy`；优先级为入口显式值 > 模板 > 配置文件。审查路由（交叉验证者）固定 `best`——审查要质量，不为成本牺牲。
 - **执行失败降级链**：`executor=auto` 的任务在执行器失败（崩溃、非零退出、超时）触发执行重试时，**重新路由（排除已尝试的 agent）换下一个候选**，而不是让同一个失败的 agent 原样再跑一遍；重路由使用最新的可用性探测与战绩，且吃既有执行重试预算（不新增尝试次数）。降级链持久化到 `context.routing.fallbacks`，并落 `executor_fallback` 事件（from/to/reason/ranked）供审计；`context.executor` 随之更新，之后 `cbx retry` 从降级后的 agent 起步继续走链，不会回头吃已失败的 agent。边界：显式声明的 executor（非 `auto`）不降级——尊重任务作者的选择；taskContract 中显式指定 executor 的 stage 同样不降级；测试/审查失败仍走同 agent 的 fix 循环（那是「活干坏了」，不是「harness 坏了」）。
 - 路由打分是纯函数（无 I/O、无 LLM），见 `src/executors/route.ts`。
 - 设计取舍：路由层**不**引入 LLM 打分作为第二档。路由发生在选定执行器之前——LLM 评分自身就得先调起一个 agent（用谁评？这本身就是一个路由决策）；且路由决策落盘 `context.routing` 供审计，LLM 输出不可复现会破坏审计语义，还给每次任务创建增加延迟与外部失败模式。需要 LLM 参与决策时走 adaptive 模式（manager executor 每轮决策），两层职责不混合。
+
+### Agent 基准校准（bench）
+
+路由的战绩来自真实任务历史；`npm run bench:agents`（先 `npm run build`）用一个小的确定性任务套件主动校准：对每个可用执行器 × 每个任务在**全新临时 git 仓库**里跑真实 job（种子文件先提交，任务间互不污染），汇总各执行器的成功率、均值 token、任务墙钟与**分类分布**——与战绩层同口径。
+
+```powershell
+npm run build
+npm run bench:agents                        # 全部可用执行器 × 内置套件（feature/bugfix/feature）
+npm run bench:agents -- --executor qwen     # 只校准指定执行器（可重复）
+npm run bench:agents -- --tasks bench.json  # 自定义套件：[{ "task": "...", "test": "node -e ...", "seed": [{ "path": "...", "body": "..." }] }]
+```
+
+基准跑在真实 workspace 时，结果任务自然进入该 workspace 的战绩（喂给 auto 路由）。会真实调用编码 CLI（消耗 token/网络/凭据），仅适合本地人工或手动触发；任一执行器 0 成功时非零退出（校准信号：该 agent 不可用或契约不兼容）。
 
 ## 项目配置
 

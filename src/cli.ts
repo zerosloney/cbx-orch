@@ -93,7 +93,7 @@ function parseProfileOption(argv: string[]): ExecutionProfile | undefined {
 }
 
 const USAGE = `用法：cbx run|start|batch|doctor|templates|ws|mcp|status|list|queue [pause|resume]|dispatch|serve|health|metrics|logs|files|result|export|review|continue|approve|retry|cancel|clean|forget|purge|watch|ui|tui|review-gate|stop-review-gate ...
-选项：--help 显示本帮助；--version / -v 显示版本；--profile fast|verified|governed|untrusted 设置执行档位；--routing-strategy best|cheapest|fastest 设置 auto 路由策略。`;
+选项：--help 显示本帮助；--version / -v 显示版本；--profile fast|verified|governed|untrusted 设置执行档位；--routing-strategy best|cheapest|fastest 设置 auto 路由策略；--model <name> 选择 harness 内模型（spec 需声明 modelArg）。`;
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   const [command, ...rest] = argv;
@@ -189,6 +189,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       routingStrategy:
         (parsed.option("--routing-strategy") as RoutingStrategy | undefined) ??
         template?.routingStrategy,
+      model: parsed.option("--model"),
       autoBranch: parsed.has("--auto-branch")
         ? true
         : parsed.has("--no-auto-branch")
@@ -244,6 +245,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         executor: defaults.executor,
         reviewExecutor: defaults.reviewExecutor,
         routingStrategy: defaults.routingStrategy,
+        model: defaults.model,
         adaptive: defaults.adaptive,
         trustMode: defaults.trustMode,
         profile: defaults.profile,

@@ -241,6 +241,7 @@ export async function runStage(params: {
         context.maxTurns,
         context.timeoutMs,
         { role: "stage", jobId, stageIndex },
+        context.model,
       );
     } catch (error) {
       lastError = String(error);
@@ -448,6 +449,7 @@ export async function runStage(params: {
         context.maxTurns,
         context.timeoutMs,
         { role: "review", jobId, stageIndex },
+        context.model,
       );
     } catch (error) {
       lastError = String(error);

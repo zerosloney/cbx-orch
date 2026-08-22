@@ -4,6 +4,10 @@ import { saveJson, loadJson } from "./storage.js";
 import type { JobContext } from "./types.js";
 import { isExecutionProfile } from "./profile.js";
 import { isRoutingStrategy } from "./executors/route.js";
+import {
+  isTaskCategory,
+  TASK_CATEGORIES,
+} from "./task-category.js";
 
 function contextFieldError(field: string, expectation: string): CbxError {
   return new CbxError(
@@ -137,6 +141,11 @@ export function validateJobContext(value: unknown): JobContext {
     throw contextFieldError(
       "routingStrategy",
       "缺省或为 best/cheapest/fastest",
+    );
+  if (raw.taskCategory !== undefined && !isTaskCategory(raw.taskCategory))
+    throw contextFieldError(
+      "taskCategory",
+      `缺省或为 ${TASK_CATEGORIES.join("/")}`,
     );
   for (const field of [
     "keepWorktree",

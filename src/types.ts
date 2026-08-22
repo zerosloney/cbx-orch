@@ -108,6 +108,10 @@ export interface JobContext {
   reviewExecutor?: string;
   /** auto 路由策略（best/cheapest/fastest），创建时定档；失败降级链重路由遵守同一策略 */
   routingStrategy?: string;
+  /** 任务意图分类（classifyTask 确定性归类）；战绩层按 (executor × 分类) 聚合，路由分类加权的数据源 */
+  taskCategory?: string;
+  /** 模型选择（harness 内 model）；spec 声明 modelArg 时追加 [modelArg, model] 到 spawn 参数 */
+  model?: string;
   /** 路由层审计投影（executor="auto" 时写盘）：mode/route_to/score/ranked/notes/fallbacks。 */
   routing?: Json;
   taskContract?: TaskContractType;

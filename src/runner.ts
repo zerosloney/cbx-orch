@@ -126,6 +126,7 @@ async function invokeBuiltin(
   invocationMeta?: InvocationMeta,
   redaction?: EventRedaction,
   runner?: RunnerPlugin,
+  model?: string,
 ): Promise<ProcessResult> {
   const located = await locateExecutable(spec);
   // runner 模式：命令由插件在容器内执行，host 的 PATH 探测不代表容器环境，保持兜底裸名。
@@ -140,7 +141,7 @@ async function invokeBuiltin(
     const output = configured
       ? `${spec.envVar} 指向的路径不存在：${configured}`
       : notFoundMessage(spec);
-    const args = spec.buildArgs({ prompt, permissionMode, maxTurns });
+    const args = spec.buildArgs({ prompt, permissionMode, maxTurns, model });
     appendEvent(eventsFile, { event: "process_started", command: [spec.candidates[0], ...args], cwd: workdir, at: new Date().toISOString() }, redaction);
     appendEvent(eventsFile, { event: "process_finished", returncode: -1, timedOut: false, at: new Date().toISOString() }, redaction);
     // 短路后本路径无后续写入，闭环时立即落盘（常规路径由 process_finished 后的统一 flush 负责）。
@@ -148,7 +149,7 @@ async function invokeBuiltin(
     await appendFile(outputLog, `${output}\n退出码：-1\n超时：false\n`, "utf8");
     return { code: -1, timedOut: false, output };
   }
-  const args = [...executable.slice(1), ...spec.buildArgs({ prompt, permissionMode, maxTurns })];
+  const args = [...executable.slice(1), ...spec.buildArgs({ prompt, permissionMode, maxTurns, model })];
   const command = executable[0];
   appendEvent(eventsFile, { event: "process_started", command: [command, ...args], cwd: workdir, runner: runner ? runner.manifest.name : undefined, at: new Date().toISOString() }, redaction);
   // runner 模式：命令由插件执行（容器内），host 不 spawn 子进程，无流式事件与 active.pid。
@@ -211,7 +212,7 @@ async function invokeBuiltin(
   return result;
 }
 
-export async function invokeExecutor(executor: string, workspace: string, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number, invocationMeta?: InvocationMeta): Promise<ProcessResult> {
+export async function invokeExecutor(executor: string, workspace: string, directory: string, workdir: string, prompt: string, permissionMode: string, maxTurns: number, timeoutMs: number, invocationMeta?: InvocationMeta, model?: string): Promise<ProcessResult> {
   const config = await loadConfig(workspace);
   // runner 插件：untrusted 任务的容器执行边界（executor/test/review 命令都经它）。
   // 解析失败（路径穿越 / manifest 无效）抛 RunnerPluginError，任务以明确错误失败。
@@ -260,6 +261,7 @@ export async function invokeExecutor(executor: string, workspace: string, direct
       invocationMeta,
       redaction,
       runner,
+      model,
     );
   const identity = await inspectExecutorPlugin(
     executor,

@@ -37,6 +37,7 @@
     "check": "npm run lint && npm run format:check && npm test",
     "coverage": "npm run build && node scripts/check-coverage.mjs",
     "smoke:executors": "node scripts/executor-smoke.mjs",
+    "bench:agents": "node scripts/agent-bench.mjs",
     "audit": "npm audit --audit-level=high",
     "sbom": "npm sbom --omit=dev --sbom-format=cyclonedx > sbom.cdx.json",
     "prepublishOnly": "npm run lint && tsc -p tsconfig.json"

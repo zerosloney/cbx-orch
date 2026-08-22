@@ -1,4 +1,5 @@
 import { discoverAgents, type AgentProbe } from "../agent-registry.js";
+import { classifyTask, type TaskCategory } from "../task-category.js";
 import {
   collectExecutorStats,
   smoothedSuccessRate,
@@ -103,15 +104,32 @@ function rank(
   return ranked.sort((a, b) => b.score - a.score);
 }
 
-/** 战绩决胜比较：平滑成功率降序 → 均值 token 升序 → 均值时长升序（null 视为未知排最后）。
+/** 分类感知成功率：优先 (executor × 任务分类) 的平滑成功率，无分类样本回退全局，
+ *  无历史回退中性先验。agent 可能「修 bug 很行、做新功能不行」——分类样本比全局
+ *  更能反映本次任务的契合度；分类口径与全局同为 Laplace 平滑。 */
+function categoryAwareRate(
+  name: string,
+  category: TaskCategory,
+  stats: ReadonlyMap<string, ExecutorStats>,
+): { rate: number; basis: "category" | "global" | "prior" } {
+  const record = stats.get(name);
+  const bucket = record?.categories?.[category];
+  if (bucket)
+    return { rate: (bucket.done + 1) / (bucket.runs + 2), basis: "category" };
+  if (record) return { rate: smoothedSuccessRate(record), basis: "global" };
+  return { rate: 0.5, basis: "prior" };
+}
+
+/** 战绩决胜比较：分类感知成功率降序 → 均值 token 升序 → 均值时长升序（null 视为未知排最后）。
  *  只在同能力分内比较，返回负数表示 a 优先。 */
 function compareByStats(
   a: RouteRank,
   b: RouteRank,
   stats: ReadonlyMap<string, ExecutorStats>,
+  category: TaskCategory,
 ): number {
-  const rateA = smoothedSuccessRate(stats.get(a.name));
-  const rateB = smoothedSuccessRate(stats.get(b.name));
+  const rateA = categoryAwareRate(a.name, category, stats).rate;
+  const rateB = categoryAwareRate(b.name, category, stats).rate;
   if (rateA !== rateB) return rateB - rateA;
   const tokensA = stats.get(a.name)?.avgTokens ?? Number.POSITIVE_INFINITY;
   const tokensB = stats.get(b.name)?.avgTokens ?? Number.POSITIVE_INFINITY;
@@ -124,6 +142,7 @@ function compareByStats(
 function describeStats(
   name: string,
   stats: ReadonlyMap<string, ExecutorStats>,
+  category?: TaskCategory,
 ): string {
   const entry = stats.get(name);
   if (!entry) return `${name} 无历史`;
@@ -131,7 +150,11 @@ function describeStats(
     entry.avgDurationMs != null
       ? `，均 ${(entry.avgDurationMs / 1000).toFixed(0)}s`
       : "";
-  return `${name} ${entry.done}/${entry.runs} 成（平滑 ${smoothedSuccessRate(entry).toFixed(2)}，均 token ${entry.avgTokens ?? "?"}${duration}）`;
+  const scoped =
+    category && entry.categories?.[category]
+      ? `，${category} ${entry.categories[category].done}/${entry.categories[category].runs}`
+      : "";
+  return `${name} ${entry.done}/${entry.runs} 成（平滑 ${smoothedSuccessRate(entry).toFixed(2)}${scoped}，均 token ${entry.avgTokens ?? "?"}${duration}）`;
 }
 
 function decide(
@@ -141,6 +164,7 @@ function decide(
   stats: ReadonlyMap<string, ExecutorStats>,
   strategy: RoutingStrategy,
 ): RouteDecision | undefined {
+  const category = classifyTask(task);
   const ranked = rank(task, probes, exclude).map((entry) => {
     const record = stats.get(entry.name);
     return record
@@ -167,13 +191,13 @@ function decide(
   }
   // 策略窗口 = 最高能力分层（能力契合不可被成本/时延偏好交换；策略只在同层内选优）。
   const tier = ranked.filter((entry) => entry.score === top.score);
-  const winner = pickByStrategy(tier, stats, strategy, notes);
-  notes.push(`命中能力：${top.hits.join(",")}；按能力词频匹配得分最高。`);
+  const winner = pickByStrategy(tier, stats, strategy, notes, category);
+  notes.push(`命中能力：${top.hits.join(",")}；按能力词频匹配得分最高。任务分类：${category}。`);
   // 决胜审计：战绩参与同层选择时说明依据（全员无历史走稳定性顺序，不产生噪音 note）。
   if (tier.length > 1 && tier.some((entry) => stats.has(entry.name))) {
     const losers = tier.filter((entry) => entry !== winner);
     notes.push(
-      `能力同层决胜（${tier.length} 个并列，策略 ${strategy}）：${describeStats(winner.name, stats)} 优先于 ${losers.map((entry) => describeStats(entry.name, stats)).join("、")}。`,
+      `能力同层决胜（${tier.length} 个并列，策略 ${strategy}，分类 ${category}）：${describeStats(winner.name, stats, category)} 优先于 ${losers.map((entry) => describeStats(entry.name, stats, category)).join("、")}。`,
     );
   }
   return { executor: winner.name, label: winner.label, score: winner.score, ranked, notes };
@@ -192,10 +216,11 @@ function pickByStrategy(
   stats: ReadonlyMap<string, ExecutorStats>,
   strategy: RoutingStrategy,
   notes: string[],
+  category: TaskCategory,
 ): RouteRank {
   const pickByBest = () =>
     tier.reduce((best, entry) =>
-      compareByStats(entry, best, stats) < 0 ? entry : best,
+      compareByStats(entry, best, stats, category) < 0 ? entry : best,
     );
   if (strategy === "best") return pickByBest();
   const metricLabel =

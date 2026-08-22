@@ -32,6 +32,7 @@ import { DEFAULT_TOKEN_BUDGET, type ContextBudget } from "./context-pack.js";
 import { APP_VERSION } from "./version.js";
 import type { JobContext, JobState, TaskContract, Json } from "./types.js";
 import { ROUTE_AUTO, parseRoutingStrategy, routeStageExecutor } from "./executors/route.js";
+import { classifyTask } from "./task-category.js";
 
 /** 规范化 .cbx.json 的 context.tokenBudget；缺失角色用默认值填充。 */
 function normalizeContextBudget(raw: unknown): ContextBudget {
@@ -72,6 +73,8 @@ export async function createJob(options: {
   reviewExecutor?: string;
   /** auto 路由策略（best/cheapest/fastest）；未传时回退 .cbx.json 的 routingStrategy，缺省 best */
   routingStrategy?: string;
+  /** 模型选择；未传时回退 .cbx.json 的 model。仅在 spec 声明 modelArg 时生效 */
+  model?: string;
   trustMode?: "trusted" | "untrusted";
   profile?: ExecutionProfile;
   contextSnapshot?: string;
@@ -248,6 +251,8 @@ export async function createJob(options: {
     executor: executor ?? "codebuddy",
     reviewExecutor,
     routingStrategy,
+    taskCategory: classifyTask(options.task),
+    model: options.model ?? runtimeConfig.model,
     routing: Object.keys(routing).length ? routing : undefined,
     adaptive: adaptive.enabled
       ? {

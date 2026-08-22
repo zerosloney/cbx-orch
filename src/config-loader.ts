@@ -37,6 +37,8 @@ export interface RuntimeConfig {
   reviewExecutor?: string;
   /** auto 路由策略：best（战绩决胜，缺省）/ cheapest（同层按均值 token）/ fastest（同层按任务墙钟） */
   routingStrategy?: RoutingStrategy;
+  /** 模型选择（任务级可覆盖）；仅在 agent spec 声明 modelArg 时追加到 CLI 参数 */
+  model?: string;
   templates?: Record<string, TaskTemplate>;
   execution?: {
     trustMode?: "trusted" | "untrusted";
@@ -157,6 +159,7 @@ export async function loadRuntimeConfig(
     "executor",
     "reviewExecutor",
     "routingStrategy",
+    "model",
     "execution",
     "plugins",
     "notifications",
@@ -187,6 +190,7 @@ export async function loadRuntimeConfig(
     !isRoutingStrategy(config.routingStrategy)
   )
     throw new Error("routingStrategy 必须是 best、cheapest 或 fastest。");
+  optionalString(config.model, "model");
   optionalBoolean(config.dependencyGuard, "dependencyGuard");
   if (config.approval !== undefined) {
     const value = object(config.approval, "approval");

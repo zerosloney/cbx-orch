@@ -227,6 +227,33 @@ test("probeAgents flags env override pointing to a nonexistent path", async () =
   }
 });
 
+test("validateAgentSpec accepts modelArg and buildArgsFromSpec renders model pair", () => {
+  const spec = validateAgentSpec(
+    { ...VALID_SPEC, modelArg: "--model" },
+    "modelagent.json",
+  );
+  assert.equal(spec.modelArg, "--model");
+  // 指定 model → 追加 [modelArg, model]；未指定 → 不追加
+  assert.deepEqual(
+    buildArgsFromSpec(spec, { prompt: "hi", permissionMode: "default", maxTurns: 5, model: "gpt-x" }),
+    ["-p", "hi", "--output-format", "json", "--max-turns", "5", "--model", "gpt-x"],
+  );
+  assert.deepEqual(
+    buildArgsFromSpec(spec, { prompt: "hi", permissionMode: "default", maxTurns: 5 }),
+    ["-p", "hi", "--output-format", "json", "--max-turns", "5"],
+  );
+  // spec 未声明 modelArg 时即使传了 model 也不追加（内置 CLI 未验证 flag 前不声明）
+  const noModelArg = validateAgentSpec(VALID_SPEC, "plain.json");
+  assert.deepEqual(
+    buildArgsFromSpec(noModelArg, { prompt: "hi", permissionMode: "default", maxTurns: 5, model: "gpt-x" }),
+    ["-p", "hi", "--output-format", "json", "--max-turns", "5"],
+  );
+  assert.throws(
+    () => validateAgentSpec({ ...VALID_SPEC, modelArg: 5 }, "bad.json"),
+    /modelArg 必须是字符串/,
+  );
+});
+
 test("file-registered executor executes a full job end to end", async () => {
   const { workspace, script } = await setupFake();
   // 把测试用的 fake 执行器注册为文件 spec，证明新链路（spec 发现 → runner 接线 → spawn）可用。

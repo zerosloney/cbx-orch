@@ -18,6 +18,9 @@ export interface ExecutorStats {
   /** 任务墙钟均值（终态 updatedAt - createdAt，含测试/审查/重试的整任务时长）；
    *  归因到主执行 executor 的时延代理，fastest 策略选优依据。无有效样本为 null。 */
   avgDurationMs: number | null;
+  /** 分类战绩（context.taskCategory × 终态）：agent 可能「修 bug 很行、做新功能不行」，
+   *  路由分类加权的数据源。旧任务无分类时不进该桶（只进全局）。 */
+  categories?: Record<string, { runs: number; done: number }>;
   /** 最近一次计入战绩的任务 updatedAt */
   lastUsedAt: string | null;
 }
@@ -47,6 +50,7 @@ interface StatsAccumulator {
   tokensCount: number;
   durationSum: number;
   durationCount: number;
+  categories: Map<string, { runs: number; done: number }>;
   lastUsedAt: string | null;
 }
 
@@ -105,9 +109,18 @@ export async function collectExecutorStats(
       continue;
     const record =
       acc.get(executor) ??
-      ({ runs: 0, done: 0, tokensSum: 0, tokensCount: 0, durationSum: 0, durationCount: 0, lastUsedAt: null } as StatsAccumulator);
+      ({ runs: 0, done: 0, tokensSum: 0, tokensCount: 0, durationSum: 0, durationCount: 0, categories: new Map(), lastUsedAt: null } as StatsAccumulator);
     record.runs += 1;
     if (state.status === "done") record.done += 1;
+    if (typeof context.taskCategory === "string" && context.taskCategory) {
+      const bucket = record.categories.get(context.taskCategory) ?? {
+        runs: 0,
+        done: 0,
+      };
+      bucket.runs += 1;
+      if (state.status === "done") bucket.done += 1;
+      record.categories.set(context.taskCategory, bucket);
+    }
     if (
       typeof state.tokenUsage === "number" &&
       Number.isFinite(state.tokenUsage) &&
@@ -140,6 +153,9 @@ export async function collectExecutorStats(
       avgDurationMs: record.durationCount
         ? Math.round(record.durationSum / record.durationCount)
         : null,
+      categories: record.categories.size
+        ? Object.fromEntries(record.categories)
+        : undefined,
       lastUsedAt: record.lastUsedAt,
     });
   }
